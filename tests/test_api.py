@@ -227,13 +227,14 @@ async def test_rate_limit_blocks_followup_requests(api_server, tokens):
     assert api_server["refreshes"] == 0
 
 
-@pytest.mark.parametrize("offline", [False, True])
+@pytest.mark.parametrize("offline", [False, True, "recover"])
 @pytest.mark.parametrize("slow_open", [False, True])
 async def test_single_signalr_connection_routes_multiple_appliances(
     hass, aiohttp_server, monkeypatch, socket_enabled, tokens, offline, slow_open
 ):
     sockets = []
     opened = []
+    recovered = asyncio.Event()
     release_open = asyncio.Event()
     first_update = asyncio.Event()
     heartbeat = asyncio.Event()
@@ -288,7 +289,11 @@ async def test_single_signalr_connection_routes_multiple_appliances(
         opened.append(device_id)
         if slow_open and device_id == "test-oven":
             await release_open.wait()
-        if offline and device_id == "test-oven":
+        if (
+            offline
+            and device_id == "test-oven"
+            and (offline != "recover" or opened.count(device_id) == 1)
+        ):
             return web.json_response({}, status=503)
         event = notification(
             {"appliance_model": "ANY-MODEL", "service_required": False}, full=True, device=device_id
@@ -309,6 +314,8 @@ async def test_single_signalr_connection_routes_multiple_appliances(
     monkeypatch.setattr(api, "API_BASE", origin)
     monkeypatch.setattr(api, "SIGNALR_ORIGIN", origin)
     monkeypatch.setattr(api, "PING_INTERVAL", 0.01)
+    monkeypatch.setattr(api, "RECONNECT_DELAY", 0.2)
+    monkeypatch.setattr("random.uniform", lambda *_: 0)
     received = {}
     session = async_get_clientsession(hass)
     original_headers = dict(session.headers)
@@ -319,7 +326,9 @@ async def test_single_signalr_connection_routes_multiple_appliances(
             async for device_id, update in stream:
                 received[device_id] = update
                 first_update.set()
-                if len(received) == 2:
+                if device_id == "test-oven" and isinstance(update, api.StateUpdate):
+                    recovered.set()
+                if len(received) == 2 and (offline != "recover" or recovered.is_set()):
                     break
         finally:
             await stream.aclose()
@@ -338,9 +347,9 @@ async def test_single_signalr_connection_routes_multiple_appliances(
         await asyncio.gather(collector, return_exceptions=True)
     assert dict(session.headers) == original_headers
     assert len(sockets) == 1
-    assert opened == ["test-fridge", "test-oven"]
+    assert opened == ["test-fridge", "test-oven"] + (["test-oven"] if offline == "recover" else [])
     assert isinstance(received["test-fridge"], api.StateUpdate)
-    assert isinstance(received["test-oven"], api.ApiError if offline else api.StateUpdate)
+    assert isinstance(received["test-oven"], api.ApiError if offline is True else api.StateUpdate)
 
 
 @pytest.mark.parametrize("error", [None, InvalidAuth("Expired"), api.RateLimited(300)])

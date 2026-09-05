@@ -1,10 +1,9 @@
-"""Push updates with occasional reconciliation and bounded reconnect attempts."""
+"""Push updates with bounded reconnect attempts."""
 
 import asyncio
 import logging
 import random
 import time
-from datetime import timedelta
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
@@ -18,7 +17,14 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .api import ApiError, RateLimited, StateUpdate, SubZeroClient
 from .auth import InvalidAuth
-from .const import CONTROL_CONFIRM_TIMEOUT, DOMAIN, STATE_KEYS, selected_devices
+from .const import (
+    CONTROL_CONFIRM_TIMEOUT,
+    DOMAIN,
+    MAX_RECONNECT_DELAY,
+    RECONNECT_DELAY,
+    STATE_KEYS,
+    selected_devices,
+)
 from .controls import validate_control_properties
 
 _LOGGER = logging.getLogger(__name__)
@@ -38,7 +44,6 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             _LOGGER,
             config_entry=entry,
             name=DOMAIN,
-            update_interval=timedelta(minutes=30),
         )
         self.client = client
         self.entry = entry
@@ -104,8 +109,6 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
     async def _async_update_data(self) -> dict:
         try:
             data = await self.client.state(self.device_id)
-            if not self.last_update_success:
-                await self.client.open_channel(self.device_id)
         except InvalidAuth as error:
             raise ConfigEntryAuthFailed(str(error)) from error
         except RateLimited as error:
@@ -157,7 +160,7 @@ class SubZeroAccount:
             coordinator.async_set_update_error(error)
 
     async def listen(self) -> None:
-        backoff = 30
+        backoff = RECONNECT_DELAY
         while True:
             started = time.monotonic()
             delay = backoff
@@ -169,7 +172,7 @@ class SubZeroAccount:
                     else:
                         coordinator.apply_update(update)
                     if time.monotonic() - started >= 120:
-                        backoff = 30
+                        backoff = RECONNECT_DELAY
                 raise ApiError("Sub-Zero's notification stream ended.")
             except InvalidAuth as error:
                 self.set_error(error)
@@ -182,4 +185,4 @@ class SubZeroAccount:
                 self.set_error(error)
                 delay = backoff
             await asyncio.sleep(delay + random.uniform(0, 5))
-            backoff = min(backoff * 2, 900)
+            backoff = min(backoff * 2, MAX_RECONNECT_DELAY)

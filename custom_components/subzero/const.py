@@ -2,6 +2,8 @@
 
 DOMAIN = "subzero"
 CONTROL_CONFIRM_TIMEOUT = 5
+RECONNECT_DELAY = 30
+MAX_RECONNECT_DELAY = 900
 
 SETPOINT_KEYS = {"ref_set_temp", "frz_set_temp", "crisp_set_temp"}
 FRIDGE_MODE_KEYS = ("sabbath_on", "high_use_on", "short_vacation_on", "long_vacation_on")

@@ -99,7 +99,11 @@ Controls are available for recognized Sub-Zero fridge settings. Wolf and Cove en
 
 ## Updates and account access
 
-Selected appliances share account tokens and one SignalR notification connection. Each appliance gets a full status read at setup and after 30 minutes without a changed state update. The integration does not poll appliance status every minute. Connection heartbeats keep the notification socket alive, including while another appliance is slow to connect; reconnect attempts back off after failures. API HTTP 429 responses honor `Retry-After` where provided.
+Selected appliances share account tokens and one SignalR notification connection. Each appliance gets a full status read at setup, then receives push updates. An idle fridge does not trigger periodic status requests.
+
+Connection heartbeats keep the notification socket alive, including while another appliance is slow to connect. A disconnected socket reconnects, and failed appliance channels retry independently, with increasing delays. Reopening an appliance channel supplies a fresh push snapshot. API HTTP 429 responses honor `Retry-After` where provided.
+
+A healthy cloud socket does not independently verify an idle appliance's connectivity. Without periodic status reads, an appliance that silently stops reporting may go undetected until a notification or a failed control request reveals it.
 
 Control changes are confirmed from appliance status. When a push update does not arrive, the integration makes one status request to check the setting. Changing a mode sends only the settings that differ, one at a time, and stops if a change fails.
 

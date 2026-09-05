@@ -1,6 +1,7 @@
 """Load real HA platforms and exercise entity discovery and push lifecycle."""
 
 import asyncio
+from datetime import timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -8,8 +9,9 @@ from homeassistant.config_entries import ConfigEntryState
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
+from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_system import US_CUSTOMARY_SYSTEM
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant_custom_component.common import MockConfigEntry, async_fire_time_changed
 
 from custom_components.subzero.api import ApiError, Appliance, RateLimited, StateUpdate, token_state
 from custom_components.subzero.auth import InvalidAuth
@@ -93,11 +95,21 @@ async def test_only_reported_entities_are_created_and_private_fields_discarded(h
     coordinator = entry.runtime_data.coordinators["test-fridge"]
     assert "ap_ssid" not in coordinator.data
     assert "appliance_serial" not in coordinator.data
-    assert coordinator.update_interval.total_seconds() == 1800
+    assert coordinator.update_interval is None
     assert entry.version == 2
     assert entry.unique_id == "test-fridge"
     assert entry.data["devices"] == {"test-fridge": {"name": "Kitchen", "temperature_unit": "F"}}
     client.state.assert_awaited_once()
+
+
+async def test_idle_push_connection_does_not_request_periodic_status(hass, loaded):
+    _, client, _, _, _ = loaded
+    for hours in (1, 12, 24):
+        async_fire_time_changed(hass, dt_util.utcnow() + timedelta(hours=hours))
+        await hass.async_block_till_done()
+    client.state.assert_awaited_once()
+    client.open_channel.assert_not_awaited()
+    assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "38"
 
 
 async def test_push_merges_updates_and_discovers_new_capabilities(hass, loaded):
@@ -156,6 +168,30 @@ async def test_stream_failure_marks_entities_unavailable_without_immediate_retry
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "unavailable"
     client.state.assert_awaited_once()
     await hass.config_entries.async_unload(entry.entry_id)
+
+
+@pytest.mark.parametrize(
+    ("error", "delay"), [(ApiError("Disconnected"), 30), (RateLimited(300), 300)]
+)
+async def test_reconnect_waits_then_recovers_from_push_without_polling(
+    hass, loaded, monkeypatch, error, delay
+):
+    _, client, updates, _, _ = loaded
+    monkeypatch.setattr("custom_components.subzero.coordinator.random.uniform", lambda *_: 0)
+    await updates.put(error)
+    await hass.async_block_till_done()
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=delay - 1))
+    await hass.async_block_till_done()
+    assert client.watched == [["test-fridge"]]
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=delay + 1))
+    await hass.async_block_till_done()
+    assert client.watched == [["test-fridge"], ["test-fridge"]]
+    await updates.put(
+        StateUpdate({"appliance_model": "ANOTHER-MODEL", "ref_set_temp": 39}, full=True)
+    )
+    await hass.async_block_till_done()
+    assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "39"
+    client.state.assert_awaited_once()
 
 
 async def test_expired_login_starts_reauthentication(hass, loaded):

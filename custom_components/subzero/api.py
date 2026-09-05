@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import math
+import random
 import time
 import uuid
 from collections import deque
@@ -18,7 +19,12 @@ from yarl import URL
 
 from .app_config import APP_HEADERS, AUTH_HEADERS
 from .auth import CLIENT_ID, SCOPES, TOKEN_URL, InvalidAuth
-from .const import WRITABLE_BOOLEAN_KEYS, WRITABLE_INTEGER_KEYS
+from .const import (
+    MAX_RECONNECT_DELAY,
+    RECONNECT_DELAY,
+    WRITABLE_BOOLEAN_KEYS,
+    WRITABLE_INTEGER_KEYS,
+)
 
 API_BASE = "https://prod.iot.subzero.com"
 SIGNALR_ORIGIN = "https://sznacasigprod.service.signalr.net"
@@ -332,15 +338,26 @@ class SubZeroClient:
                 if _object(handshake) != {}:
                     raise ApiError("Sub-Zero rejected the notification handshake.")
                 errors: deque[tuple[str, ApiError]] = deque()
+                pending_channels = set(device_ids)
 
                 async def open_channels() -> None:
-                    for device_id in device_ids:
-                        try:
-                            await self.open_channel(device_id)
-                        except RateLimited:
-                            raise
-                        except ApiError as error:
-                            errors.append((device_id, error))
+                    backoff = RECONNECT_DELAY
+                    while pending_channels:
+                        for device_id in device_ids:
+                            if device_id not in pending_channels:
+                                continue
+                            try:
+                                await self.open_channel(device_id)
+                            except RateLimited:
+                                raise
+                            except ApiError as error:
+                                if device_id in pending_channels:
+                                    errors.append((device_id, error))
+                            else:
+                                pending_channels.discard(device_id)
+                        if pending_channels:
+                            await asyncio.sleep(backoff + random.uniform(0, 5))
+                            backoff = min(backoff * 2, MAX_RECONNECT_DELAY)
 
                 opening = asyncio.create_task(open_channels())
                 receiving = asyncio.create_task(websocket.receive())
@@ -363,6 +380,8 @@ class SubZeroClient:
                                     event, device_id, self.tokens["user_id"]
                                 )
                                 if update:
+                                    if update.full:
+                                        pending_channels.discard(device_id)
                                     yield device_id, update
                                     break
                         now = time.monotonic()
