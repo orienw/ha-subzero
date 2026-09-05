@@ -1,8 +1,8 @@
-# Sub-Zero for Home Assistant
+# Sub-Zero and Wolf for Home Assistant
 
 <img src="custom_components/subzero/brand/icon.png" alt="Sub-Zero integration icon" width="80">
 
-A custom integration for connected Sub-Zero appliances, installed through HACS. Sign in with your Sub-Zero Group Owner email and password directly in Home Assistant.
+A custom integration for connected Sub-Zero and Wolf appliances, installed through HACS. Sign in with your Sub-Zero Group Owner email and password directly in Home Assistant.
 
 The integration reads appliance status over Sub-Zero's cloud service using the appliance's existing Wi-Fi connection. Bluetooth is not required.
 
@@ -30,21 +30,28 @@ Entities are created only for recognized properties reported by the appliance. N
 
 | Type | Available properties |
 | --- | --- |
-| Temperature setpoints | Refrigerator, freezer, crisper |
+| Temperature setpoints | Refrigerator, freezer, crisper, oven, oven probe |
+| Measured temperatures | Oven and oven probe |
 | Filters | Air and water filter life remaining |
-| Doors | Refrigerator and freezer door open |
+| Doors | Refrigerator, freezer, and oven door open |
 | Ice-maker settings | Enabled, max ice, night ice |
 | Operating modes | Sabbath, high use, short vacation, long vacation |
 | Device status | Service required, power, air purification |
+| Oven status | Cooking, preheated, light, remote ready, probe in use, probe target reached, Gourmet mode |
+| Oven timers | Cooking timer complete, both kitchen timers active or complete |
 | Diagnostic | Wi-Fi signal strength |
 
 All reported, recognized properties are enabled by default. Ice-maker settings and operating modes report their current on/off states. Wi-Fi signal strength appears under Diagnostics.
 
-Temperature entities show **configured setpoints**, not measured interior temperatures. Setpoints have been verified with an appliance configured in Fahrenheit in the Sub-Zero app. For other app temperature settings, this release omits temperature entities until their units can be verified; other entities remain available. Home Assistant can display verified Fahrenheit readings in your preferred temperature unit.
+Refrigerator temperatures are **configured setpoints**. Ovens also report measured oven and probe temperatures. Oven temperature fields that report zero while idle show as unknown; probe readings also show as unknown when the probe is not in use.
+
+Temperature entities require an appliance configured in Fahrenheit in the Sub-Zero app. For other app temperature settings, this release omits temperature entities until their units can be verified; other entities remain available. Home Assistant can display Fahrenheit readings in your preferred temperature unit.
+
+Oven cooking mode names and timer countdowns are not yet mapped.
 
 ## Compatibility
 
-**Tested with CL4850UFDID. There is no model allowlist.** Other models can be added if the cloud service returns their status. Their available entities depend on which recognized properties they report. Adding an appliance does not imply every feature of that model is supported.
+**Cloud status and push snapshots tested with Sub-Zero CL4850UFDID and Wolf SO3050PMSP. There is no model allowlist.** Other models can be added if the cloud service returns their status. Their available entities depend on which recognized properties they report. Adding an appliance does not imply every feature of that model is supported.
 
 This integration provides status monitoring. Appliance controls and local network access are not implemented. Accounts requiring additional verification or an external sign-in provider are not supported yet.
 

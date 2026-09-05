@@ -56,6 +56,39 @@ DESCRIPTIONS = (
         name="Long vacation mode",
         icon="mdi:bag-suitcase-outline",
     ),
+    BinarySensorEntityDescription(
+        key="cav_door_ajar", name="Oven door", device_class=BinarySensorDeviceClass.DOOR
+    ),
+    BinarySensorEntityDescription(key="cav_unit_on", name="Cooking", icon="mdi:stove"),
+    BinarySensorEntityDescription(
+        key="cav_at_set_temp", name="Preheated", icon="mdi:thermometer-check"
+    ),
+    BinarySensorEntityDescription(key="cav_light_on", name="Oven light", icon="mdi:lightbulb"),
+    BinarySensorEntityDescription(key="cav_remote_ready", name="Remote ready", icon="mdi:remote"),
+    BinarySensorEntityDescription(key="cav_probe_on", name="Probe in use", icon="mdi:thermometer"),
+    BinarySensorEntityDescription(
+        key="cav_probe_at_set_temp", name="Probe target reached", icon="mdi:thermometer-check"
+    ),
+    BinarySensorEntityDescription(
+        key="cav_gourmet_mode_on", name="Gourmet mode", icon="mdi:chef-hat"
+    ),
+    BinarySensorEntityDescription(
+        key="cav_cook_timer_complete", name="Cooking timer complete", icon="mdi:timer-check-outline"
+    ),
+    BinarySensorEntityDescription(
+        key="kitchen_timer_active", name="Kitchen timer active", icon="mdi:timer-outline"
+    ),
+    BinarySensorEntityDescription(
+        key="kitchen_timer_complete", name="Kitchen timer complete", icon="mdi:timer-check-outline"
+    ),
+    BinarySensorEntityDescription(
+        key="kitchen_timer2_active", name="Kitchen timer 2 active", icon="mdi:timer-outline"
+    ),
+    BinarySensorEntityDescription(
+        key="kitchen_timer2_complete",
+        name="Kitchen timer 2 complete",
+        icon="mdi:timer-check-outline",
+    ),
 )
 
 

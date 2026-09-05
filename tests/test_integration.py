@@ -319,3 +319,148 @@ async def test_upgrade_enables_old_defaults_and_preserves_user_disabled_entities
         ]
         assert all(entity.disabled_by is None for entity in modes)
         await hass.config_entries.async_unload(entry.entry_id)
+
+
+@pytest.fixture
+async def oven_loaded(hass, loaded):
+    entry, client, updates, _, _ = loaded
+    fridge = client.state.return_value
+    oven = {
+        "appliance_model": "SO3050PMSP",
+        "version": {"fw": "2.27"},
+        "cav_temp": 0,
+        "cav_set_temp": 0,
+        "cav_probe_temp": 0,
+        "cav_probe_set_temp": 0,
+        "cav_door_ajar": False,
+        "cav_unit_on": False,
+        "cav_at_set_temp": False,
+        "cav_light_on": False,
+        "cav_remote_ready": False,
+        "cav_probe_on": False,
+        "cav_probe_at_set_temp": False,
+        "cav_gourmet_mode_on": False,
+        "cav_cook_timer_complete": False,
+        "kitchen_timer_active": False,
+        "kitchen_timer_complete": False,
+        "kitchen_timer2_active": False,
+        "kitchen_timer2_complete": False,
+        "sabbath_on": False,
+        "service_required": False,
+        "ap_rssi": -60,
+        "ap_ssid": "private-network",
+        "remote_svc_reg_token": "private-token",
+        "cav_unrecognized_property": True,
+    }
+    client.state.side_effect = lambda device_id: oven if device_id == "test-oven" else fridge
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    await hass.config_entries.options.async_configure(
+        result["flow_id"], {"device_ids": ["test-fridge", "test-oven"]}
+    )
+    await hass.async_block_till_done()
+    return entry, client, updates
+
+
+async def test_oven_entities_use_reported_properties_and_correct_manufacturer(hass, oven_loaded):
+    entry, _, _ = oven_loaded
+    device = dr.async_get(hass).async_get_device_by_identifier(
+        (DOMAIN, "test-oven"), entry.entry_id
+    )
+    assert device.manufacturer == "Wolf"
+    assert device.model == "SO3050PMSP"
+    entities = er.async_entries_for_device(er.async_get(hass), device.id)
+    assert len(entities) == 20
+    assert all(entity.disabled_by is None for entity in entities)
+    assert hass.states.get("binary_sensor.wall_oven_oven_light").state == "off"
+    assert hass.states.get("binary_sensor.wall_oven_cooking").state == "off"
+    assert hass.states.get("binary_sensor.wall_oven_kitchen_timer_2_active").state == "off"
+    assert hass.states.get("sensor.wall_oven_oven_temperature").state == "unknown"
+    assert hass.states.get("sensor.wall_oven_oven_setpoint").state == "unknown"
+    assert hass.states.get("sensor.wall_oven_probe_temperature").state == "unknown"
+    assert hass.states.get("sensor.wall_oven_probe_setpoint").state == "unknown"
+    assert hass.states.get("sensor.wall_oven_refrigerator_setpoint") is None
+    data = entry.runtime_data.coordinators["test-oven"].data
+    assert "ap_ssid" not in data
+    assert "remote_svc_reg_token" not in data
+    assert "cav_unrecognized_property" not in data
+
+
+async def test_oven_push_updates_and_idle_readings_do_not_change_fridge(hass, oven_loaded):
+    _, client, updates = oven_loaded
+    reads = client.state.await_count
+    await updates.put(
+        (
+            "test-oven",
+            StateUpdate(
+                {
+                    "cav_unit_on": True,
+                    "cav_temp": 320,
+                    "cav_set_temp": 350,
+                    "cav_light_on": True,
+                    "cav_door_ajar": True,
+                    "cav_probe_on": True,
+                    "cav_probe_temp": 125,
+                    "cav_probe_set_temp": 145,
+                    "kitchen_timer_active": True,
+                },
+                full=False,
+            ),
+        )
+    )
+    await hass.async_block_till_done()
+    temperature = hass.states.get("sensor.wall_oven_oven_temperature")
+    assert temperature.state == "320"
+    assert temperature.attributes["unit_of_measurement"] == "°F"
+    assert temperature.attributes["state_class"] == "measurement"
+    assert hass.states.get("sensor.wall_oven_oven_setpoint").state == "350"
+    assert hass.states.get("sensor.wall_oven_probe_temperature").state == "125"
+    assert hass.states.get("sensor.wall_oven_probe_setpoint").state == "145"
+    assert hass.states.get("binary_sensor.wall_oven_cooking").state == "on"
+    assert hass.states.get("binary_sensor.wall_oven_oven_light").state == "on"
+    assert hass.states.get("binary_sensor.wall_oven_oven_door").state == "on"
+    assert hass.states.get("binary_sensor.wall_oven_kitchen_timer_active").state == "on"
+    assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "38"
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
+    await updates.put(
+        (
+            "test-oven",
+            StateUpdate({"cav_probe_on": False, "cav_temp": 0, "cav_set_temp": 0}, full=False),
+        )
+    )
+    await hass.async_block_till_done()
+    assert hass.states.get("sensor.wall_oven_oven_temperature").state == "unknown"
+    assert hass.states.get("sensor.wall_oven_oven_setpoint").state == "unknown"
+    assert hass.states.get("sensor.wall_oven_probe_temperature").state == "unknown"
+    assert hass.states.get("sensor.wall_oven_probe_setpoint").state == "unknown"
+    assert client.state.await_count == reads
+
+
+async def test_oven_discovery_recovers_after_an_unavailable_snapshot(hass, oven_loaded):
+    entry, _, updates = oven_loaded
+    registry = er.async_get(hass)
+    original = registry.async_get("binary_sensor.wall_oven_oven_light")
+    await updates.put(("test-oven", ApiError("Temporarily unavailable")))
+    await hass.async_block_till_done()
+    assert hass.states.get(original.entity_id).state == "unavailable"
+    await updates.put(("test-oven", StateUpdate({"cav_light_on": True}, full=False)))
+    await hass.async_block_till_done()
+    assert hass.states.get(original.entity_id).state == "unavailable"
+    await updates.put(
+        (
+            "test-oven",
+            StateUpdate({"appliance_model": "SO3050PMSP", "cav_light_on": True}, full=True),
+        )
+    )
+    await hass.async_block_till_done()
+    assert hass.states.get(original.entity_id).state == "on"
+    assert registry.async_get(original.entity_id).id == original.id
+    assert entry.runtime_data.coordinators["test-oven"].last_update_success
+    assert hass.states.get("sensor.wall_oven_oven_temperature").state == "unavailable"
+
+
+@pytest.mark.parametrize("value", [True, "350", None])
+async def test_oven_temperature_rejects_invalid_readings(hass, oven_loaded, value):
+    _, _, updates = oven_loaded
+    await updates.put(("test-oven", StateUpdate({"cav_temp": value}, full=False)))
+    await hass.async_block_till_done()
+    assert hass.states.get("sensor.wall_oven_oven_temperature").state in {"unknown", "unavailable"}

@@ -1,4 +1,4 @@
-"""Device identity and availability shared by the fridge's entities."""
+"""Device identity and availability shared by an appliance's entities."""
 
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import EntityDescription
@@ -19,7 +19,9 @@ class SubZeroEntity(CoordinatorEntity[SubZeroCoordinator]):
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, coordinator.device_id)},
             name=coordinator.device["name"],
-            manufacturer="Sub-Zero",
+            manufacturer=(
+                "Wolf" if any(key.startswith("cav_") for key in coordinator.data) else "Sub-Zero"
+            ),
             model=coordinator.data.get("appliance_model"),
             sw_version=version.get("fw") if isinstance(version, dict) else None,
         )

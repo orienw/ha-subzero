@@ -1,4 +1,4 @@
-"""Temperature setpoints, filter life and Wi-Fi signal strength."""
+"""Appliance temperatures, setpoints, filter life and Wi-Fi signal strength."""
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -34,6 +34,32 @@ DESCRIPTIONS = (
     SensorEntityDescription(
         key="crisp_set_temp",
         name="Crisper setpoint",
+        device_class=SensorDeviceClass.TEMPERATURE,
+        native_unit_of_measurement=UnitOfTemperature.FAHRENHEIT,
+    ),
+    SensorEntityDescription(
+        key="cav_temp",
+        name="Oven temperature",
+        device_class=SensorDeviceClass.TEMPERATURE,
+        native_unit_of_measurement=UnitOfTemperature.FAHRENHEIT,
+        state_class=SensorStateClass.MEASUREMENT,
+    ),
+    SensorEntityDescription(
+        key="cav_set_temp",
+        name="Oven setpoint",
+        device_class=SensorDeviceClass.TEMPERATURE,
+        native_unit_of_measurement=UnitOfTemperature.FAHRENHEIT,
+    ),
+    SensorEntityDescription(
+        key="cav_probe_temp",
+        name="Probe temperature",
+        device_class=SensorDeviceClass.TEMPERATURE,
+        native_unit_of_measurement=UnitOfTemperature.FAHRENHEIT,
+        state_class=SensorStateClass.MEASUREMENT,
+    ),
+    SensorEntityDescription(
+        key="cav_probe_set_temp",
+        name="Probe setpoint",
         device_class=SensorDeviceClass.TEMPERATURE,
         native_unit_of_measurement=UnitOfTemperature.FAHRENHEIT,
     ),
@@ -90,5 +116,16 @@ async def async_setup_entry(
 class SubZeroSensor(SubZeroEntity, SensorEntity):
     @property
     def native_value(self) -> int | float | None:
-        value = self.coordinator.data.get(self.entity_description.key)
-        return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+        key = self.entity_description.key
+        value = self.coordinator.data.get(key)
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            return None
+        if key.startswith("cav_"):
+            if value == 0:
+                return None
+            if (
+                key.startswith("cav_probe_")
+                and self.coordinator.data.get("cav_probe_on") is not True
+            ):
+                return None
+        return value
