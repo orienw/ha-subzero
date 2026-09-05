@@ -22,8 +22,6 @@ Use the button above, or add the repository manually:
 
 To add appliances later, open **Settings → Devices & services → Sub-Zero → Configure**. This refreshes the account's appliance list and lets you change the selection using your saved connection. Deselecting an appliance removes its Home Assistant device and entities.
 
-Existing entries upgrade automatically, keeping their selected appliance and entity IDs. If you previously created separate entries for multiple appliances, those entries remain separate; appliances selected in another entry are omitted from the picker.
-
 For manual installation, copy `custom_components/subzero` into your Home Assistant configuration's `custom_components` directory, restart, and follow steps 4–5.
 
 ## Entities
