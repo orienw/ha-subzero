@@ -12,6 +12,8 @@ Monitor and control your appliances over Sub-Zero's cloud service using their ex
 
 Requires Home Assistant **2026.8.0 or newer** and an appliance already connected to your Sub-Zero account.
 
+The Sub-Zero Group Owner's App is available in **Canada, Mexico, and the United States**. See [Sub-Zero's country availability](https://www.subzero-wolf.com/assistance/answers/multi-brand/sub-zero-group-owner-s-app-location-availability).
+
 [![Open this repository in HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=orienw&repository=ha-subzero&category=integration)
 
 Use the button above, or add the repository manually:
