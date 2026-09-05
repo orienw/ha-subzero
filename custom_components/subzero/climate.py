@@ -4,14 +4,14 @@ import math
 
 from homeassistant.components.climate import ClimateEntity, ClimateEntityFeature, HVACMode
 from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.entity import EntityDescription
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import SubZeroConfigEntry
 from .controls import supports_control, temperature_range
-from .entity import SubZeroEntity
+from .entity import SubZeroEntity, async_setup_entities
 
 DESCRIPTIONS = tuple(
     EntityDescription(key=key, name=name)
@@ -27,30 +27,20 @@ DESCRIPTIONS = tuple(
 async def async_setup_entry(
     hass: HomeAssistant, entry: SubZeroConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    discovered: set[tuple[str, str]] = set()
-
-    @callback
-    def discover_entities() -> None:
-        entities = []
-        for device_id, coordinator in entry.runtime_data.coordinators.items():
-            if coordinator.device.get("temperature_unit") != "F":
-                continue
-            for description in DESCRIPTIONS:
-                key = (device_id, description.key)
-                if key in discovered or not supports_control(coordinator.data, description.key):
-                    continue
-                if (
-                    description.key.startswith("cav")
-                    and description.key.replace("set_temp", "unit_on") not in coordinator.data
-                ):
-                    continue
-                discovered.add(key)
-                entities.append(SubZeroClimate(coordinator, description))
-        async_add_entities(entities)
-
-    discover_entities()
-    for coordinator in entry.runtime_data.coordinators.values():
-        entry.async_on_unload(coordinator.async_add_listener(discover_entities))
+    async_setup_entities(
+        entry,
+        async_add_entities,
+        DESCRIPTIONS,
+        SubZeroClimate,
+        lambda coordinator, description: (
+            coordinator.device.get("temperature_unit") == "F"
+            and supports_control(coordinator.data, description.key)
+            and (
+                not description.key.startswith("cav")
+                or description.key.replace("set_temp", "unit_on") in coordinator.data
+            )
+        ),
+    )
 
 
 class SubZeroClimate(SubZeroEntity, ClimateEntity):

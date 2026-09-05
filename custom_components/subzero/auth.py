@@ -4,7 +4,6 @@ import hashlib
 import json
 import re
 import secrets
-import time
 from base64 import urlsafe_b64encode
 from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
 
@@ -61,7 +60,6 @@ class SubZeroLogin:
         self.settings: dict = {}
         self.last_page = ""
         self.last_url = ""
-        self.response_info: dict = {}
         self.state = secrets.token_urlsafe(32)
         self.nonce = secrets.token_urlsafe(32)
         self.verifier = secrets.token_urlsafe(48)
@@ -108,11 +106,6 @@ class SubZeroLogin:
         async with self.session.post(
             LOGIN_ORIGIN + path, params=params, headers=headers, data=data, allow_redirects=False
         ) as response:
-            self.response_info = {
-                "stage": "login_form",
-                "status": response.status,
-                "content_type": response.headers.get("Content-Type"),
-            }
             if response.status != 200:
                 raise LoginError(f"Sub-Zero's sign-in form returned HTTP {response.status}.")
             try:
@@ -189,11 +182,6 @@ class SubZeroLogin:
             timeout=self.session.timeout,
             allow_redirects=False,
         ) as response:
-            self.response_info = {
-                "stage": "code_exchange",
-                "status": response.status,
-                "content_type": response.headers.get("Content-Type"),
-            }
             if response.status in (400, 401, 403):
                 raise InvalidAuth("Sub-Zero did not accept the authorization code.")
             if response.status != 200:
@@ -204,7 +192,6 @@ class SubZeroLogin:
         ):
             raise LoginError("Sub-Zero did not return the required login tokens.")
         await self._validate_identity(tokens["id_token"])
-        tokens["received_at"] = time.time()
         return tokens
 
     async def _validate_identity(self, token: str) -> None:
@@ -214,11 +201,6 @@ class SubZeroLogin:
             timeout=self.session.timeout,
             allow_redirects=False,
         ) as response:
-            self.response_info = {
-                "stage": "openid_metadata",
-                "status": response.status,
-                "content_type": response.headers.get("Content-Type"),
-            }
             if response.status != 200:
                 raise LoginError("Sub-Zero's signing metadata is unavailable.")
             metadata = await response.json(content_type=None)
@@ -239,11 +221,6 @@ class SubZeroLogin:
             timeout=self.session.timeout,
             allow_redirects=False,
         ) as response:
-            self.response_info = {
-                "stage": "signing_keys",
-                "status": response.status,
-                "content_type": response.headers.get("Content-Type"),
-            }
             if response.status != 200:
                 raise LoginError("Sub-Zero's signing keys are unavailable.")
             keys = await response.json(content_type=None)

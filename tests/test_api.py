@@ -99,7 +99,7 @@ async def api_server(aiohttp_server, monkeypatch, socket_enabled):
         status = behavior["status"]
         if status == 429:
             return web.json_response({}, status=429, headers={"Retry-After": "300"})
-        if status == 401 and behavior["refreshes"] == 0:
+        if status == 401 and (behavior["refreshes"] == 0 or behavior.get("reject_refreshed")):
             return web.json_response({}, status=401)
         return web.json_response(
             {
@@ -145,16 +145,23 @@ async def test_refresh_rejects_changed_account(api_server):
     save.assert_not_awaited()
 
 
-async def test_unauthorized_request_refreshes_then_retries_once(api_server, tokens):
-    api_server["status"] = 401
+@pytest.mark.parametrize("reject_refreshed", [False, True])
+async def test_unauthorized_request_refreshes_then_retries_once(
+    api_server, tokens, reject_refreshed
+):
+    api_server.update(status=401, reject_refreshed=reject_refreshed)
     async with aiohttp.ClientSession() as session:
         client = api.SubZeroClient(session, "test-key", tokens)
-        appliances = await client.appliances()
+        if reject_refreshed:
+            with pytest.raises(InvalidAuth):
+                await client.appliances()
+        else:
+            appliances = await client.appliances()
+            assert appliances == [api.Appliance("test-fridge", "Kitchen", "F")]
+            assert not hasattr(appliances[0], "pin")
     assert api_server["refreshes"] == 1
     assert len(api_server["requests"]) == 2
     assert api_server["requests"][0] != api_server["requests"][1]
-    assert appliances == [api.Appliance("test-fridge", "Kitchen", "F", "99.1.2.3")]
-    assert not hasattr(appliances[0], "pin")
 
 
 async def test_late_unauthorized_response_reuses_already_refreshed_token(api_server, tokens):

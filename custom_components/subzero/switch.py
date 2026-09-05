@@ -1,13 +1,13 @@
 """Air purification, oven lights, and dishwasher options."""
 
 from homeassistant.components.switch import SwitchEntity, SwitchEntityDescription
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import SubZeroConfigEntry
 from .const import DISHWASHER_SWITCHES
 from .controls import supports_control
-from .entity import SubZeroEntity
+from .entity import SubZeroEntity, async_setup_entities
 
 DESCRIPTIONS = (
     SwitchEntityDescription(key="air_filter_on", name="Air purification", icon="mdi:air-filter"),
@@ -20,22 +20,13 @@ DESCRIPTIONS = (
 async def async_setup_entry(
     hass: HomeAssistant, entry: SubZeroConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    discovered: set[tuple[str, str]] = set()
-
-    @callback
-    def discover_entities() -> None:
-        entities = []
-        for device_id, coordinator in entry.runtime_data.coordinators.items():
-            for description in DESCRIPTIONS:
-                key = (device_id, description.key)
-                if key not in discovered and supports_control(coordinator.data, description.key):
-                    discovered.add(key)
-                    entities.append(SubZeroSwitch(coordinator, description))
-        async_add_entities(entities)
-
-    discover_entities()
-    for coordinator in entry.runtime_data.coordinators.values():
-        entry.async_on_unload(coordinator.async_add_listener(discover_entities))
+    async_setup_entities(
+        entry,
+        async_add_entities,
+        DESCRIPTIONS,
+        SubZeroSwitch,
+        lambda coordinator, description: supports_control(coordinator.data, description.key),
+    )
 
 
 class SubZeroSwitch(SubZeroEntity, SwitchEntity):

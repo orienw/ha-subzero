@@ -58,8 +58,8 @@ async def loaded(hass, tokens, request):
         client.open_channel = AsyncMock()
         client.appliances = AsyncMock(
             return_value=[
-                Appliance("test-fridge", "Kitchen", "F", "17.11"),
-                Appliance("test-oven", "Wall oven", "F", "17.15"),
+                Appliance("test-fridge", "Kitchen", "F"),
+                Appliance("test-oven", "Wall oven", "F"),
             ]
         )
         client.state = AsyncMock(
@@ -509,9 +509,18 @@ async def test_oven_temperature_rejects_invalid_readings(hass, oven_loaded, valu
     assert hass.states.get("sensor.wall_oven_oven_temperature").state in {"unknown", "unavailable"}
 
 
-async def test_second_cavity_is_discovered_only_when_reported(hass, oven_loaded):
-    entry, client, updates = oven_loaded
-    assert hass.states.get("climate.wall_oven_lower_oven") is None
+async def test_push_discovers_all_platforms_for_each_appliance(hass, oven_loaded):
+    _, _, updates = oven_loaded
+    expected = {
+        "climate.wall_oven_lower_oven": "off",
+        "sensor.wall_oven_lower_oven_temperature": "73",
+        "binary_sensor.wall_oven_lower_oven_light": "off",
+        "switch.wall_oven_lower_oven_light": "off",
+        "select.wall_oven_lower_oven_cooking_mode": "Bake",
+        "number.wall_oven_kitchen_timer_duration": "0",
+        "button.wall_oven_start_lower_oven": "unavailable",
+    }
+    assert all(hass.states.get(entity_id) is None for entity_id in expected)
     await updates.put(
         (
             "test-oven",
@@ -521,17 +530,24 @@ async def test_second_cavity_is_discovered_only_when_reported(hass, oven_loaded)
                     "cav2_temp": 73,
                     "cav2_unit_on": False,
                     "cav2_light_on": False,
+                    "cav2_cook_mode": 1,
+                    "cav2_remote_ready": False,
+                    "kitchen_timer_end_time": None,
                 },
                 full=False,
             ),
         )
     )
     await hass.async_block_till_done()
-    assert hass.states.get("climate.wall_oven_lower_oven").state == "off"
-    assert hass.states.get("sensor.wall_oven_lower_oven_temperature").state == "73"
-    assert hass.states.get("switch.wall_oven_lower_oven_light").state == "off"
+    for entity_id, state in expected.items():
+        assert hass.states.get(entity_id).state == state
     registry = er.async_get(hass)
-    original = registry.async_get("climate.wall_oven_lower_oven")
+    original = {entity_id: registry.async_get(entity_id).id for entity_id in expected}
     await updates.put(("test-oven", StateUpdate({"cav2_temp": 100}, full=False)))
+    await updates.put(StateUpdate({"frz_set_temp": 0}, full=False))
     await hass.async_block_till_done()
-    assert registry.async_get(original.entity_id).id == original.id
+    assert hass.states.get("sensor.wall_oven_lower_oven_temperature").state == "100"
+    assert hass.states.get("climate.kitchen_freezer").state == "cool"
+    assert hass.states.get("number.kitchen_freezer_setpoint").state == "0"
+    assert hass.states.get("sensor.kitchen_freezer_setpoint").state == "0"
+    assert {entity_id: registry.async_get(entity_id).id for entity_id in expected} == original

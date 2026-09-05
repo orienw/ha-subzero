@@ -18,13 +18,13 @@ from homeassistant.const import (
     UnitOfTime,
     UnitOfVolume,
 )
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import SubZeroConfigEntry
 from .const import COOK_MODES, OVEN_PREFIXES, WASH_CYCLES, WASH_STATUSES
 from .controls import appliance_datetime
-from .entity import SubZeroEntity
+from .entity import SubZeroEntity, async_setup_entities
 
 DESCRIPTIONS = (
     SensorEntityDescription(
@@ -204,31 +204,19 @@ DESCRIPTIONS += (
 async def async_setup_entry(
     hass: HomeAssistant, entry: SubZeroConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    discovered: set[tuple[str, str]] = set()
-
-    @callback
-    def discover_entities() -> None:
-        entities = []
-        for device_id, coordinator in entry.runtime_data.coordinators.items():
-            for description in DESCRIPTIONS:
-                key = (device_id, description.key)
-                if key in discovered or (
-                    description.key not in CONNECTION_KEYS
-                    and description.key not in coordinator.data
-                ):
-                    continue
-                if (
-                    description.device_class == SensorDeviceClass.TEMPERATURE
-                    and coordinator.device.get("temperature_unit") != "F"
-                ):
-                    continue
-                discovered.add(key)
-                entities.append(SubZeroSensor(coordinator, description))
-        async_add_entities(entities)
-
-    discover_entities()
-    for coordinator in entry.runtime_data.coordinators.values():
-        entry.async_on_unload(coordinator.async_add_listener(discover_entities))
+    async_setup_entities(
+        entry,
+        async_add_entities,
+        DESCRIPTIONS,
+        SubZeroSensor,
+        lambda coordinator, description: (
+            (description.key in CONNECTION_KEYS or description.key in coordinator.data)
+            and (
+                description.device_class != SensorDeviceClass.TEMPERATURE
+                or coordinator.device.get("temperature_unit") == "F"
+            )
+        ),
+    )
 
 
 class SubZeroSensor(SubZeroEntity, SensorEntity):

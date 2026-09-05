@@ -62,7 +62,6 @@ class Appliance:
     id: str
     name: str
     temperature_unit: str | None
-    appliance_type: str
 
 
 @dataclass(frozen=True)
@@ -255,21 +254,20 @@ class SubZeroClient:
 
     async def _request(self, method: str, path: str, **kwargs) -> dict:
         await self.refresh()
-        for attempt in range(2):
-            access_token = self.tokens["access_token"]
-            headers = {
-                "Authorization": "Bearer " + access_token,
-                "Ocp-Apim-Subscription-Key": self.subscription_key,
-                "Userid": self.tokens["user_id"],
-                "Accept": "application/json",
-            }
-            try:
-                return await self._json(method, API_BASE + path, headers=headers, **kwargs)
-            except InvalidAuth:
-                if attempt:
-                    raise
-                await self.refresh(rejected_token=access_token)
-        raise InvalidAuth("Sub-Zero requires a new sign-in.")
+        access_token = self.tokens["access_token"]
+        headers = {
+            "Authorization": "Bearer " + access_token,
+            "Ocp-Apim-Subscription-Key": self.subscription_key,
+            "Userid": self.tokens["user_id"],
+            "Accept": "application/json",
+        }
+        try:
+            return await self._json(method, API_BASE + path, headers=headers, **kwargs)
+        except InvalidAuth:
+            await self.refresh(rejected_token=access_token)
+        headers["Authorization"] = "Bearer " + self.tokens["access_token"]
+        headers["Userid"] = self.tokens["user_id"]
+        return await self._json(method, API_BASE + path, headers=headers, **kwargs)
 
     async def appliances(self) -> list[Appliance]:
         data = await self._request("GET", "/consumerapp/user/devices")
@@ -289,7 +287,6 @@ class SubZeroClient:
                     device["id"],
                     device.get("name") or "Sub-Zero",
                     device.get("temperatureUnitForAppliance"),
-                    device.get("applianceId", ""),
                 )
             )
         return appliances

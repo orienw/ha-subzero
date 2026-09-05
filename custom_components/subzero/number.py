@@ -9,14 +9,14 @@ from homeassistant.components.number import (
     NumberMode,
 )
 from homeassistant.const import PERCENTAGE, UnitOfTemperature, UnitOfTime
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import SubZeroConfigEntry
 from .const import KITCHEN_TIMERS
 from .controls import supports_control, temperature_range, timer_minutes
-from .entity import SubZeroEntity
+from .entity import SubZeroEntity, async_setup_entities
 
 DESCRIPTIONS = tuple(
     NumberEntityDescription(
@@ -66,27 +66,19 @@ DESCRIPTIONS += (
 async def async_setup_entry(
     hass: HomeAssistant, entry: SubZeroConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    discovered: set[tuple[str, str]] = set()
-
-    @callback
-    def discover_entities() -> None:
-        entities = []
-        for device_id, coordinator in entry.runtime_data.coordinators.items():
-            for description in DESCRIPTIONS:
-                if (
-                    description.device_class == NumberDeviceClass.TEMPERATURE
-                    and coordinator.device.get("temperature_unit") != "F"
-                ):
-                    continue
-                key = (device_id, description.key)
-                if key not in discovered and supports_control(coordinator.data, description.key):
-                    discovered.add(key)
-                    entities.append(SubZeroNumber(coordinator, description))
-        async_add_entities(entities)
-
-    discover_entities()
-    for coordinator in entry.runtime_data.coordinators.values():
-        entry.async_on_unload(coordinator.async_add_listener(discover_entities))
+    async_setup_entities(
+        entry,
+        async_add_entities,
+        DESCRIPTIONS,
+        SubZeroNumber,
+        lambda coordinator, description: (
+            (
+                description.device_class != NumberDeviceClass.TEMPERATURE
+                or coordinator.device.get("temperature_unit") == "F"
+            )
+            and supports_control(coordinator.data, description.key)
+        ),
+    )
 
 
 class SubZeroNumber(SubZeroEntity, NumberEntity):

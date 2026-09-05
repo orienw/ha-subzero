@@ -1,13 +1,15 @@
 """Remote starts using the appliance's physical Remote Ready interlock."""
 
 from homeassistant.components.button import ButtonEntity, ButtonEntityDescription
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ServiceValidationError
+from homeassistant.helpers.entity import EntityDescription
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import SubZeroConfigEntry
 from .controls import supports_control, validate_remote_start
-from .entity import SubZeroEntity
+from .coordinator import SubZeroCoordinator
+from .entity import SubZeroEntity, async_setup_entities
 
 DESCRIPTIONS = tuple(
     ButtonEntityDescription(key=f"remote_start_{key}", name=name, icon="mdi:play-circle")
@@ -22,32 +24,16 @@ DESCRIPTIONS = tuple(
 async def async_setup_entry(
     hass: HomeAssistant, entry: SubZeroConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    discovered: set[tuple[str, str]] = set()
+    def supported(coordinator: SubZeroCoordinator, description: EntityDescription) -> bool:
+        unit_key = description.key.removeprefix("remote_start_")
+        ready_key = (
+            "remote_ready"
+            if unit_key == "wash_cycle_on"
+            else unit_key.replace("unit_on", "remote_ready")
+        )
+        return supports_control(coordinator.data, unit_key) and ready_key in coordinator.data
 
-    @callback
-    def discover_entities() -> None:
-        entities = []
-        for device_id, coordinator in entry.runtime_data.coordinators.items():
-            for description in DESCRIPTIONS:
-                key = (device_id, description.key)
-                unit_key = description.key.removeprefix("remote_start_")
-                ready_key = (
-                    "remote_ready"
-                    if unit_key == "wash_cycle_on"
-                    else unit_key.replace("unit_on", "remote_ready")
-                )
-                if (
-                    key not in discovered
-                    and supports_control(coordinator.data, unit_key)
-                    and ready_key in coordinator.data
-                ):
-                    discovered.add(key)
-                    entities.append(SubZeroStartButton(coordinator, description))
-        async_add_entities(entities)
-
-    discover_entities()
-    for coordinator in entry.runtime_data.coordinators.values():
-        entry.async_on_unload(coordinator.async_add_listener(discover_entities))
+    async_setup_entities(entry, async_add_entities, DESCRIPTIONS, SubZeroStartButton, supported)
 
 
 class SubZeroStartButton(SubZeroEntity, ButtonEntity):

@@ -1,14 +1,14 @@
 """Fridge modes, oven cooking modes, and dishwasher delay start."""
 
 from homeassistant.components.select import SelectEntity, SelectEntityDescription
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import SubZeroConfigEntry
 from .const import COOK_MODES, FRIDGE_ENUM_OPTIONS, FRIDGE_MODE_KEYS, ICE_KEYS, MANUAL_COOK_MODES
 from .controls import is_fridge, supports_control
-from .entity import SubZeroEntity
+from .entity import SubZeroEntity, async_setup_entities
 
 MODES = {
     "Sabbath": "sabbath_on",
@@ -57,22 +57,13 @@ def control_keys(key: str, data: dict) -> tuple[str, ...]:
 async def async_setup_entry(
     hass: HomeAssistant, entry: SubZeroConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    discovered: set[tuple[str, str]] = set()
-
-    @callback
-    def discover_entities() -> None:
-        entities = []
-        for device_id, coordinator in entry.runtime_data.coordinators.items():
-            for description in DESCRIPTIONS:
-                key = (device_id, description.key)
-                if key not in discovered and control_keys(description.key, coordinator.data):
-                    discovered.add(key)
-                    entities.append(SubZeroSelect(coordinator, description))
-        async_add_entities(entities)
-
-    discover_entities()
-    for coordinator in entry.runtime_data.coordinators.values():
-        entry.async_on_unload(coordinator.async_add_listener(discover_entities))
+    async_setup_entities(
+        entry,
+        async_add_entities,
+        DESCRIPTIONS,
+        SubZeroSelect,
+        lambda coordinator, description: bool(control_keys(description.key, coordinator.data)),
+    )
 
 
 class SubZeroSelect(SubZeroEntity, SelectEntity):

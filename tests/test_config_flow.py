@@ -19,8 +19,8 @@ DEVICES = {
     "test-oven": {"name": "Wall oven", "temperature_unit": "C"},
 }
 APPLIANCES = [
-    Appliance("test-fridge", "Kitchen", "F", "17.11.2.3"),
-    Appliance("test-oven", "Wall oven", "C", "99.1.2.3"),
+    Appliance("test-fridge", "Kitchen", "F"),
+    Appliance("test-oven", "Wall oven", "C"),
 ]
 
 
