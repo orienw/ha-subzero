@@ -95,7 +95,7 @@ async def controls(hass, tokens, request):
         await hass.async_block_till_done()
 
 
-async def test_fridge_controls_are_grouped_and_other_brands_stay_read_only(hass, controls):
+async def test_controls_are_grouped_and_require_reported_properties(hass, controls):
     entities = er.async_entries_for_config_entry(er.async_get(hass), controls.entry.entry_id)
     control_entities = {e.entity_id for e in entities if e.domain in {"number", "select", "switch"}}
     assert control_entities == {
@@ -108,6 +108,7 @@ async def test_fridge_controls_are_grouped_and_other_brands_stay_read_only(hass,
         "select.kitchen_humidity_control",
         "select.kitchen_night_mode",
         "switch.kitchen_air_purification",
+        "switch.oven_oven_light",
     }
     assert hass.states.get("select.kitchen_ice_maker").state == "Night ice"
     assert hass.states.get("select.kitchen_mode").state == "Normal"

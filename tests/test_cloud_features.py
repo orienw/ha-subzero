@@ -1,0 +1,608 @@
+"""Cloud feature coverage through Home Assistant services and appliance updates."""
+
+import asyncio
+import json
+from datetime import timedelta
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, call, patch
+
+import pytest
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
+from homeassistant.util import dt as dt_util
+from homeassistant.util.unit_system import METRIC_SYSTEM, US_CUSTOMARY_SYSTEM
+from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+from custom_components.subzero.api import ApiError, StateUpdate, token_state
+from custom_components.subzero.const import DOMAIN
+from custom_components.subzero.diagnostics import (
+    async_get_config_entry_diagnostics,
+    async_get_device_diagnostics,
+)
+from custom_components.subzero.number import DESCRIPTIONS as NUMBER_DESCRIPTIONS
+from custom_components.subzero.number import SubZeroNumber
+from custom_components.subzero.sensor import DESCRIPTIONS as SENSOR_DESCRIPTIONS
+from custom_components.subzero.sensor import SubZeroSensor
+
+pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
+
+
+@pytest.fixture
+async def appliances(hass, tokens, request):
+    hass.config.units = US_CUSTOMARY_SYSTEM
+    unit = getattr(request, "param", "F")
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        version=2,
+        title="Account",
+        data={
+            "tokens": token_state(tokens),
+            "devices": {
+                "fridge": {"name": "Fridge", "temperature_unit": unit},
+                "oven": {"name": "Oven", "temperature_unit": unit},
+                "dishwasher": {"name": "Dishwasher", "temperature_unit": unit},
+            },
+        },
+    )
+    entry.add_to_hass(hass)
+    states = {
+        "fridge": {
+            "appliance_model": "BI-36U",
+            "ref_set_temp": 38,
+            "frz_set_temp": 0,
+            "ref_display_temp": 37,
+            "water_filter_gal_remaining": -10,
+            "accent_light_level": 0,
+            "max_ice_on": False,
+            "max_ice_start_time": None,
+            "max_ice_end_time": None,
+            "high_use_start_time": None,
+            "high_use_end_time": None,
+            "uptime": "435:53:58",
+            "ipv4_addr": "192.0.2.1",
+            "device_wlan_id": "001122334455",
+            "ap_ssid": "private-network",
+            "appliance_serial": "private-serial",
+            "remote_svc_reg_token": "private-registration",
+        },
+        "oven": {
+            "appliance_model": "DO30PM",
+            "appliance_type": "1.4.2.3",
+            **{
+                f"{prefix}_{key}": value
+                for prefix in ("cav", "cav2")
+                for key, value in {
+                    "temp": 75,
+                    "set_temp": 350,
+                    "unit_on": False,
+                    "cook_mode": 1,
+                    "light_on": False,
+                    "door_ajar": False,
+                    "remote_ready": False,
+                    "mode_change_enabled": True,
+                    "probe_on": False,
+                    "probe_temp": 0,
+                    "probe_set_temp": 0,
+                    "cook_timer_active": False,
+                    "cook_timer_complete": False,
+                    "cook_timer_start_time": None,
+                    "cook_timer_end_time": None,
+                }.items()
+            },
+            **{
+                f"{prefix}_{key}": value
+                for prefix in ("kitchen_timer", "kitchen_timer2")
+                for key, value in {
+                    "active": False,
+                    "complete": False,
+                    "start_time": None,
+                    "end_time": None,
+                }.items()
+            },
+        },
+        "dishwasher": {
+            "appliance_model": "DW2450WS",
+            "appliance_type": "17.6.1.1",
+            "wash_cycle": 2,
+            "wash_status": 0,
+            "wash_cycle_on": False,
+            "wash_cycle_end_time": None,
+            "door_ajar": False,
+            "remote_ready": False,
+            "rinse_aid_low": False,
+            "softener_low": True,
+            "service_required": False,
+            "heated_dry_on": False,
+            "extended_dry_on": False,
+            "high_temp_wash_on": False,
+            "sani_rinse_on": False,
+            "top_rack_only_on": False,
+            "delay_start_timer_duration": 0,
+            "delay_start_timer_active": False,
+            "delay_start_timer_start_time": None,
+            "delay_start_timer_end_time": None,
+        },
+    }
+    updates = asyncio.Queue()
+    behavior = {"accept": True, "push": True}
+
+    async def update(device_id, properties, *, full=False):
+        if full:
+            states[device_id] = dict(properties)
+        else:
+            states[device_id].update(properties)
+        await updates.put((device_id, StateUpdate(properties, full=full)))
+        await hass.async_block_till_done()
+
+    async def watch(device_ids):
+        while True:
+            yield await updates.get()
+
+    async def write(device_id, key, value):
+        if not behavior["accept"]:
+            return
+        if key in {"kitchen_timer_duration", "kitchen_timer2_duration"}:
+            prefix = key.removesuffix("_duration")
+            start = dt_util.utcnow()
+            properties = {
+                f"{prefix}_active": value > 0,
+                f"{prefix}_start_time": start.isoformat() if value else None,
+                f"{prefix}_end_time": (start + timedelta(minutes=value)).isoformat()
+                if value
+                else None,
+            }
+        else:
+            properties = {key: value}
+            if key.endswith("_unit_on"):
+                properties[key.replace("unit_on", "remote_ready")] = False
+            if key == "wash_cycle_on" and value:
+                properties.update(remote_ready=False, wash_status=2)
+        states[device_id].update(properties)
+        if behavior["push"]:
+            await updates.put((device_id, StateUpdate(properties, full=False)))
+
+    with (
+        patch("custom_components.subzero.SubZeroClient") as factory,
+        patch("custom_components.subzero.coordinator.CONTROL_CONFIRM_TIMEOUT", 0.02),
+    ):
+        client = factory.return_value
+        client.tokens = token_state(tokens)
+        client.push_connected = True
+        client.state = AsyncMock(side_effect=lambda device_id: dict(states[device_id]))
+        client.set_property = AsyncMock(side_effect=write)
+        client.watch = watch
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        yield SimpleNamespace(
+            entry=entry,
+            client=client,
+            states=states,
+            update=update,
+            behavior=behavior,
+            updates=updates,
+        )
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_cloud_feature_discovery_does_not_send_controls(hass, appliances):
+    assert hass.states.get("sensor.fridge_water_filter_capacity_remaining").state == "-10"
+    assert hass.states.get("sensor.fridge_refrigerator_display_temperature").state == "37"
+    assert hass.states.get("climate.fridge_refrigerator").attributes["current_temperature"] == 37
+    assert hass.states.get("climate.fridge_freezer").attributes["current_temperature"] is None
+    assert hass.states.get("climate.oven_lower_oven").state == "off"
+    assert hass.states.get("sensor.oven_lower_oven_temperature").state == "75"
+    assert hass.states.get("sensor.dishwasher_wash_cycle").state == "Normal"
+    assert hass.states.get("sensor.dishwasher_wash_status").state == "Idle"
+    assert hass.states.get("binary_sensor.dishwasher_softener_salt_low").state == "on"
+    assert hass.states.get("sensor.dishwasher_wash_cycle_end").state == "unknown"
+    assert hass.states.get("button.dishwasher_start_wash_cycle").state == "unavailable"
+    assert hass.states.get("number.oven_kitchen_timer_duration").state == "0"
+    registry = er.async_get(hass)
+    for entity_id in (
+        "number.fridge_accent_light",
+        "sensor.fridge_ip_address",
+        "sensor.fridge_mac_address",
+        "sensor.fridge_uptime",
+    ):
+        assert registry.async_get(entity_id).disabled_by is er.RegistryEntryDisabler.INTEGRATION
+    device = dr.async_get(hass).async_get_device_by_identifier(
+        (DOMAIN, "dishwasher"), appliances.entry.entry_id
+    )
+    assert device.manufacturer == "Cove"
+    appliances.client.set_property.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("entity_id", "device", "key"),
+    [
+        ("switch.oven_oven_light", "oven", "cav_light_on"),
+        ("switch.oven_lower_oven_light", "oven", "cav2_light_on"),
+        ("switch.dishwasher_heated_dry", "dishwasher", "heated_dry_on"),
+        ("switch.dishwasher_extended_dry", "dishwasher", "extended_dry_on"),
+        ("switch.dishwasher_high_temperature_wash", "dishwasher", "high_temp_wash_on"),
+        ("switch.dishwasher_sanitize_rinse", "dishwasher", "sani_rinse_on"),
+        ("switch.dishwasher_top_rack_only", "dishwasher", "top_rack_only_on"),
+    ],
+)
+async def test_switches_send_only_the_selected_appliance_property(
+    hass, appliances, entity_id, device, key
+):
+    for service, value, expected in (("turn_on", True, "on"), ("turn_off", False, "off")):
+        await hass.services.async_call("switch", service, {"entity_id": entity_id}, blocking=True)
+        appliances.client.set_property.assert_awaited_with(device, key, value)
+        assert hass.states.get(entity_id).state == expected
+    assert appliances.client.set_property.await_count == 2
+
+
+@pytest.mark.parametrize(
+    ("device", "key", "entity_id", "ready"),
+    [
+        ("oven", "cav_unit_on", "button.oven_start_oven", "cav_remote_ready"),
+        ("oven", "cav2_unit_on", "button.oven_start_lower_oven", "cav2_remote_ready"),
+        ("dishwasher", "wash_cycle_on", "button.dishwasher_start_wash_cycle", "remote_ready"),
+    ],
+)
+async def test_start_requires_physical_remote_ready_and_confirms_consumed_interlock(
+    hass, appliances, device, key, entity_id, ready
+):
+    coordinator = appliances.entry.runtime_data.coordinators[device]
+    with pytest.raises(ServiceValidationError, match="Remote Ready"):
+        await coordinator.async_set_properties({key: True})
+    appliances.client.set_property.assert_not_called()
+    await appliances.update(device, {ready: True})
+    assert hass.states.get(entity_id).state != "unavailable"
+    await hass.services.async_call("button", "press", {"entity_id": entity_id}, blocking=True)
+    appliances.client.set_property.assert_awaited_once_with(device, key, True)
+    assert coordinator.data[key] is True
+    assert coordinator.data[ready] is False
+    assert hass.states.get(entity_id).state == "unavailable"
+
+
+async def test_oven_temperature_modes_and_stop_are_independent_per_cavity(hass, appliances):
+    await appliances.update("oven", {"cav2_remote_ready": True})
+    await hass.services.async_call(
+        "climate",
+        "set_temperature",
+        {
+            "entity_id": "climate.oven_lower_oven",
+            "temperature": 375,
+        },
+        blocking=True,
+    )
+    assert appliances.states["oven"]["cav2_unit_on"] is False
+    await hass.services.async_call(
+        "select",
+        "select_option",
+        {
+            "entity_id": "select.oven_lower_oven_cooking_mode",
+            "option": "Roast",
+        },
+        blocking=True,
+    )
+    await hass.services.async_call(
+        "climate", "turn_on", {"entity_id": "climate.oven_lower_oven"}, blocking=True
+    )
+    await hass.services.async_call(
+        "select",
+        "select_option",
+        {
+            "entity_id": "select.oven_lower_oven_cooking_mode",
+            "option": "Off",
+        },
+        blocking=True,
+    )
+    assert appliances.client.set_property.await_args_list == [
+        call("oven", "cav2_set_temp", 375),
+        call("oven", "cav2_cook_mode", 2),
+        call("oven", "cav2_unit_on", True),
+        call("oven", "cav2_unit_on", False),
+    ]
+    assert hass.states.get("climate.oven_lower_oven").state == "off"
+    assert appliances.states["oven"]["cav_set_temp"] == 350
+    assert appliances.states["oven"]["cav_cook_mode"] == 1
+
+
+@pytest.mark.parametrize(
+    ("properties", "key", "value", "message"),
+    [
+        ({"cav2_remote_ready": True}, "cav_unit_on", True, "Remote Ready"),
+        ({"cav_remote_ready": True, "cav_door_ajar": True}, "cav_unit_on", True, "door"),
+        ({"cav_remote_ready": 1}, "cav_unit_on", True, "Remote Ready"),
+        ({}, "cav_set_temp", 375, "running"),
+        ({"cav_remote_ready": True}, "cav_set_temp", 551, "range"),
+        ({"cav_remote_ready": True}, "cav_set_temp", 84, "range"),
+        (
+            {"cav_remote_ready": True, "cav_mode_change_enabled": False},
+            "cav_cook_mode",
+            2,
+            "mode changes",
+        ),
+        ({"cav_remote_ready": True}, "cav_cook_mode", 11, "control panel"),
+        ({"cav_remote_ready": True, "cav_cook_mode": 3}, "cav_unit_on", True, "control panel"),
+        (
+            {"cav_remote_ready": True, "cav_cook_mode": 999},
+            "cav_unit_on",
+            True,
+            "supported cooking mode",
+        ),
+    ],
+)
+async def test_oven_interlocks_apply_below_the_entity_layer(
+    appliances, properties, key, value, message
+):
+    await appliances.update("oven", properties)
+    with pytest.raises(ServiceValidationError, match=message):
+        await appliances.entry.runtime_data.coordinators["oven"].async_set_properties({key: value})
+    appliances.client.set_property.assert_not_called()
+
+
+async def test_queued_start_rechecks_remote_ready(appliances):
+    await appliances.update("oven", {"cav_remote_ready": True})
+    coordinator = appliances.entry.runtime_data.coordinators["oven"]
+    async with coordinator._command_lock:
+        task = asyncio.create_task(coordinator.async_set_properties({"cav_unit_on": True}))
+        await appliances.update("oven", {"cav_remote_ready": False})
+    with pytest.raises(ServiceValidationError, match="Remote Ready"):
+        await task
+    appliances.client.set_property.assert_not_called()
+
+
+async def test_turning_off_an_armed_idle_oven_cancels_remote_ready(hass, appliances):
+    await appliances.update("oven", {"cav_remote_ready": True})
+    assert hass.states.get("climate.oven_oven").state == "off"
+    await hass.services.async_call(
+        "climate", "turn_off", {"entity_id": "climate.oven_oven"}, blocking=True
+    )
+    appliances.client.set_property.assert_awaited_once_with("oven", "cav_unit_on", False)
+    assert appliances.states["oven"]["cav_remote_ready"] is False
+
+
+async def test_off_ack_without_canceling_remote_ready_is_not_success(hass, appliances):
+    await appliances.update("oven", {"cav_remote_ready": True})
+    appliances.behavior["accept"] = False
+    with pytest.raises(HomeAssistantError, match="did not confirm"):
+        await hass.services.async_call(
+            "climate", "turn_off", {"entity_id": "climate.oven_oven"}, blocking=True
+        )
+    assert appliances.states["oven"]["cav_remote_ready"] is True
+    assert appliances.client.set_property.await_count == 1
+
+
+@pytest.mark.parametrize(
+    ("key", "entity_id"),
+    [
+        ("kitchen_timer_duration", "number.oven_kitchen_timer_duration"),
+        ("kitchen_timer2_duration", "number.oven_kitchen_timer_2_duration"),
+    ],
+)
+@pytest.mark.parametrize("push", [True, False])
+async def test_write_only_timer_duration_is_confirmed_from_active_and_end_time(
+    hass, appliances, key, entity_id, push
+):
+    appliances.behavior["push"] = push
+    reads = appliances.client.state.await_count
+    for minutes in (15, 15, 0):
+        await hass.services.async_call(
+            "number", "set_value", {"entity_id": entity_id, "value": minutes}, blocking=True
+        )
+        assert hass.states.get(entity_id).state == str(minutes)
+    assert key not in appliances.states["oven"]
+    assert appliances.client.set_property.await_args_list == [
+        call("oven", key, 15),
+        call("oven", key, 15),
+        call("oven", key, 0),
+    ]
+    assert appliances.client.state.await_count == reads + (0 if push else 3)
+
+
+@pytest.mark.parametrize("previous_minutes", [16, 45])
+async def test_timer_ack_without_correct_end_time_is_not_success(
+    hass, appliances, previous_minutes
+):
+    appliances.behavior["accept"] = False
+    await appliances.update(
+        "oven",
+        {
+            "kitchen_timer_active": True,
+            "kitchen_timer_start_time": dt_util.utcnow().isoformat(),
+            "kitchen_timer_end_time": (
+                dt_util.utcnow() + timedelta(minutes=previous_minutes)
+            ).isoformat(),
+        },
+    )
+    with pytest.raises(HomeAssistantError, match="did not confirm"):
+        await hass.services.async_call(
+            "number",
+            "set_value",
+            {"entity_id": "number.oven_kitchen_timer_duration", "value": 15},
+            blocking=True,
+        )
+    assert hass.states.get("number.oven_kitchen_timer_duration").state == str(previous_minutes)
+    assert appliances.client.set_property.await_count == 1
+
+
+@pytest.mark.parametrize(
+    ("device", "key", "value"),
+    [
+        ("oven", "kitchen_timer_duration", -1),
+        ("oven", "kitchen_timer2_duration", 661),
+        ("oven", "kitchen_timer_duration", True),
+        ("fridge", "accent_light_level", 101),
+        ("fridge", "accent_light_level", -1),
+        ("dishwasher", "delay_start_timer_duration", 13),
+        ("dishwasher", "delay_start_timer_duration", 0.5),
+    ],
+)
+async def test_invalid_new_control_values_never_reach_cloud(appliances, device, key, value):
+    with pytest.raises(ServiceValidationError):
+        await appliances.entry.runtime_data.coordinators[device].async_set_properties({key: value})
+    appliances.client.set_property.assert_not_called()
+
+
+async def test_cove_delay_and_cycle_completion_updates(hass, appliances):
+    await hass.services.async_call(
+        "select",
+        "select_option",
+        {"entity_id": "select.dishwasher_delay_start", "option": "12 hours"},
+        blocking=True,
+    )
+    appliances.client.set_property.assert_awaited_once_with(
+        "dishwasher", "delay_start_timer_duration", 12
+    )
+    assert hass.states.get("select.dishwasher_delay_start").state == "12 hours"
+    await appliances.update(
+        "dishwasher",
+        {
+            "wash_status": 6,
+            "wash_cycle_on": False,
+            "wash_cycle_end_time": "2026-09-05T17:00:00Z",
+            "rinse_aid_low": True,
+        },
+    )
+    assert hass.states.get("sensor.dishwasher_wash_status").state == "Complete"
+    assert hass.states.get("sensor.dishwasher_wash_cycle_end").state == "2026-09-05T17:00:00+00:00"
+    assert hass.states.get("binary_sensor.dishwasher_rinse_aid_low").state == "on"
+
+
+async def test_unknown_enum_values_do_not_become_known_modes(hass, appliances):
+    await appliances.update(
+        "dishwasher", {"wash_cycle": True, "wash_status": 900, "delay_start_timer_duration": 13}
+    )
+    await appliances.update("oven", {"cav_cook_mode": 100})
+    assert hass.states.get("sensor.dishwasher_wash_cycle").state == "unknown"
+    assert hass.states.get("sensor.dishwasher_wash_status").state == "unknown"
+    assert hass.states.get("select.dishwasher_delay_start").state == "unavailable"
+    assert hass.states.get("select.oven_cooking_mode").state == "unavailable"
+
+
+async def test_timestamps_require_an_offset_and_null_is_unknown(hass, appliances):
+    await appliances.update("fridge", {"max_ice_start_time": "2026-09-05T10:00:00"})
+    assert hass.states.get("sensor.fridge_max_ice_start").state == "unknown"
+    await appliances.update("fridge", {"time": "2026-09-05T11:00:00-07:00"})
+    assert hass.states.get("sensor.fridge_max_ice_start").state == "2026-09-05T17:00:00+00:00"
+    await appliances.update("fridge", {"max_ice_start_time": None})
+    assert hass.states.get("sensor.fridge_max_ice_start").state == "unknown"
+
+
+async def test_full_snapshot_removes_new_capabilities_without_stale_controls(hass, appliances):
+    await appliances.update(
+        "oven", {"appliance_model": "SINGLE-OVEN", "cav_light_on": False}, full=True
+    )
+    for entity_id in (
+        "climate.oven_lower_oven",
+        "select.oven_lower_oven_cooking_mode",
+        "switch.oven_lower_oven_light",
+        "button.oven_start_lower_oven",
+        "number.oven_kitchen_timer_duration",
+    ):
+        assert hass.states.get(entity_id).state == "unavailable"
+    assert hass.states.get("switch.oven_oven_light").state == "off"
+    assert hass.states.get("sensor.dishwasher_wash_status").state == "Idle"
+
+
+@pytest.mark.parametrize("appliances", ["C", None], indirect=True)
+async def test_unverified_temperature_units_preserve_non_temperature_features(hass, appliances):
+    assert hass.states.get("climate.oven_oven") is None
+    assert hass.states.get("climate.fridge_refrigerator") is None
+    assert hass.states.get("select.oven_cooking_mode").state == "Bake"
+    assert hass.states.get("number.oven_kitchen_timer_duration").state == "0"
+    assert hass.states.get("switch.dishwasher_heated_dry").state == "off"
+
+
+async def test_climate_services_convert_display_units_to_native_fahrenheit(hass, appliances):
+    hass.config.units = METRIC_SYSTEM
+    await appliances.update("oven", {"cav_unit_on": True})
+    await hass.services.async_call(
+        "climate",
+        "set_temperature",
+        {"entity_id": "climate.oven_oven", "temperature": 200},
+        blocking=True,
+    )
+    appliances.client.set_property.assert_awaited_once_with("oven", "cav_set_temp", 392)
+
+
+async def test_diagnostics_omit_credentials_names_and_network_identifiers(hass, appliances):
+    result = await async_get_config_entry_diagnostics(hass, appliances.entry)
+    encoded = json.dumps(result)
+    assert result["push_connected"] is True
+    assert "DO30PM" in encoded and "DW2450WS" in encoded
+    for private in (
+        "192.0.2.1",
+        "001122334455",
+        "private-network",
+        "private-serial",
+        "private-registration",
+        "test-owner",
+        "test-refresh",
+        "Dishwasher",
+    ):
+        assert private not in encoded
+    appliances.client.state.assert_has_awaits([call("fridge"), call("oven"), call("dishwasher")])
+    assert appliances.client.state.await_count == 3
+
+
+async def test_cloud_failure_disables_controls_without_changing_other_appliances(hass, appliances):
+    await appliances.updates.put(("oven", ApiError("Disconnected")))
+    await hass.async_block_till_done()
+    assert hass.states.get("climate.oven_oven").state == "unavailable"
+    assert hass.states.get("switch.oven_lower_oven_light").state == "unavailable"
+    assert hass.states.get("switch.dishwasher_heated_dry").state == "off"
+
+
+async def test_optional_fridge_control_and_connection_diagnostics(appliances):
+    coordinator = appliances.entry.runtime_data.coordinators["fridge"]
+    light = SubZeroNumber(
+        coordinator, next(d for d in NUMBER_DESCRIPTIONS if d.key == "accent_light_level")
+    )
+    await light.async_set_native_value(65)
+    appliances.client.set_property.assert_awaited_once_with("fridge", "accent_light_level", 65)
+    assert light.native_value == 65
+    uptime = SubZeroSensor(coordinator, next(d for d in SENSOR_DESCRIPTIONS if d.key == "uptime"))
+    assert uptime.native_value == 435 * 3600 + 53 * 60 + 58
+    reporting = SubZeroSensor(
+        coordinator, next(d for d in SENSOR_DESCRIPTIONS if d.key == "live_reporting_mode")
+    )
+    assert reporting.native_value == "Cloud push"
+    appliances.client.push_connected = False
+    assert reporting.native_value == "Disconnected"
+
+
+async def test_device_diagnostics_select_only_the_requested_appliance(hass, appliances):
+    device = dr.async_get(hass).async_get_device_by_identifier(
+        (DOMAIN, "oven"), appliances.entry.entry_id
+    )
+    result = await async_get_device_diagnostics(hass, appliances.entry, device)
+    assert result["state"]["appliance_model"] == "DO30PM"
+    assert "DW2450WS" not in json.dumps(result)
+    assert appliances.client.state.await_count == 3
+
+
+@pytest.mark.parametrize(
+    "properties",
+    [
+        {"cav_set_temp": 0},
+        {"cav_set_temp": None},
+        {"cav_set_temp": True},
+        {"cav_gourmet_mode_on": True},
+        {"cav_door_ajar": 1},
+    ],
+)
+async def test_remote_start_rejects_incomplete_or_manual_cooking_setup(appliances, properties):
+    await appliances.update("oven", {"cav_remote_ready": True, **properties})
+    with pytest.raises(ServiceValidationError):
+        await appliances.entry.runtime_data.coordinators["oven"].async_set_properties(
+            {"cav_unit_on": True}
+        )
+    appliances.client.set_property.assert_not_called()
+
+
+@pytest.mark.parametrize("door", [True, 1, None])
+async def test_dishwasher_start_requires_a_closed_reported_door(appliances, door):
+    await appliances.update("dishwasher", {"remote_ready": True, "door_ajar": door})
+    with pytest.raises(ServiceValidationError, match="door"):
+        await appliances.entry.runtime_data.coordinators["dishwasher"].async_set_properties(
+            {"wash_cycle_on": True}
+        )
+    appliances.client.set_property.assert_not_called()

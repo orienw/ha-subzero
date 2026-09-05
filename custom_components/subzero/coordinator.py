@@ -4,6 +4,7 @@ import asyncio
 import logging
 import random
 import time
+from datetime import datetime
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
@@ -14,18 +15,20 @@ from homeassistant.exceptions import (
     ServiceValidationError,
 )
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from .api import ApiError, RateLimited, StateUpdate, SubZeroClient
 from .auth import InvalidAuth
 from .const import (
     CONTROL_CONFIRM_TIMEOUT,
     DOMAIN,
+    KITCHEN_TIMERS,
     MAX_RECONNECT_DELAY,
     RECONNECT_DELAY,
     STATE_KEYS,
     selected_devices,
 )
-from .controls import validate_control_properties
+from .controls import control_matches, validate_control_properties
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -58,6 +61,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             if not self.last_update_success:
                 raise ServiceValidationError("The appliance is unavailable.")
             validate_control_properties(self.data, self.device.get("temperature_unit"), properties)
+            requested_at = {}
             try:
                 for key, value in properties.items():
                     if not self.last_update_success:
@@ -65,11 +69,13 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                     validate_control_properties(
                         self.data, self.device.get("temperature_unit"), {key: value}
                     )
-                    if self.data[key] != value:
-                        await self._async_set_property(key, value)
+                    requested_at[key] = dt_util.utcnow()
+                    if key in KITCHEN_TIMERS or not control_matches(
+                        self.data, key, value, requested_at[key]
+                    ):
+                        await self._async_set_property(key, value, requested_at[key])
                 if not self.last_update_success or any(
-                    self.data.get(key) != value
-                    or isinstance(self.data.get(key), bool) != isinstance(value, bool)
+                    not control_matches(self.data, key, value, requested_at[key])
                     for key, value in properties.items()
                 ):
                     raise HomeAssistantError("The appliance did not confirm the requested setting.")
@@ -79,16 +85,14 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             except ApiError as error:
                 raise HomeAssistantError(str(error)) from error
 
-    async def _async_set_property(self, key: str, value: bool | int) -> None:
+    async def _async_set_property(
+        self, key: str, value: bool | int, requested_at: datetime
+    ) -> None:
         confirmed = asyncio.Event()
 
         @callback
         def confirm() -> None:
-            if (
-                self.last_update_success
-                and self.data.get(key) == value
-                and isinstance(self.data.get(key), bool) == isinstance(value, bool)
-            ):
+            if self.last_update_success and control_matches(self.data, key, value, requested_at):
                 confirmed.set()
             else:
                 confirmed.clear()
@@ -124,7 +128,8 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         properties = {key: value for key, value in update.properties.items() if key in STATE_KEYS}
         updated = properties if update.full else {**self.data, **properties}
         if (
-            updated != self.data
+            update.full
+            or updated != self.data
             or any(type(value) is not type(self.data.get(key)) for key, value in updated.items())
             or not self.last_update_success
         ):

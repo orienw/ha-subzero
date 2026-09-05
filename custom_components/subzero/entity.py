@@ -5,6 +5,7 @@ from homeassistant.helpers.entity import EntityDescription
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
+from .controls import is_dishwasher, is_oven
 from .coordinator import SubZeroCoordinator
 
 
@@ -20,7 +21,11 @@ class SubZeroEntity(CoordinatorEntity[SubZeroCoordinator]):
             identifiers={(DOMAIN, coordinator.device_id)},
             name=coordinator.device["name"],
             manufacturer=(
-                "Wolf" if any(key.startswith("cav_") for key in coordinator.data) else "Sub-Zero"
+                "Cove"
+                if is_dishwasher(coordinator.data)
+                else "Wolf"
+                if is_oven(coordinator.data)
+                else "Sub-Zero"
             ),
             model=coordinator.data.get("appliance_model"),
             sw_version=version.get("fw") if isinstance(version, dict) else None,

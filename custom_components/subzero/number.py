@@ -1,15 +1,21 @@
-"""Fridge temperature setpoints."""
+"""Fridge setpoints, accent lighting, and oven kitchen timers."""
 
 import math
 
-from homeassistant.components.number import NumberDeviceClass, NumberEntity, NumberEntityDescription
-from homeassistant.const import UnitOfTemperature
+from homeassistant.components.number import (
+    NumberDeviceClass,
+    NumberEntity,
+    NumberEntityDescription,
+    NumberMode,
+)
+from homeassistant.const import PERCENTAGE, UnitOfTemperature, UnitOfTime
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import SubZeroConfigEntry
-from .controls import is_fridge, temperature_range
+from .const import KITCHEN_TIMERS
+from .controls import supports_control, temperature_range, timer_minutes
 from .entity import SubZeroEntity
 
 DESCRIPTIONS = tuple(
@@ -26,6 +32,35 @@ DESCRIPTIONS = tuple(
         ("crisp_set_temp", "Crisper setpoint"),
     )
 )
+DESCRIPTIONS += (
+    NumberEntityDescription(
+        key="accent_light_level",
+        name="Accent light",
+        mode=NumberMode.SLIDER,
+        icon="mdi:lightbulb-outline",
+        native_min_value=0,
+        native_max_value=100,
+        native_step=1,
+        native_unit_of_measurement=PERCENTAGE,
+        entity_registry_enabled_default=False,
+    ),
+    *(
+        NumberEntityDescription(
+            key=key,
+            name=name,
+            icon="mdi:timer-outline",
+            mode=NumberMode.BOX,
+            native_min_value=0,
+            native_max_value=660,
+            native_step=1,
+            native_unit_of_measurement=UnitOfTime.MINUTES,
+        )
+        for key, name in (
+            ("kitchen_timer_duration", "Kitchen timer duration"),
+            ("kitchen_timer2_duration", "Kitchen timer 2 duration"),
+        )
+    ),
+)
 
 
 async def async_setup_entry(
@@ -37,11 +72,14 @@ async def async_setup_entry(
     def discover_entities() -> None:
         entities = []
         for device_id, coordinator in entry.runtime_data.coordinators.items():
-            if not is_fridge(coordinator.data) or coordinator.device.get("temperature_unit") != "F":
-                continue
             for description in DESCRIPTIONS:
+                if (
+                    description.device_class == NumberDeviceClass.TEMPERATURE
+                    and coordinator.device.get("temperature_unit") != "F"
+                ):
+                    continue
                 key = (device_id, description.key)
-                if key not in discovered and description.key in coordinator.data:
+                if key not in discovered and supports_control(coordinator.data, description.key):
                     discovered.add(key)
                     entities.append(SubZeroNumber(coordinator, description))
         async_add_entities(entities)
@@ -54,17 +92,23 @@ async def async_setup_entry(
 class SubZeroNumber(SubZeroEntity, NumberEntity):
     @property
     def native_value(self) -> int | float | None:
+        if self.entity_description.key in KITCHEN_TIMERS:
+            return timer_minutes(self.coordinator.data, self.entity_description.key)
         value = self.coordinator.data.get(self.entity_description.key)
         return value if type(value) in (int, float) and math.isfinite(value) else None
 
     @property
     def native_min_value(self) -> float:
+        if self.entity_description.device_class != NumberDeviceClass.TEMPERATURE:
+            return self.entity_description.native_min_value
         return (temperature_range(self.entity_description.key, self.coordinator.data) or (34, 42))[
             0
         ]
 
     @property
     def native_max_value(self) -> float:
+        if self.entity_description.device_class != NumberDeviceClass.TEMPERATURE:
+            return self.entity_description.native_max_value
         return (temperature_range(self.entity_description.key, self.coordinator.data) or (34, 42))[
             1
         ]
@@ -73,6 +117,12 @@ class SubZeroNumber(SubZeroEntity, NumberEntity):
     def available(self) -> bool:
         data = self.coordinator.data
         key = self.entity_description.key
+        if not self.coordinator.last_update_success or not supports_control(data, key):
+            return False
+        if key in KITCHEN_TIMERS:
+            return type(data.get(f"{KITCHEN_TIMERS[key]}_active")) is bool
+        if key == "accent_light_level":
+            return self.native_value is not None
         if (
             not super().available
             or self.native_value is None
@@ -85,5 +135,5 @@ class SubZeroNumber(SubZeroEntity, NumberEntity):
 
     async def async_set_native_value(self, value: float) -> None:
         if type(value) not in (int, float) or not math.isfinite(value):
-            raise ServiceValidationError("Enter a valid temperature.")
+            raise ServiceValidationError("Enter a valid number.")
         await self.coordinator.async_set_properties({self.entity_description.key: round(value)})

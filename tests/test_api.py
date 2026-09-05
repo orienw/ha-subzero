@@ -1,6 +1,7 @@
 """Cloud failures, token rotation and both observed SignalR envelope versions."""
 
 import asyncio
+import base64
 import json
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
@@ -430,9 +431,14 @@ async def control_server(aiohttp_server, monkeypatch, socket_enabled):
         assert request.headers["Ocp-Apim-Subscription-Key"] == "test-key"
         body = await request.json()
         behavior["requests"].append(body)
-        return web.json_response(
-            behavior["response"], status=behavior["status"], headers={"Retry-After": "300"}
+        status, response = (
+            behavior["responses"].pop(0)
+            if "responses" in behavior
+            else (behavior["status"], behavior["response"])
         )
+        if isinstance(response, str):
+            return web.Response(text=response, status=status)
+        return web.json_response(response, status=status, headers={"Retry-After": "300"})
 
     app = web.Application()
     app.router.add_post("/consumerapp/device/{device_id}/directmethod/executeAPICmd", command)
@@ -460,7 +466,7 @@ async def test_control_writes_use_the_authenticated_app_envelope(hass, control_s
     [
         ("", False),
         ("unit_on", False),
-        ("cav_light_on", True),
+        ("cav_light_on", 1),
         ("remote_svc_reg_token", "private"),
         ("air_filter_on", 1),
         ("ref_set_temp", True),
@@ -508,3 +514,176 @@ async def test_failed_control_request_is_not_automatically_retried(control_serve
         with pytest.raises(api.ApiError):
             await client.set_property("test-fridge", "air_filter_on", False)
     assert len(control_server["requests"]) == 1
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("cav_set_temp", 350),
+        ("cav2_set_temp", 375),
+        ("cav_cook_mode", 1),
+        ("cav2_cook_mode", 2),
+        ("cav_unit_on", True),
+        ("cav2_unit_on", False),
+        ("cav_light_on", True),
+        ("cav2_light_on", False),
+        ("kitchen_timer_duration", 30),
+        ("kitchen_timer2_duration", 0),
+        ("accent_light_level", 50),
+        ("wash_cycle_on", True),
+        ("delay_start_timer_duration", 12),
+        ("heated_dry_on", True),
+        ("extended_dry_on", False),
+        ("sani_rinse_on", True),
+        ("high_temp_wash_on", False),
+        ("top_rack_only_on", True),
+    ],
+)
+async def test_cloud_controls_use_the_existing_direct_method(control_server, tokens, key, value):
+    async with aiohttp.ClientSession() as session:
+        await api.SubZeroClient(session, "test-key", tokens).set_property("test-fridge", key, value)
+    assert control_server["requests"][0]["pload"] == {"cmd": "set", "params": {key: value}}
+
+
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        (200, "OK"),
+        (200, '"OK"'),
+        (200, ""),
+        (200, {"status": 0}),
+        (200, {"resp": {"status": 0}}),
+        (200, {"status": 0, "resp": {}}),
+        (500, {"Message": "OK"}),
+    ],
+)
+async def test_cloud_command_acknowledgements_do_not_require_a_snapshot(
+    control_server, tokens, status, body
+):
+    control_server.update(status=status, response=body)
+    async with aiohttp.ClientSession() as session:
+        client = api.SubZeroClient(session, "test-key", tokens)
+        await client.set_property("test-fridge", "cav_light_on", True)
+    assert len(control_server["requests"]) == 1
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"resp": {"status": 3}},
+        {"status": 3, "resp": {}},
+        {"status": True, "resp": {}},
+        {"resp": {"error": "private error"}},
+        {"resp": None},
+    ],
+)
+async def test_nested_cloud_command_errors_are_not_accepted(control_server, tokens, body):
+    control_server["response"] = body
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(api.ApiError):
+            await api.SubZeroClient(session, "test-key", tokens).set_property(
+                "test-fridge", "cav_light_on", True
+            )
+    assert len(control_server["requests"]) == 1
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+async def test_cloud_status_accepts_both_snapshot_shapes(control_server, tokens, wrapped):
+    data = {"appliance_model": "DW2450WS", "wash_cycle": 2, "wash_status": 0}
+    control_server["response"] = {"status": 0, "resp": data} if wrapped else data
+    async with aiohttp.ClientSession() as session:
+        client = api.SubZeroClient(session, "test-key", tokens)
+        assert await client.state("test-fridge") == data
+    assert len(control_server["requests"]) == 1
+
+
+@pytest.mark.parametrize(("status", "ack"), [(200, "OK"), (500, {"Message": "OK"})])
+async def test_cloud_status_remembers_get_async_fallback(control_server, tokens, status, ack):
+    data = {"appliance_model": "DW2450WS", "wash_status": 0}
+    control_server["responses"] = [(status, ack), (200, {"resp": data}), (200, {"resp": data})]
+    async with aiohttp.ClientSession() as session:
+        client = api.SubZeroClient(session, "test-key", tokens)
+        assert await client.state("test-fridge") == data
+        assert await client.state("test-fridge") == data
+    assert [request["pload"]["cmd"] for request in control_server["requests"]] == [
+        "get",
+        "get_async",
+        "get_async",
+    ]
+
+
+async def test_genuine_server_failure_never_uses_the_acknowledgement_exception(
+    control_server, tokens
+):
+    control_server.update(status=500, response={"Message": "Device offline"})
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(api.ApiError, match="HTTP 500"):
+            await api.SubZeroClient(session, "test-key", tokens).state("test-fridge")
+    assert len(control_server["requests"]) == 1
+
+
+def test_notification_expiry_is_independent_of_account_token(monkeypatch):
+    monkeypatch.setattr(api.time, "time", lambda: 1000)
+    claims = base64.urlsafe_b64encode(json.dumps({"exp": 1900}).encode()).decode().rstrip("=")
+    assert api.notification_lifetime(f"header.{claims}.signature") == 840
+    assert api.notification_lifetime("opaque-token") == 3000
+
+
+async def test_live_signalr_socket_is_renewed_before_token_expiry(
+    hass, aiohttp_server, monkeypatch, socket_enabled, tokens
+):
+    sockets = []
+    commands = []
+    pings = []
+
+    async def negotiate_user(request):
+        return web.json_response({"url": origin + "/client/", "accessToken": "short-lived-token"})
+
+    async def negotiate_transport(request):
+        return web.json_response({"connectionToken": "connection"})
+
+    async def websocket(request):
+        socket = web.WebSocketResponse()
+        await socket.prepare(request)
+        sockets.append(socket)
+        await socket.receive_str()
+        await socket.send_str("{}" + api.SEPARATOR)
+        async for message in socket:
+            if message.type == aiohttp.WSMsgType.TEXT:
+                pings.append(message.data)
+                await socket.send_str('{"type":6}' + api.SEPARATOR)
+        return socket
+
+    async def command(request):
+        command = (await request.json())["pload"]["cmd"]
+        commands.append(command)
+        await sockets[-1].send_str(
+            json.dumps(notification({"appliance_model": "TEST-FRIDGE"}, full=True)) + api.SEPARATOR
+        )
+        return web.json_response({})
+
+    app = web.Application()
+    app.router.add_post("/signal-r/negotiateUser", negotiate_user)
+    app.router.add_post("/client/negotiate", negotiate_transport)
+    app.router.add_get("/client/", websocket)
+    app.router.add_post("/consumerapp/device/{device_id}/directmethod/executeAPICmd", command)
+    server = await aiohttp_server(app)
+    origin = str(server.make_url("/")).rstrip("/")
+    monkeypatch.setattr(api, "API_BASE", origin)
+    monkeypatch.setattr(api, "SIGNALR_ORIGIN", origin)
+    monkeypatch.setattr(api, "PING_INTERVAL", 0.01)
+    monkeypatch.setattr(api, "notification_lifetime", lambda _: 0.35)
+    client = api.SubZeroClient(async_get_clientsession(hass), "test-key", tokens)
+    stream = client.watch(["test-fridge"])
+    try:
+        async with asyncio.timeout(5):
+            first = await anext(stream)
+            second = await anext(stream)
+        assert first == second
+        assert client.push_connected
+        assert len(sockets) == 2 and sockets[0].closed
+        assert commands == ["open_cloud_async", "open_cloud_async"]
+        assert pings
+    finally:
+        await stream.aclose()
+    assert not client.push_connected

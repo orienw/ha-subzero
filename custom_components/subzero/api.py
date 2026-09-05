@@ -9,6 +9,7 @@ import time
 import uuid
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import aclosing
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -30,6 +31,18 @@ API_BASE = "https://prod.iot.subzero.com"
 SIGNALR_ORIGIN = "https://sznacasigprod.service.signalr.net"
 SEPARATOR = "\x1e"
 PING_INTERVAL = 15
+
+
+def notification_lifetime(token: str) -> float:
+    """Renew independently of the account token, even while pings keep arriving."""
+    try:
+        claims = json.loads(base64.urlsafe_b64decode(token.split(".")[1] + "=="))
+        expiry = float(claims["exp"])
+        if math.isfinite(expiry):
+            return max(1, min(3000, expiry - time.time() - 60))
+    except ValueError, TypeError, KeyError, IndexError:
+        pass
+    return 3000
 
 
 class ApiError(Exception):
@@ -160,6 +173,8 @@ class SubZeroClient:
         self.on_tokens = on_tokens
         self._refresh_lock = asyncio.Lock()
         self._retry_at = 0.0
+        self._state_commands: dict[str, str] = {}
+        self.push_connected = False
 
     async def _json(
         self,
@@ -167,6 +182,7 @@ class SubZeroClient:
         url: str | URL,
         *,
         token_request=False,
+        appliance_command=False,
         headers: dict[str, str] | None = None,
         **kwargs,
     ) -> dict:
@@ -187,6 +203,22 @@ class SubZeroClient:
                     raise RateLimited(delay)
                 if response.status in (401, 403) or (token_request and response.status == 400):
                     raise InvalidAuth("Sub-Zero requires a new sign-in.")
+                if appliance_command and response.status in (200, 500):
+                    body = (await response.text()).strip()
+                    if response.status == 200 and body in ("", "OK", '"OK"'):
+                        return {}
+                    try:
+                        result = json.loads(body)
+                    except ValueError:
+                        result = None
+                    if (
+                        response.status == 500
+                        and isinstance(result, dict)
+                        and result.get("Message", result.get("message")) == "OK"
+                    ):
+                        return {}
+                    if response.status == 200:
+                        return _object(result)
                 if response.status != 200:
                     raise ApiError(f"Sub-Zero returned HTTP {response.status}.")
                 try:
@@ -263,20 +295,31 @@ class SubZeroClient:
         return appliances
 
     async def _command(self, device_id: str, command: str, params: dict | None = None) -> dict:
-        if command not in {"get", "open_cloud_async", "set"}:
+        if command not in {"get", "get_async", "open_cloud_async", "set"}:
             raise ValueError("Unsupported appliance command")
         payload = {"cmd": command}
         if params is not None:
             payload["params"] = params
         path = "/consumerapp/device/" + quote(device_id, safe="") + "/directmethod/executeAPICmd"
         return await self._request(
-            "POST", path, json={"req_id": str(uuid.uuid4()), "pload": payload}
+            "POST",
+            path,
+            json={"req_id": str(uuid.uuid4()), "pload": payload},
+            appliance_command=True,
         )
 
     async def state(self, device_id: str) -> dict:
-        data = await self._command(device_id, "get")
+        command = self._state_commands.get(device_id, "get")
+        data = await self._command(device_id, command)
+        if not data and command == "get":
+            command = "get_async"
+            data = await self._command(device_id, command)
+        if "status" in data and (type(data["status"]) is not int or data["status"] != 0):
+            raise ApiError("The appliance rejected the status request.")
+        data = _object(data.get("resp", data))
         if not isinstance(data.get("appliance_model"), str):
             raise ApiError("The appliance did not return a status snapshot.")
+        self._state_commands[device_id] = command
         return data
 
     async def open_channel(self, device_id: str) -> None:
@@ -291,10 +334,26 @@ class SubZeroClient:
         ):
             raise ValueError("Unsupported setting or value type")
         response = await self._command(device_id, "set", {key: value})
+        if "status" in response and (
+            type(response["status"]) is not int or response["status"] != 0
+        ):
+            raise ApiError("Sub-Zero rejected the setting.")
+        response = _object(response.get("resp", response))
         if response and (type(response.get("status")) is not int or response["status"] != 0):
             raise ApiError("Sub-Zero rejected the setting.")
 
     async def watch(
+        self, device_ids: list[str]
+    ) -> AsyncIterator[tuple[str, StateUpdate | ApiError]]:
+        while True:
+            try:
+                async with aclosing(self._watch_connection(device_ids)) as updates:
+                    async for event in updates:
+                        yield event
+            finally:
+                self.push_connected = False
+
+    async def _watch_connection(
         self, device_ids: list[str]
     ) -> AsyncIterator[tuple[str, StateUpdate | ApiError]]:
         info = await self._request(
@@ -308,6 +367,7 @@ class SubZeroClient:
         except KeyError, TypeError, ValueError:
             raise ApiError("Sub-Zero returned an unexpected notification endpoint.") from None
         headers = {"Authorization": "Bearer " + access_token}
+        renew_at = time.monotonic() + notification_lifetime(access_token)
         negotiate = endpoint.with_path(
             endpoint.path.rstrip("/") + "/negotiate", keep_query=True
         ).update_query(negotiateVersion=1)
@@ -337,6 +397,7 @@ class SubZeroClient:
                 handshake, pending = first.data.split(SEPARATOR, 1)
                 if _object(handshake) != {}:
                     raise ApiError("Sub-Zero rejected the notification handshake.")
+                self.push_connected = True
                 errors: deque[tuple[str, ApiError]] = deque()
                 pending_channels = set(device_ids)
 
@@ -385,6 +446,8 @@ class SubZeroClient:
                                     yield device_id, update
                                     break
                         now = time.monotonic()
+                        if now >= renew_at:
+                            return
                         if now - last_received > 60:
                             raise ApiError("Sub-Zero's notification connection stopped responding.")
                         if now >= next_ping:
@@ -392,7 +455,7 @@ class SubZeroClient:
                             next_ping = now + PING_INTERVAL
                         await asyncio.wait(
                             tasks,
-                            timeout=max(0.1, next_ping - time.monotonic()),
+                            timeout=max(0.1, min(next_ping, renew_at) - time.monotonic()),
                             return_when=asyncio.FIRST_COMPLETED,
                         )
                         if opening.done():

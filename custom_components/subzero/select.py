@@ -1,4 +1,4 @@
-"""Fridge modes, ice maker, crisper temperature and humidity choices."""
+"""Fridge modes, oven cooking modes, and dishwasher delay start."""
 
 from homeassistant.components.select import SelectEntity, SelectEntityDescription
 from homeassistant.core import HomeAssistant, callback
@@ -6,8 +6,8 @@ from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import SubZeroConfigEntry
-from .const import FRIDGE_ENUM_OPTIONS, FRIDGE_MODE_KEYS, ICE_KEYS
-from .controls import is_fridge
+from .const import COOK_MODES, FRIDGE_ENUM_OPTIONS, FRIDGE_MODE_KEYS, ICE_KEYS, MANUAL_COOK_MODES
+from .controls import is_fridge, supports_control
 from .entity import SubZeroEntity
 
 MODES = {
@@ -25,15 +25,33 @@ DESCRIPTIONS = (
     ),
     SelectEntityDescription(key="humidity_control", name="Humidity control", icon="mdi:water"),
     SelectEntityDescription(key="night_mode", name="Night mode", icon="mdi:weather-night"),
+    SelectEntityDescription(key="cav_cook_mode", name="Cooking mode", icon="mdi:stove"),
+    SelectEntityDescription(key="cav2_cook_mode", name="Lower oven cooking mode", icon="mdi:stove"),
+    SelectEntityDescription(
+        key="delay_start_timer_duration", name="Delay start", icon="mdi:timer-sand"
+    ),
 )
+ENUM_OPTIONS = {
+    **FRIDGE_ENUM_OPTIONS,
+    "cav_cook_mode": COOK_MODES,
+    "cav2_cook_mode": COOK_MODES,
+    "delay_start_timer_duration": {
+        "Off": 0,
+        **{f"{hours} hour{'s' if hours != 1 else ''}": hours for hours in range(1, 13)},
+    },
+}
 
 
 def control_keys(key: str, data: dict) -> tuple[str, ...]:
     if key == "ice_maker_mode":
-        return tuple(k for k in ICE_KEYS if k in data) if "ice_maker_on" in data else ()
+        return (
+            tuple(k for k in ICE_KEYS if k in data)
+            if is_fridge(data) and "ice_maker_on" in data
+            else ()
+        )
     if key == "operating_mode":
-        return tuple(k for k in FRIDGE_MODE_KEYS if k in data)
-    return (key,) if key in FRIDGE_ENUM_OPTIONS and key in data else ()
+        return tuple(k for k in FRIDGE_MODE_KEYS if k in data) if is_fridge(data) else ()
+    return (key,) if key in ENUM_OPTIONS and supports_control(data, key) else ()
 
 
 async def async_setup_entry(
@@ -45,8 +63,6 @@ async def async_setup_entry(
     def discover_entities() -> None:
         entities = []
         for device_id, coordinator in entry.runtime_data.coordinators.items():
-            if not is_fridge(coordinator.data):
-                continue
             for description in DESCRIPTIONS:
                 key = (device_id, description.key)
                 if key not in discovered and control_keys(description.key, coordinator.data):
@@ -67,17 +83,24 @@ class SubZeroSelect(SubZeroEntity, SelectEntity):
             return ["Off", "On", *(name for name, key in ICE_MODES.items() if key in data)]
         if self.entity_description.key == "operating_mode":
             return ["Normal", *(name for name, key in MODES.items() if key in data)]
-        return list(FRIDGE_ENUM_OPTIONS[self.entity_description.key])
+        key = self.entity_description.key
+        if key.endswith("_cook_mode"):
+            return [
+                name
+                for name, value in COOK_MODES.items()
+                if value not in MANUAL_COOK_MODES or value == data.get(key)
+            ]
+        return list(ENUM_OPTIONS[key])
 
     @property
     def available(self) -> bool:
         data = self.coordinator.data
         keys = control_keys(self.entity_description.key, data)
-        if not self.coordinator.last_update_success or not is_fridge(data) or not keys:
+        if not self.coordinator.last_update_success or not keys:
             return False
-        if self.entity_description.key in FRIDGE_ENUM_OPTIONS:
+        if self.entity_description.key in ENUM_OPTIONS:
             key = self.entity_description.key
-            return type(data[key]) is int and data[key] in FRIDGE_ENUM_OPTIONS[key].values()
+            return type(data[key]) is int and data[key] in ENUM_OPTIONS[key].values()
         return all(type(data[key]) is bool for key in keys)
 
     @property
@@ -85,11 +108,9 @@ class SubZeroSelect(SubZeroEntity, SelectEntity):
         if not self.available:
             return None
         data = self.coordinator.data
-        if self.entity_description.key in FRIDGE_ENUM_OPTIONS:
+        if self.entity_description.key in ENUM_OPTIONS:
             key = self.entity_description.key
-            return next(
-                name for name, value in FRIDGE_ENUM_OPTIONS[key].items() if data[key] == value
-            )
+            return next(name for name, value in ENUM_OPTIONS[key].items() if data[key] == value)
         if self.entity_description.key == "ice_maker_mode":
             active = [name for name, key in ICE_MODES.items() if data.get(key) is True]
             if active:
@@ -103,8 +124,10 @@ class SubZeroSelect(SubZeroEntity, SelectEntity):
             raise ServiceValidationError("The appliance does not support that option.")
         data = self.coordinator.data
         key = self.entity_description.key
-        if key in FRIDGE_ENUM_OPTIONS:
-            properties = {key: FRIDGE_ENUM_OPTIONS[key][option]}
+        if key.endswith("_cook_mode") and option == "Off":
+            properties = {key.replace("cook_mode", "unit_on"): False}
+        elif key in ENUM_OPTIONS:
+            properties = {key: ENUM_OPTIONS[key][option]}
         elif key == "ice_maker_mode":
             selected = ICE_MODES.get(option)
             properties = {

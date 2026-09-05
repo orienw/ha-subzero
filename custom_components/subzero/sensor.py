@@ -1,4 +1,8 @@
-"""Appliance temperatures, setpoints, filter life and Wi-Fi signal strength."""
+"""Appliance temperatures, timers, cycle status, and diagnostics."""
+
+import math
+from dataclasses import replace
+from datetime import datetime
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -11,11 +15,15 @@ from homeassistant.const import (
     SIGNAL_STRENGTH_DECIBELS_MILLIWATT,
     EntityCategory,
     UnitOfTemperature,
+    UnitOfTime,
+    UnitOfVolume,
 )
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import SubZeroConfigEntry
+from .const import COOK_MODES, OVEN_PREFIXES, WASH_CYCLES, WASH_STATUSES
+from .controls import appliance_datetime
 from .entity import SubZeroEntity
 
 DESCRIPTIONS = (
@@ -85,6 +93,113 @@ DESCRIPTIONS = (
     ),
 )
 
+ENUM_VALUES = {
+    "wash_cycle": WASH_CYCLES,
+    "wash_status": WASH_STATUSES,
+    **{
+        f"{prefix}_cook_mode": {value: name for name, value in COOK_MODES.items()}
+        for prefix in OVEN_PREFIXES
+    },
+}
+CONNECTION_KEYS = {"connection_mode", "live_reporting_mode"}
+DESCRIPTIONS += tuple(
+    replace(
+        description,
+        key=description.key.replace("cav_", "cav2_", 1),
+        name=f"Lower oven {description.name.removeprefix('Oven ').lower()}",
+    )
+    for description in DESCRIPTIONS
+    if description.key.startswith("cav_")
+)
+DESCRIPTIONS += (
+    SensorEntityDescription(
+        key="connection_mode",
+        name="Connection mode",
+        device_class=SensorDeviceClass.ENUM,
+        options=["Cloud"],
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+    ),
+    SensorEntityDescription(
+        key="live_reporting_mode",
+        name="Live reporting mode",
+        device_class=SensorDeviceClass.ENUM,
+        options=["Cloud push", "Disconnected"],
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+    ),
+    *(
+        SensorEntityDescription(
+            key=key,
+            name=name,
+            device_class=SensorDeviceClass.TEMPERATURE,
+            native_unit_of_measurement=UnitOfTemperature.FAHRENHEIT,
+        )
+        for key, name in (
+            ("ref_display_temp", "Refrigerator display temperature"),
+            ("frz_display_temp", "Freezer display temperature"),
+        )
+    ),
+    SensorEntityDescription(
+        key="water_filter_gal_remaining",
+        name="Water filter capacity remaining",
+        device_class=SensorDeviceClass.VOLUME,
+        native_unit_of_measurement=UnitOfVolume.GALLONS,
+        icon="mdi:water",
+    ),
+    *(
+        SensorEntityDescription(
+            key=key,
+            name=name,
+            device_class=SensorDeviceClass.ENUM,
+            options=list(ENUM_VALUES[key].values()),
+        )
+        for key, name in (
+            ("wash_cycle", "Wash cycle"),
+            ("wash_status", "Wash status"),
+            ("cav_cook_mode", "Cooking mode"),
+            ("cav2_cook_mode", "Lower oven cooking mode"),
+        )
+    ),
+    *(
+        SensorEntityDescription(key=key, name=name, device_class=SensorDeviceClass.TIMESTAMP)
+        for key, name in (
+            ("max_ice_start_time", "Max ice start"),
+            ("max_ice_end_time", "Max ice end"),
+            ("high_use_start_time", "High use start"),
+            ("high_use_end_time", "High use end"),
+            ("cav_cook_timer_start_time", "Cooking timer start"),
+            ("cav_cook_timer_end_time", "Cooking timer end"),
+            ("cav2_cook_timer_start_time", "Lower oven cooking timer start"),
+            ("cav2_cook_timer_end_time", "Lower oven cooking timer end"),
+            ("kitchen_timer_start_time", "Kitchen timer start"),
+            ("kitchen_timer_end_time", "Kitchen timer end"),
+            ("kitchen_timer2_start_time", "Kitchen timer 2 start"),
+            ("kitchen_timer2_end_time", "Kitchen timer 2 end"),
+            ("wash_cycle_end_time", "Wash cycle end"),
+            ("delay_start_timer_start_time", "Delay start timer start"),
+            ("delay_start_timer_end_time", "Delay start timer end"),
+        )
+    ),
+    SensorEntityDescription(
+        key="uptime",
+        name="Uptime",
+        device_class=SensorDeviceClass.DURATION,
+        native_unit_of_measurement=UnitOfTime.SECONDS,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+    ),
+    *(
+        SensorEntityDescription(
+            key=key,
+            name=name,
+            entity_category=EntityCategory.DIAGNOSTIC,
+            entity_registry_enabled_default=False,
+        )
+        for key, name in (("ipv4_addr", "IP address"), ("device_wlan_id", "MAC address"))
+    ),
+)
+
 
 async def async_setup_entry(
     hass: HomeAssistant, entry: SubZeroConfigEntry, async_add_entities: AddEntitiesCallback
@@ -97,7 +212,10 @@ async def async_setup_entry(
         for device_id, coordinator in entry.runtime_data.coordinators.items():
             for description in DESCRIPTIONS:
                 key = (device_id, description.key)
-                if key in discovered or description.key not in coordinator.data:
+                if key in discovered or (
+                    description.key not in CONNECTION_KEYS
+                    and description.key not in coordinator.data
+                ):
                     continue
                 if (
                     description.device_class == SensorDeviceClass.TEMPERATURE
@@ -115,17 +233,50 @@ async def async_setup_entry(
 
 class SubZeroSensor(SubZeroEntity, SensorEntity):
     @property
-    def native_value(self) -> int | float | None:
+    def available(self) -> bool:
+        if self.entity_description.key in CONNECTION_KEYS:
+            return True
+        return (
+            self.coordinator.last_update_success
+            and self.entity_description.key in self.coordinator.data
+        )
+
+    @property
+    def native_value(self) -> int | float | str | datetime | None:
         key = self.entity_description.key
+        if key == "connection_mode":
+            return "Cloud"
+        if key == "live_reporting_mode":
+            return (
+                "Cloud push"
+                if self.coordinator.client.push_connected and self.coordinator.last_update_success
+                else "Disconnected"
+            )
         value = self.coordinator.data.get(key)
-        if not isinstance(value, (int, float)) or isinstance(value, bool):
+        if self.entity_description.device_class == SensorDeviceClass.TIMESTAMP:
+            return appliance_datetime(value, self.coordinator.data)
+        if key in ENUM_VALUES:
+            return ENUM_VALUES[key].get(value) if type(value) is int else None
+        if key in {"ipv4_addr", "device_wlan_id"}:
+            return value if isinstance(value, str) else None
+        if key == "uptime" and isinstance(value, str):
+            try:
+                hours, minutes, seconds = map(int, value.split(":"))
+                return (
+                    hours * 3600 + minutes * 60 + seconds
+                    if hours >= 0 and 0 <= minutes < 60 and 0 <= seconds < 60
+                    else None
+                )
+            except ValueError:
+                return None
+        if type(value) not in (int, float) or not math.isfinite(value):
             return None
-        if key.startswith("cav_"):
+        if key.startswith(("cav_", "cav2_")):
             if value == 0:
                 return None
             if (
-                key.startswith("cav_probe_")
-                and self.coordinator.data.get("cav_probe_on") is not True
+                "_probe_" in key
+                and self.coordinator.data.get(key.split("_", 1)[0] + "_probe_on") is not True
             ):
                 return None
         return value

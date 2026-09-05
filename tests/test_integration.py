@@ -89,6 +89,8 @@ async def test_only_reported_entities_are_created_and_private_fields_discarded(h
     assert {entity.unique_id for entity in entities} == {
         "test-fridge_ref_set_temp",
         "test-fridge_ref_door_ajar",
+        "test-fridge_connection_mode",
+        "test-fridge_live_reporting_mode",
     }
     assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "38"
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
@@ -351,7 +353,7 @@ async def test_upgrade_enables_old_defaults_and_preserves_user_disabled_entities
         modes = [
             entity
             for entity in er.async_entries_for_config_entry(registry, entry.entry_id)
-            if entity.entity_id != wifi.entity_id
+            if entity.entity_id != wifi.entity_id and entity.domain == "binary_sensor"
         ]
         assert all(entity.disabled_by is None for entity in modes)
         await hass.config_entries.async_unload(entry.entry_id)
@@ -404,9 +406,14 @@ async def test_oven_entities_use_reported_properties_and_correct_manufacturer(ha
     )
     assert device.manufacturer == "Wolf"
     assert device.model == "SO3050PMSP"
-    entities = er.async_entries_for_device(er.async_get(hass), device.id)
-    assert len(entities) == 20
-    assert all(entity.disabled_by is None for entity in entities)
+    entities = er.async_entries_for_device(
+        er.async_get(hass), device.id, include_disabled_entities=True
+    )
+    assert len(entities) == 25
+    assert {entity.unique_id for entity in entities if entity.disabled_by is not None} == {
+        "test-oven_connection_mode",
+        "test-oven_live_reporting_mode",
+    }
     assert hass.states.get("binary_sensor.wall_oven_oven_light").state == "off"
     assert hass.states.get("binary_sensor.wall_oven_cooking").state == "off"
     assert hass.states.get("binary_sensor.wall_oven_kitchen_timer_2_active").state == "off"
@@ -500,3 +507,31 @@ async def test_oven_temperature_rejects_invalid_readings(hass, oven_loaded, valu
     await updates.put(("test-oven", StateUpdate({"cav_temp": value}, full=False)))
     await hass.async_block_till_done()
     assert hass.states.get("sensor.wall_oven_oven_temperature").state in {"unknown", "unavailable"}
+
+
+async def test_second_cavity_is_discovered_only_when_reported(hass, oven_loaded):
+    entry, client, updates = oven_loaded
+    assert hass.states.get("climate.wall_oven_lower_oven") is None
+    await updates.put(
+        (
+            "test-oven",
+            StateUpdate(
+                {
+                    "cav2_set_temp": 350,
+                    "cav2_temp": 73,
+                    "cav2_unit_on": False,
+                    "cav2_light_on": False,
+                },
+                full=False,
+            ),
+        )
+    )
+    await hass.async_block_till_done()
+    assert hass.states.get("climate.wall_oven_lower_oven").state == "off"
+    assert hass.states.get("sensor.wall_oven_lower_oven_temperature").state == "73"
+    assert hass.states.get("switch.wall_oven_lower_oven_light").state == "off"
+    registry = er.async_get(hass)
+    original = registry.async_get("climate.wall_oven_lower_oven")
+    await updates.put(("test-oven", StateUpdate({"cav2_temp": 100}, full=False)))
+    await hass.async_block_till_done()
+    assert registry.async_get(original.entity_id).id == original.id

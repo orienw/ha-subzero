@@ -1,4 +1,4 @@
-"""Sub-Zero and Wolf appliance cloud integration."""
+"""Sub-Zero, Wolf, and Cove appliance cloud integration."""
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
@@ -18,6 +18,8 @@ PLATFORMS = [
     Platform.NUMBER,
     Platform.SELECT,
     Platform.SWITCH,
+    Platform.CLIMATE,
+    Platform.BUTTON,
 ]
 type SubZeroConfigEntry = ConfigEntry[SubZeroAccount]
 

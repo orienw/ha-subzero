@@ -1,5 +1,7 @@
 """Door, operating-mode and service indicators."""
 
+from dataclasses import replace
+
 from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
     BinarySensorEntity,
@@ -9,6 +11,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import SubZeroConfigEntry
+from .const import DISHWASHER_SWITCHES
 from .entity import SubZeroEntity
 
 DESCRIPTIONS = (
@@ -88,6 +91,46 @@ DESCRIPTIONS = (
         key="kitchen_timer2_complete",
         name="Kitchen timer 2 complete",
         icon="mdi:timer-check-outline",
+    ),
+)
+
+DESCRIPTIONS += (
+    BinarySensorEntityDescription(
+        key="cav_cook_timer_active", name="Cooking timer active", icon="mdi:timer-outline"
+    ),
+    BinarySensorEntityDescription(
+        key="cav_mode_change_enabled", name="Cooking mode change enabled", icon="mdi:stove"
+    ),
+)
+DESCRIPTIONS += tuple(
+    replace(
+        description,
+        key=description.key.replace("cav_", "cav2_", 1),
+        name=f"Lower oven {description.name.removeprefix('Oven ').lower()}",
+    )
+    for description in DESCRIPTIONS
+    if description.key.startswith("cav_")
+)
+DESCRIPTIONS += (
+    BinarySensorEntityDescription(
+        key="door_ajar", name="Door", device_class=BinarySensorDeviceClass.DOOR
+    ),
+    BinarySensorEntityDescription(
+        key="wash_cycle_on", name="Wash cycle active", device_class=BinarySensorDeviceClass.RUNNING
+    ),
+    BinarySensorEntityDescription(key="remote_ready", name="Remote ready", icon="mdi:remote"),
+    BinarySensorEntityDescription(
+        key="rinse_aid_low", name="Rinse aid low", device_class=BinarySensorDeviceClass.PROBLEM
+    ),
+    BinarySensorEntityDescription(
+        key="softener_low", name="Softener salt low", device_class=BinarySensorDeviceClass.PROBLEM
+    ),
+    BinarySensorEntityDescription(
+        key="delay_start_timer_active", name="Delay start active", icon="mdi:timer-sand"
+    ),
+    *(
+        BinarySensorEntityDescription(key=key, name=name)
+        for key, name in DISHWASHER_SWITCHES.items()
     ),
 )
 
