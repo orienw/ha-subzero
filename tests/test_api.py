@@ -4,7 +4,7 @@ import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
 import pytest
@@ -93,6 +93,8 @@ async def api_server(aiohttp_server, monkeypatch, socket_enabled):
         assert request.headers["Userid"] == "test-owner"
         assert request.headers["Ocp-Apim-Subscription-Key"] == "test-key"
         behavior["requests"].append(request.headers.get("Authorization"))
+        if "response" in behavior:
+            return web.json_response(behavior["response"])
         status = behavior["status"]
         if status == 429:
             return web.json_response({}, status=429, headers={"Retry-After": "300"})
@@ -154,6 +156,54 @@ async def test_unauthorized_request_refreshes_then_retries_once(api_server, toke
     assert not hasattr(appliances[0], "pin")
 
 
+async def test_late_unauthorized_response_reuses_already_refreshed_token(api_server, tokens):
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    calls = []
+    async with aiohttp.ClientSession() as session:
+        client = api.SubZeroClient(session, "test-key", tokens)
+        request = client._json
+
+        async def delayed_request(method, url, **kwargs):
+            if url == api.API_BASE + "/consumerapp/user/devices":
+                access = kwargs["headers"]["Authorization"]
+                calls.append(access)
+                if access == "Bearer " + tokens["access_token"]:
+                    if len(calls) == 1:
+                        first_started.set()
+                        await release_first.wait()
+                    raise InvalidAuth("Expired")
+            return await request(method, url, **kwargs)
+
+        client._json = delayed_request
+        first = asyncio.create_task(client.appliances())
+        await first_started.wait()
+        try:
+            assert await client.appliances()
+        finally:
+            release_first.set()
+            assert await first
+    assert api_server["refreshes"] == 1
+    assert len(calls) == 4
+    assert calls[2] == calls[3]
+
+
+@pytest.mark.parametrize("access", [None, 123, {}, "not-a-token"])
+def test_invalid_access_tokens_report_authentication_failure(tokens, access):
+    with pytest.raises(InvalidAuth):
+        api.token_state({**tokens, "access_token": access})
+
+
+@pytest.mark.parametrize(
+    "device", [None, {}, {"id": None}, {"id": 123}, {"id": ""}, {"id": "test", "name": 123}]
+)
+async def test_invalid_appliance_list_reports_connection_failure(api_server, tokens, device):
+    api_server["response"] = {"devices": [device]}
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(api.ApiError, match="invalid appliance list"):
+            await api.SubZeroClient(session, "test-key", tokens).appliances()
+
+
 async def test_requests_override_shared_home_assistant_headers(hass, api_server, tokens):
     api_server["status"] = 401
     session = async_get_clientsession(hass)
@@ -178,11 +228,15 @@ async def test_rate_limit_blocks_followup_requests(api_server, tokens):
 
 
 @pytest.mark.parametrize("offline", [False, True])
+@pytest.mark.parametrize("slow_open", [False, True])
 async def test_single_signalr_connection_routes_multiple_appliances(
-    hass, aiohttp_server, monkeypatch, socket_enabled, tokens, offline
+    hass, aiohttp_server, monkeypatch, socket_enabled, tokens, offline, slow_open
 ):
     sockets = []
     opened = []
+    release_open = asyncio.Event()
+    first_update = asyncio.Event()
+    heartbeat = asyncio.Event()
 
     async def negotiate_user(request):
         assert request.headers.getall("User-Agent") == ["Dart/3.11 (dart:io)"]
@@ -221,8 +275,10 @@ async def test_single_signalr_connection_routes_multiple_appliances(
             "version": 1,
         }
         await socket.send_str("{}" + api.SEPARATOR)
-        async for _ in socket:
-            pass
+        async for message in socket:
+            if message.type == aiohttp.WSMsgType.TEXT:
+                assert json.loads(message.data.rstrip(api.SEPARATOR)) == {"type": 6}
+                heartbeat.set()
         return socket
 
     async def command(request):
@@ -230,6 +286,8 @@ async def test_single_signalr_connection_routes_multiple_appliances(
         device_id = request.match_info["device_id"]
         assert (await request.json())["pload"]["cmd"] == "open_cloud_async"
         opened.append(device_id)
+        if slow_open and device_id == "test-oven":
+            await release_open.wait()
         if offline and device_id == "test-oven":
             return web.json_response({}, status=503)
         event = notification(
@@ -250,23 +308,105 @@ async def test_single_signalr_connection_routes_multiple_appliances(
     origin = str(server.make_url("/")).rstrip("/")
     monkeypatch.setattr(api, "API_BASE", origin)
     monkeypatch.setattr(api, "SIGNALR_ORIGIN", origin)
+    monkeypatch.setattr(api, "PING_INTERVAL", 0.01)
     received = {}
     session = async_get_clientsession(hass)
     original_headers = dict(session.headers)
     stream = api.SubZeroClient(session, "test-key", tokens).watch(["test-fridge", "test-oven"])
-    async with asyncio.timeout(5):
+
+    async def collect():
         try:
             async for device_id, update in stream:
                 received[device_id] = update
+                first_update.set()
                 if len(received) == 2:
                     break
         finally:
             await stream.aclose()
+
+    collector = asyncio.create_task(collect())
+    try:
+        async with asyncio.timeout(5):
+            if slow_open:
+                await first_update.wait()
+                await heartbeat.wait()
+                release_open.set()
+            await collector
+    finally:
+        release_open.set()
+        collector.cancel()
+        await asyncio.gather(collector, return_exceptions=True)
     assert dict(session.headers) == original_headers
     assert len(sockets) == 1
     assert opened == ["test-fridge", "test-oven"]
     assert isinstance(received["test-fridge"], api.StateUpdate)
     assert isinstance(received["test-oven"], api.ApiError if offline else api.StateUpdate)
+
+
+@pytest.mark.parametrize("error", [None, InvalidAuth("Expired"), api.RateLimited(300)])
+async def test_signalr_cleans_up_pending_tasks_and_preserves_channel_errors(tokens, error):
+    opening = asyncio.Event()
+    receiving = asyncio.Event()
+    channel_cancelled = asyncio.Event()
+    receive_cancelled = asyncio.Event()
+    release = asyncio.Event()
+    frames = iter(
+        [
+            "{}" + api.SEPARATOR,
+            json.dumps(notification({"ref_door_ajar": True})) + api.SEPARATOR,
+        ]
+    )
+
+    async def receive(**kwargs):
+        if (frame := next(frames, None)) is not None:
+            return aiohttp.WSMessage(aiohttp.WSMsgType.TEXT, frame, "")
+        receiving.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            receive_cancelled.set()
+            raise
+        return aiohttp.WSMessage(aiohttp.WSMsgType.CLOSED, None, "")
+
+    async def open_channel(device_id):
+        opening.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            channel_cancelled.set()
+            raise
+        if error is not None:
+            raise error
+
+    socket = AsyncMock()
+    socket.receive.side_effect = receive
+    session = MagicMock()
+    session.ws_connect.return_value.__aenter__.return_value = socket
+    client = api.SubZeroClient(session, "test-key", tokens)
+    client._request = AsyncMock(
+        return_value={"url": api.SIGNALR_ORIGIN + "/client/", "accessToken": "test-signalr"}
+    )
+    client._json = AsyncMock(return_value={"connectionToken": "test-connection"})
+    client.open_channel = open_channel
+    stream = client.watch(["test-fridge"])
+    try:
+        assert await anext(stream) == (
+            "test-fridge",
+            api.StateUpdate({"ref_door_ajar": True}, full=False),
+        )
+        await opening.wait()
+        await receiving.wait()
+        if error is not None:
+            release.set()
+            with pytest.raises(type(error)) as caught:
+                await anext(stream)
+            assert caught.value is error
+    finally:
+        await stream.aclose()
+    if error is None:
+        assert channel_cancelled.is_set()
+        assert receive_cancelled.is_set()
+    session.ws_connect.return_value.__aexit__.assert_awaited_once()
 
 
 @pytest.fixture

@@ -6,6 +6,7 @@ import json
 import math
 import time
 import uuid
+from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -22,6 +23,7 @@ from .const import WRITABLE_BOOLEAN_KEYS, WRITABLE_INTEGER_KEYS
 API_BASE = "https://prod.iot.subzero.com"
 SIGNALR_ORIGIN = "https://sznacasigprod.service.signalr.net"
 SEPARATOR = "\x1e"
+PING_INTERVAL = 15
 
 
 class ApiError(Exception):
@@ -54,6 +56,8 @@ def token_state(tokens: dict, previous: dict | None = None) -> dict:
     previous = previous or {}
     try:
         access = tokens["access_token"]
+        if not isinstance(access, str) or not access:
+            raise ValueError
         claims = json.loads(base64.urlsafe_b64decode(access.split(".")[1] + "=="))
         if not isinstance(claims, dict):
             raise ValueError
@@ -186,12 +190,13 @@ class SubZeroClient:
         except aiohttp.ClientError, TimeoutError:
             raise ApiError("Could not connect to Sub-Zero.") from None
 
-    async def refresh(self, *, force=False) -> None:
-        previous_access = self.tokens["access_token"]
+    async def refresh(self, *, rejected_token: str | None = None) -> None:
         async with self._refresh_lock:
-            if self.tokens["expires_at"] > time.time() + 120:
-                if not force or self.tokens["access_token"] != previous_access:
-                    return
+            if (
+                self.tokens["expires_at"] > time.time() + 120
+                and self.tokens["access_token"] != rejected_token
+            ):
+                return
             data = await self._json(
                 "POST",
                 TOKEN_URL,
@@ -213,8 +218,9 @@ class SubZeroClient:
     async def _request(self, method: str, path: str, **kwargs) -> dict:
         await self.refresh()
         for attempt in range(2):
+            access_token = self.tokens["access_token"]
             headers = {
-                "Authorization": "Bearer " + self.tokens["access_token"],
+                "Authorization": "Bearer " + access_token,
                 "Ocp-Apim-Subscription-Key": self.subscription_key,
                 "Userid": self.tokens["user_id"],
                 "Accept": "application/json",
@@ -224,25 +230,31 @@ class SubZeroClient:
             except InvalidAuth:
                 if attempt:
                     raise
-                await self.refresh(force=True)
+                await self.refresh(rejected_token=access_token)
         raise InvalidAuth("Sub-Zero requires a new sign-in.")
 
     async def appliances(self) -> list[Appliance]:
         data = await self._request("GET", "/consumerapp/user/devices")
         if not isinstance(data.get("devices"), list):
             raise ApiError("Sub-Zero did not return the appliance list.")
-        try:
-            return [
+        appliances = []
+        for device in data["devices"]:
+            if (
+                not isinstance(device, dict)
+                or not isinstance(device.get("id"), str)
+                or not device["id"]
+                or not isinstance(device.get("name") or "Sub-Zero", str)
+            ):
+                raise ApiError("Sub-Zero returned an invalid appliance list.")
+            appliances.append(
                 Appliance(
-                    d["id"],
-                    d.get("name") or "Sub-Zero",
-                    d.get("temperatureUnitForAppliance"),
-                    d.get("applianceId", ""),
+                    device["id"],
+                    device.get("name") or "Sub-Zero",
+                    device.get("temperatureUnitForAppliance"),
+                    device.get("applianceId", ""),
                 )
-                for d in data["devices"]
-            ]
-        except KeyError, TypeError:
-            raise ApiError("Sub-Zero returned an invalid appliance list.") from None
+            )
+        return appliances
 
     async def _command(self, device_id: str, command: str, params: dict | None = None) -> dict:
         if command not in {"get", "open_cloud_async", "set"}:
@@ -319,45 +331,69 @@ class SubZeroClient:
                 handshake, pending = first.data.split(SEPARATOR, 1)
                 if _object(handshake) != {}:
                     raise ApiError("Sub-Zero rejected the notification handshake.")
-                for device_id in device_ids:
-                    try:
-                        await self.open_channel(device_id)
-                    except RateLimited:
-                        raise
-                    except ApiError as error:
-                        yield device_id, error
-                next_ping = time.monotonic() + 15
-                last_received = time.monotonic()
-                while True:
-                    while SEPARATOR in pending:
-                        frame, pending = pending.split(SEPARATOR, 1)
-                        if not frame:
-                            continue
-                        event = _object(frame)
-                        if event.get("type") == 7:
-                            raise ApiError("Sub-Zero closed the notification connection.")
-                        for device_id in device_ids:
-                            update = parse_notification(event, device_id, self.tokens["user_id"])
-                            if update:
-                                yield device_id, update
-                                break
-                    now = time.monotonic()
-                    if now - last_received > 60:
-                        raise ApiError("Sub-Zero's notification connection stopped responding.")
-                    if now >= next_ping:
-                        await websocket.send_str('{"type":6}' + SEPARATOR)
-                        next_ping = now + 15
-                    try:
-                        message = await websocket.receive(
-                            timeout=max(0.1, next_ping - time.monotonic())
-                        )
-                    except TimeoutError:
-                        continue
-                    if message.type != aiohttp.WSMsgType.TEXT:
-                        raise ApiError("Sub-Zero's notification connection disconnected.")
+                errors: deque[tuple[str, ApiError]] = deque()
+
+                async def open_channels() -> None:
+                    for device_id in device_ids:
+                        try:
+                            await self.open_channel(device_id)
+                        except RateLimited:
+                            raise
+                        except ApiError as error:
+                            errors.append((device_id, error))
+
+                opening = asyncio.create_task(open_channels())
+                receiving = asyncio.create_task(websocket.receive())
+                tasks = {opening, receiving}
+                try:
+                    next_ping = time.monotonic() + PING_INTERVAL
                     last_received = time.monotonic()
-                    pending += message.data
-                    if len(pending) > 262144:
-                        raise ApiError("Sub-Zero sent an oversized notification.")
+                    while True:
+                        while errors:
+                            yield errors.popleft()
+                        while SEPARATOR in pending:
+                            frame, pending = pending.split(SEPARATOR, 1)
+                            if not frame:
+                                continue
+                            event = _object(frame)
+                            if event.get("type") == 7:
+                                raise ApiError("Sub-Zero closed the notification connection.")
+                            for device_id in device_ids:
+                                update = parse_notification(
+                                    event, device_id, self.tokens["user_id"]
+                                )
+                                if update:
+                                    yield device_id, update
+                                    break
+                        now = time.monotonic()
+                        if now - last_received > 60:
+                            raise ApiError("Sub-Zero's notification connection stopped responding.")
+                        if now >= next_ping:
+                            await websocket.send_str('{"type":6}' + SEPARATOR)
+                            next_ping = now + PING_INTERVAL
+                        await asyncio.wait(
+                            tasks,
+                            timeout=max(0.1, next_ping - time.monotonic()),
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        if opening.done():
+                            opening.result()
+                            tasks.discard(opening)
+                        if not receiving.done():
+                            continue
+                        message = receiving.result()
+                        if message.type != aiohttp.WSMsgType.TEXT:
+                            raise ApiError("Sub-Zero's notification connection disconnected.")
+                        tasks.remove(receiving)
+                        receiving = asyncio.create_task(websocket.receive())
+                        tasks.add(receiving)
+                        last_received = time.monotonic()
+                        pending += message.data
+                        if len(pending) > 262144:
+                            raise ApiError("Sub-Zero sent an oversized notification.")
+                finally:
+                    opening.cancel()
+                    receiving.cancel()
+                    await asyncio.gather(opening, receiving, return_exceptions=True)
         except aiohttp.ClientError, TimeoutError:
             raise ApiError("Could not maintain Sub-Zero's notification connection.") from None

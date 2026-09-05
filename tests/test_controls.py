@@ -275,11 +275,16 @@ async def test_humidity_and_night_mode_use_integer_values(
     ("key", "value"),
     [("humidity_control", 3), ("night_mode", 2), ("night_mode", True)],
 )
-async def test_unknown_mode_values_are_not_treated_as_enabled(hass, controls, key, value):
-    await controls.updates.put(("test-fridge", StateUpdate({key: value}, full=False)))
+@pytest.mark.parametrize("source", ["push", "refresh"])
+async def test_unknown_mode_values_are_not_treated_as_enabled(hass, controls, key, value, source):
+    coordinator = controls.entry.runtime_data.coordinators["test-fridge"]
+    if source == "push":
+        await controls.updates.put(("test-fridge", StateUpdate({key: value}, full=False)))
+    else:
+        controls.states["test-fridge"][key] = value
+        await coordinator.async_refresh()
     await hass.async_block_till_done()
     assert hass.states.get(f"select.kitchen_{key}").state == "unavailable"
-    coordinator = controls.entry.runtime_data.coordinators["test-fridge"]
     with pytest.raises(ServiceValidationError, match="unknown"):
         await coordinator.async_set_properties({key: 1})
     controls.client.set_property.assert_not_called()

@@ -80,13 +80,16 @@ class SubZeroLogin:
             "code_challenge": challenge,
             "code_challenge_method": "S256",
         }
-        await self._navigate(AUTHORIZE_URL + "?" + urlencode(params))
-        if self.settings.get("api") != "CombinedSigninAndSignup":
-            raise LoginError("Sub-Zero returned an unexpected sign-in step.")
-        await self._post_form(
-            {"request_type": "RESPONSE", "signInName": username, "password": password}
-        )
-        return await self._confirm()
+        try:
+            await self._navigate(AUTHORIZE_URL + "?" + urlencode(params))
+            if self.settings.get("api") != "CombinedSigninAndSignup":
+                raise LoginError("Sub-Zero returned an unexpected sign-in step.")
+            await self._post_form(
+                {"request_type": "RESPONSE", "signInName": username, "password": password}
+            )
+            return await self._confirm()
+        except KeyError, TypeError, ValueError:
+            raise LoginError("Sub-Zero returned an invalid sign-in response.") from None
 
     async def _post_form(self, data: dict) -> None:
         settings = self.settings
@@ -191,8 +194,10 @@ class SubZeroLogin:
                 "status": response.status,
                 "content_type": response.headers.get("Content-Type"),
             }
-            if response.status != 200:
+            if response.status in (400, 401, 403):
                 raise InvalidAuth("Sub-Zero did not accept the authorization code.")
+            if response.status != 200:
+                raise LoginError(f"Sub-Zero's token service returned HTTP {response.status}.")
             tokens = await response.json(content_type=None)
         if not isinstance(tokens, dict) or not all(
             tokens.get(key) for key in ("access_token", "id_token", "refresh_token")

@@ -39,7 +39,6 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             config_entry=entry,
             name=DOMAIN,
             update_interval=timedelta(minutes=30),
-            always_update=False,
         )
         self.client = client
         self.entry = entry

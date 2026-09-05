@@ -37,6 +37,8 @@ async def login_server(aiohttp_server, monkeypatch, socket_enabled):
     @web.middleware
     async def record_headers(request, handler):
         journey["requests"].append((request.path, request.headers.copy()))
+        if journey.get("response_path") == request.path:
+            return web.Response(text=journey["response_body"], status=journey["response_status"])
         return await handler(request)
 
     async def start(request):
@@ -209,3 +211,22 @@ async def test_rejects_failed_or_unverified_login(login_server, login_client, fa
 async def test_rejects_external_redirect_without_requesting_it(login_client):
     with pytest.raises(auth.LoginError, match="unsupported sign-in provider"):
         await login_client._navigate("https://unexpected.example.test/login")
+
+
+@pytest.mark.parametrize(
+    ("path", "body", "status"),
+    [
+        ("/authorize", 'SETTINGS = {"api":"CombinedSigninAndSignup"};', 200),
+        ("/token", "<html>Temporarily unavailable</html>", 200),
+        ("/metadata", "<html>Temporarily unavailable</html>", 200),
+        ("/keys", "<html>Temporarily unavailable</html>", 200),
+        ("/token", "Service unavailable", 503),
+    ],
+)
+async def test_bad_login_responses_report_connection_failure(
+    login_server, login_client, path, body, status
+):
+    login_server.update(response_path=path, response_body=body, response_status=status)
+    with pytest.raises(auth.LoginError) as error:
+        await login_client.login("owner@example.test", "test-only-password")
+    assert type(error.value) is auth.LoginError

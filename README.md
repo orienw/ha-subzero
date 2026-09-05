@@ -46,7 +46,7 @@ The available choices follow the properties reported by each fridge. Settings ch
 
 Select **Manual** crisper temperature mode to adjust its setpoint. In Automatic mode, the setpoint control is unavailable and the temperature sensor continues to show the configured value. The manual range stays within 2°F of the refrigerator setpoint, between 34°F and 42°F. See [Sub-Zero's crisper temperature guide](https://www.subzero-wolf.com/assistance/answers/sub-zero/next-classic/sub-zero-classic-series-cl-refrigerator-drawer-temperature-contr).
 
-Turn off **Max ice** before adjusting the freezer setpoint. Home Assistant uses the appliance's temperature limits and converts your preferred display unit to whole Fahrenheit setpoints.
+Turn off **Max ice** before adjusting the freezer setpoint. Home Assistant enforces the supported temperature ranges and converts your preferred display unit to whole Fahrenheit setpoints.
 
 [Humidity control](https://www.subzero-wolf.com/assistance/answers/sub-zero/next-classic/next-classic-humidity-control) affects the refrigerator zone. [Night mode](https://www.subzero-wolf.com/assistance/answers/sub-zero/next-classic/next-classic-night-mode) dims the interior lights when the room is dark; **Night ice** is a separate ice-maker setting.
 
@@ -69,6 +69,8 @@ Status sensors remain available alongside the controls for dashboards and automa
 Refrigerator temperatures are **configured setpoints**. Measured interior temperatures are not exposed.
 
 Temperature entities require an appliance configured in Fahrenheit in the Sub-Zero app. Temperature entities are omitted for other app temperature settings until their units can be verified. Other entities remain available. Home Assistant can display Fahrenheit readings in your preferred temperature unit.
+
+After changing the appliance's temperature unit in the Sub-Zero app, open **Configure** and save your appliance selection to refresh the unit information in Home Assistant.
 
 ## Other appliances
 
@@ -95,7 +97,7 @@ Controls are available for recognized Sub-Zero fridge settings. Wolf and Cove en
 
 ## Updates and account access
 
-Selected appliances share account tokens and one SignalR notification connection. Each appliance gets a full status read at setup and after 30 minutes without a changed state update. The integration does not poll appliance status every minute. Connection heartbeats keep the notification socket alive; reconnect attempts back off after failures. HTTP 429 responses honor `Retry-After` where provided.
+Selected appliances share account tokens and one SignalR notification connection. Each appliance gets a full status read at setup and after 30 minutes without a changed state update. The integration does not poll appliance status every minute. Connection heartbeats keep the notification socket alive, including while another appliance is slow to connect; reconnect attempts back off after failures. API HTTP 429 responses honor `Retry-After` where provided.
 
 Control changes are confirmed from appliance status. When a push update does not arrive, the integration makes one status request to check the setting. Changing a mode sends only the settings that differ, one at a time, and stops if a change fails.
 
@@ -104,6 +106,10 @@ Sub-Zero has not published an API quota that this project has verified. Push red
 Your password is used for sign-in and is not saved. Home Assistant stores renewable account tokens in its configuration and refreshes them automatically. If renewal fails, Home Assistant asks you to sign in again. Protect Home Assistant backups as you would other account credentials.
 
 This is an unofficial integration using the mobile application's cloud endpoints and application settings. Changes to Sub-Zero's login service, API, or shared application key can require an integration update. It is not affiliated with Sub-Zero Group.
+
+## Reporting issues
+
+[Open an issue](https://github.com/orienw/ha-subzero/issues) with your Home Assistant version, integration version, appliance model, and steps to reproduce the problem. Include whether the same operation works in the Sub-Zero app, plus any relevant `custom_components.subzero` log messages. Remove account details and tokens before posting logs.
 
 ## Development
 
