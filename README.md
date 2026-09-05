@@ -10,7 +10,7 @@ Monitor and control your appliances over Sub-Zero's cloud service using their ex
 
 ## Install with HACS
 
-Requires Home Assistant **2026.9.0 or newer** and an appliance already connected to your Sub-Zero account.
+Requires Home Assistant **2026.8.0 or newer** and an appliance already connected to your Sub-Zero account.
 
 [![Open this repository in HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=orienw&repository=ha-subzero&category=integration)
 

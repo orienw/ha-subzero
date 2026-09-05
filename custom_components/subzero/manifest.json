@@ -8,5 +8,5 @@
   "iot_class": "cloud_push",
   "issue_tracker": "https://github.com/orienw/ha-subzero/issues",
   "requirements": ["PyJWT==2.13.0"],
-  "version": "0.3.0"
+  "version": "0.3.1"
 }
