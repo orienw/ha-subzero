@@ -1,4 +1,4 @@
-"""Authenticated appliance reads and SignalR notifications."""
+"""Authenticated appliance commands and SignalR notifications."""
 
 import asyncio
 import base64
@@ -16,6 +16,7 @@ import aiohttp
 from yarl import URL
 
 from .auth import CLIENT_ID, SCOPES, TOKEN_URL, InvalidAuth
+from .const import WRITABLE_BOOLEAN_KEYS, WRITABLE_INTEGER_KEYS
 
 API_BASE = "https://prod.iot.subzero.com"
 SIGNALR_ORIGIN = "https://sznacasigprod.service.signalr.net"
@@ -233,22 +234,37 @@ class SubZeroClient:
         except KeyError, TypeError:
             raise ApiError("Sub-Zero returned an invalid appliance list.") from None
 
-    async def _read_command(self, device_id: str, command: str) -> dict:
-        if command not in {"get", "open_cloud_async"}:
-            raise ValueError("Unsupported read command")
+    async def _command(self, device_id: str, command: str, params: dict | None = None) -> dict:
+        if command not in {"get", "open_cloud_async", "set"}:
+            raise ValueError("Unsupported appliance command")
+        payload = {"cmd": command}
+        if params is not None:
+            payload["params"] = params
         path = "/consumerapp/device/" + quote(device_id, safe="") + "/directmethod/executeAPICmd"
         return await self._request(
-            "POST", path, json={"req_id": str(uuid.uuid4()), "pload": {"cmd": command}}
+            "POST", path, json={"req_id": str(uuid.uuid4()), "pload": payload}
         )
 
     async def state(self, device_id: str) -> dict:
-        data = await self._read_command(device_id, "get")
+        data = await self._command(device_id, "get")
         if not isinstance(data.get("appliance_model"), str):
             raise ApiError("The appliance did not return a status snapshot.")
         return data
 
     async def open_channel(self, device_id: str) -> None:
-        await self._read_command(device_id, "open_cloud_async")
+        await self._command(device_id, "open_cloud_async")
+
+    async def set_property(self, device_id: str, key: str, value: bool | int) -> None:
+        if not (
+            key in WRITABLE_BOOLEAN_KEYS
+            and type(value) is bool
+            or key in WRITABLE_INTEGER_KEYS
+            and type(value) is int
+        ):
+            raise ValueError("Unsupported setting or value type")
+        response = await self._command(device_id, "set", {key: value})
+        if response and (type(response.get("status")) is not int or response["status"] != 0):
+            raise ApiError("Sub-Zero rejected the setting.")
 
     async def watch(
         self, device_ids: list[str]

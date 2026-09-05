@@ -6,7 +6,7 @@ A custom integration focused on connected Sub-Zero refrigerators and freezers, i
 
 Sign in with your Sub-Zero Group Owner email and password directly in Home Assistant.
 
-The integration reads appliance status over Sub-Zero's cloud service using the appliance's existing Wi-Fi connection. Bluetooth is not required.
+Monitor your appliances and change Sub-Zero fridge settings over Sub-Zero's cloud service using the appliance's existing Wi-Fi connection. Bluetooth is not required.
 
 ## Install with HACS
 
@@ -30,6 +30,28 @@ For manual installation, copy `custom_components/subzero` into your Home Assista
 
 Entities are created only for recognized properties reported by the appliance. New recognized properties can also be discovered during push updates.
 
+### Controls
+
+| Control | Settings |
+| --- | --- |
+| Temperature setpoints | Refrigerator, freezer, crisper |
+| Crisper temperature mode | Automatic, Manual |
+| Humidity control | Normal, Enhanced |
+| Ice maker | Off, On, Max ice, Night ice |
+| Mode | Normal, Sabbath, High use, Short vacation, Long vacation |
+| Night mode | Disabled, Enabled |
+| Air purification | On, Off |
+
+The available choices follow the properties reported by each fridge. Settings change only when you use a control or run an automation. Installing, restarting, or reconnecting the integration does not change appliance settings.
+
+Select **Manual** crisper temperature mode to adjust its setpoint. In Automatic mode, the setpoint control is unavailable and the temperature sensor continues to show the configured value. The manual range stays within 2°F of the refrigerator setpoint, between 34°F and 42°F. See [Sub-Zero's crisper temperature guide](https://www.subzero-wolf.com/assistance/answers/sub-zero/next-classic/sub-zero-classic-series-cl-refrigerator-drawer-temperature-contr).
+
+Turn off **Max ice** before adjusting the freezer setpoint. Home Assistant uses the appliance's temperature limits and converts your preferred display unit to whole Fahrenheit setpoints.
+
+[Humidity control](https://www.subzero-wolf.com/assistance/answers/sub-zero/next-classic/next-classic-humidity-control) affects the refrigerator zone. [Night mode](https://www.subzero-wolf.com/assistance/answers/sub-zero/next-classic/next-classic-night-mode) dims the interior lights when the room is dark; **Night ice** is a separate ice-maker setting.
+
+### Monitoring
+
 | Type | Available properties |
 | --- | --- |
 | Temperature setpoints | Refrigerator, freezer, crisper |
@@ -41,6 +63,8 @@ Entities are created only for recognized properties reported by the appliance. N
 | Diagnostic | Wi-Fi signal strength |
 
 All reported, recognized properties are enabled by default. Ice-maker settings and operating modes report their current on/off states. Wi-Fi signal strength appears under Diagnostics.
+
+Status sensors remain available alongside the controls for dashboards and automations.
 
 Refrigerator temperatures are **configured setpoints**. Measured interior temperatures are not exposed.
 
@@ -67,11 +91,13 @@ Cove support has not been verified, and dishwasher-specific entities are not imp
 
 There is no model allowlist. Other models can be added if the cloud service returns their status. Their available entities depend on which recognized properties they report. Adding an appliance does not imply every feature of that model is supported.
 
-This integration provides status monitoring. Appliance controls and local network access are not implemented. Accounts requiring additional verification or an external sign-in provider are not supported yet.
+Controls are available for recognized Sub-Zero fridge settings. Wolf and Cove entities provide monitoring. Local network access and accounts requiring additional verification or an external sign-in provider are not supported.
 
 ## Updates and account access
 
 Selected appliances share account tokens and one SignalR notification connection. Each appliance gets a full status read at setup and after 30 minutes without a changed state update. The integration does not poll appliance status every minute. Connection heartbeats keep the notification socket alive; reconnect attempts back off after failures. HTTP 429 responses honor `Retry-After` where provided.
+
+Control changes are confirmed from appliance status. When a push update does not arrive, the integration makes one status request to check the setting. Changing a mode sends only the settings that differ, one at a time, and stops if a change fails.
 
 Sub-Zero has not published an API quota that this project has verified. Push reduces repeated status requests, but does not guarantee immunity from rate limits, particularly with multiple appliances or unstable connections.
 

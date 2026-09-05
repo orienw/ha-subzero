@@ -12,7 +12,13 @@ from .app_config import SUBSCRIPTION_KEY
 from .const import DOMAIN, selected_devices
 from .coordinator import SubZeroAccount
 
-PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR]
+PLATFORMS = [
+    Platform.SENSOR,
+    Platform.BINARY_SENSOR,
+    Platform.NUMBER,
+    Platform.SELECT,
+    Platform.SWITCH,
+]
 type SubZeroConfigEntry = ConfigEntry[SubZeroAccount]
 
 

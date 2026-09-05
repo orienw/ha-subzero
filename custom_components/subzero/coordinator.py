@@ -8,12 +8,18 @@ from datetime import timedelta
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.exceptions import (
+    ConfigEntryAuthFailed,
+    ConfigEntryNotReady,
+    HomeAssistantError,
+    ServiceValidationError,
+)
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import ApiError, RateLimited, StateUpdate, SubZeroClient
 from .auth import InvalidAuth
-from .const import DOMAIN, STATE_KEYS, selected_devices
+from .const import CONTROL_CONFIRM_TIMEOUT, DOMAIN, STATE_KEYS, selected_devices
+from .controls import validate_control_properties
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -36,8 +42,65 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             always_update=False,
         )
         self.client = client
+        self.entry = entry
         self.device_id = device_id
         self.device = device
+        self._command_lock = asyncio.Lock()
+
+    async def async_set_properties(self, properties: dict) -> None:
+        """Serialize writes and confirm their result from appliance state."""
+        properties = dict(properties)
+        async with self._command_lock:
+            if not self.last_update_success:
+                raise ServiceValidationError("The appliance is unavailable.")
+            validate_control_properties(self.data, self.device.get("temperature_unit"), properties)
+            try:
+                for key, value in properties.items():
+                    if not self.last_update_success:
+                        raise ServiceValidationError("The appliance is unavailable.")
+                    validate_control_properties(
+                        self.data, self.device.get("temperature_unit"), {key: value}
+                    )
+                    if self.data[key] != value:
+                        await self._async_set_property(key, value)
+                if not self.last_update_success or any(
+                    self.data.get(key) != value
+                    or isinstance(self.data.get(key), bool) != isinstance(value, bool)
+                    for key, value in properties.items()
+                ):
+                    raise HomeAssistantError("The appliance did not confirm the requested setting.")
+            except InvalidAuth as error:
+                self.entry.async_start_reauth(self.hass)
+                raise HomeAssistantError("Sign in to Sub-Zero again to change settings.") from error
+            except ApiError as error:
+                raise HomeAssistantError(str(error)) from error
+
+    async def _async_set_property(self, key: str, value: bool | int) -> None:
+        confirmed = asyncio.Event()
+
+        @callback
+        def confirm() -> None:
+            if (
+                self.last_update_success
+                and self.data.get(key) == value
+                and isinstance(self.data.get(key), bool) == isinstance(value, bool)
+            ):
+                confirmed.set()
+            else:
+                confirmed.clear()
+
+        remove_listener = self.async_add_listener(confirm)
+        try:
+            await self.client.set_property(self.device_id, key, value)
+            try:
+                await asyncio.wait_for(confirmed.wait(), CONTROL_CONFIRM_TIMEOUT)
+            except TimeoutError:
+                await self.async_refresh()
+            confirm()
+            if not confirmed.is_set():
+                raise HomeAssistantError("The appliance did not confirm the requested setting.")
+        finally:
+            remove_listener()
 
     async def _async_update_data(self) -> dict:
         try:
@@ -58,7 +121,11 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             return
         properties = {key: value for key, value in update.properties.items() if key in STATE_KEYS}
         updated = properties if update.full else {**self.data, **properties}
-        if updated != self.data or not self.last_update_success:
+        if (
+            updated != self.data
+            or any(type(value) is not type(self.data.get(key)) for key, value in updated.items())
+            or not self.last_update_success
+        ):
             self.async_set_updated_data(updated)
 
 

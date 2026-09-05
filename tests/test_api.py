@@ -227,3 +227,91 @@ async def test_single_signalr_connection_routes_multiple_appliances(
     assert opened == ["test-fridge", "test-oven"]
     assert isinstance(received["test-fridge"], api.StateUpdate)
     assert isinstance(received["test-oven"], api.ApiError if offline else api.StateUpdate)
+
+
+@pytest.fixture
+async def control_server(aiohttp_server, monkeypatch, socket_enabled):
+    behavior = {"requests": [], "status": 200, "response": {}}
+
+    async def command(request):
+        assert request.match_info["device_id"] == "test-fridge"
+        assert request.headers["Userid"] == "test-owner"
+        assert request.headers["Ocp-Apim-Subscription-Key"] == "test-key"
+        body = await request.json()
+        behavior["requests"].append(body)
+        return web.json_response(
+            behavior["response"], status=behavior["status"], headers={"Retry-After": "300"}
+        )
+
+    app = web.Application()
+    app.router.add_post("/consumerapp/device/{device_id}/directmethod/executeAPICmd", command)
+    server = await aiohttp_server(app)
+    monkeypatch.setattr(api, "API_BASE", str(server.make_url("/")).rstrip("/"))
+    return behavior
+
+
+async def test_control_writes_use_the_authenticated_app_envelope(control_server, tokens):
+    async with aiohttp.ClientSession() as session:
+        client = api.SubZeroClient(session, "test-key", tokens)
+        await client.set_property("test-fridge", "night_ice_on", True)
+        await client.set_property("test-fridge", "ref_set_temp", 39)
+    first, second = control_server["requests"]
+    assert first["pload"] == {"cmd": "set", "params": {"night_ice_on": True}}
+    assert second["pload"] == {"cmd": "set", "params": {"ref_set_temp": 39}}
+    assert first["req_id"] != second["req_id"]
+    assert set(first) == {"req_id", "pload"}
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("", False),
+        ("unit_on", False),
+        ("cav_light_on", True),
+        ("remote_svc_reg_token", "private"),
+        ("air_filter_on", 1),
+        ("ref_set_temp", True),
+        ("ref_set_temp", "38"),
+        ("ref_set_temp", float("nan")),
+    ],
+)
+async def test_invalid_control_fields_never_send_a_request(control_server, tokens, key, value):
+    async with aiohttp.ClientSession() as session:
+        client = api.SubZeroClient(session, "test-key", tokens)
+        with pytest.raises(ValueError):
+            await client.set_property("test-fridge", key, value)
+    assert not control_server["requests"]
+
+
+@pytest.mark.parametrize(
+    "response", [{"status": 1}, {"status": False}, {"error": "private detail"}]
+)
+async def test_control_rejection_in_successful_http_response_is_an_error(
+    control_server, tokens, response
+):
+    control_server["response"] = response
+    async with aiohttp.ClientSession() as session:
+        client = api.SubZeroClient(session, "test-key", tokens)
+        with pytest.raises(api.ApiError, match="rejected the setting") as error:
+            await client.set_property("test-fridge", "air_filter_on", False)
+    assert "private detail" not in str(error.value)
+    assert len(control_server["requests"]) == 1
+
+
+async def test_control_rate_limit_blocks_subsequent_commands(control_server, tokens):
+    control_server["status"] = 429
+    async with aiohttp.ClientSession() as session:
+        client = api.SubZeroClient(session, "test-key", tokens)
+        for _ in range(2):
+            with pytest.raises(api.RateLimited):
+                await client.set_property("test-fridge", "air_filter_on", False)
+    assert len(control_server["requests"]) == 1
+
+
+async def test_failed_control_request_is_not_automatically_retried(control_server, tokens):
+    control_server["status"] = 503
+    async with aiohttp.ClientSession() as session:
+        client = api.SubZeroClient(session, "test-key", tokens)
+        with pytest.raises(api.ApiError):
+            await client.set_property("test-fridge", "air_filter_on", False)
+    assert len(control_server["requests"]) == 1

@@ -1,6 +1,18 @@
 """Integration settings and recognized appliance properties."""
 
 DOMAIN = "subzero"
+CONTROL_CONFIRM_TIMEOUT = 5
+
+SETPOINT_KEYS = {"ref_set_temp", "frz_set_temp", "crisp_set_temp"}
+FRIDGE_MODE_KEYS = ("sabbath_on", "high_use_on", "short_vacation_on", "long_vacation_on")
+ICE_KEYS = ("ice_maker_on", "max_ice_on", "night_ice_on")
+FRIDGE_ENUM_OPTIONS = {
+    "crisp_temp_mode": {"Automatic": 1, "Manual": 0},
+    "humidity_control": {"Normal": 1, "Enhanced": 2},
+    "night_mode": {"Disabled": 0, "Enabled": 1},
+}
+WRITABLE_BOOLEAN_KEYS = {*FRIDGE_MODE_KEYS, *ICE_KEYS, "air_filter_on"}
+WRITABLE_INTEGER_KEYS = SETPOINT_KEYS | set(FRIDGE_ENUM_OPTIONS)
 
 
 def selected_devices(entry) -> dict[str, dict]:
@@ -54,4 +66,4 @@ BINARY_KEYS = {
     "kitchen_timer2_active",
     "kitchen_timer2_complete",
 }
-STATE_KEYS = SENSOR_KEYS | BINARY_KEYS | {"appliance_model", "version"}
+STATE_KEYS = SENSOR_KEYS | BINARY_KEYS | {"appliance_model", "version", *FRIDGE_ENUM_OPTIONS}
