@@ -1,6 +1,6 @@
 # Sub-Zero for Home Assistant
 
-<img src="brand/icon.png" alt="Sub-Zero integration icon" width="80">
+<img src="custom_components/subzero/brand/icon.png" alt="Sub-Zero integration icon" width="80">
 
 A custom integration for connected Sub-Zero appliances, installed through HACS. Sign in with your Sub-Zero Group Owner email and password directly in Home Assistant.
 
