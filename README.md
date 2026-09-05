@@ -44,6 +44,8 @@ Entities are created only for recognized properties reported by the appliance. N
 
 The available choices follow the properties reported by each fridge. Settings change only when you use a control or run an automation. Installing, restarting, or reconnecting the integration does not change appliance settings.
 
+The **Ice maker** control shows the selected mode. In [**Night ice**](https://www.subzero-wolf.com/assistance/answers/sub-zero/common/sub-zero-night-ice-mode), the separate **Ice maker enabled** status may be Off while the schedule pauses ice production.
+
 Select **Manual** crisper temperature mode to adjust its setpoint. In Automatic mode, the setpoint control is unavailable and the temperature sensor continues to show the configured value. The manual range stays within 2°F of the refrigerator setpoint, between 34°F and 42°F. See [Sub-Zero's crisper temperature guide](https://www.subzero-wolf.com/assistance/answers/sub-zero/next-classic/sub-zero-classic-series-cl-refrigerator-drawer-temperature-contr).
 
 Turn off **Max ice** before adjusting the freezer setpoint. Home Assistant enforces the supported temperature ranges and converts your preferred display unit to whole Fahrenheit setpoints.

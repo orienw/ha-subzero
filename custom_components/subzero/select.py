@@ -91,10 +91,10 @@ class SubZeroSelect(SubZeroEntity, SelectEntity):
                 name for name, value in FRIDGE_ENUM_OPTIONS[key].items() if data[key] == value
             )
         if self.entity_description.key == "ice_maker_mode":
-            if not data["ice_maker_on"]:
-                return "Off"
             active = [name for name, key in ICE_MODES.items() if data.get(key) is True]
-            return active[0] if len(active) == 1 else "On" if not active else None
+            if active:
+                return active[0] if len(active) == 1 else None
+            return "On" if data["ice_maker_on"] else "Off"
         active = [name for name, key in MODES.items() if data.get(key) is True]
         return active[0] if len(active) == 1 else "Normal" if not active else None
 
@@ -110,7 +110,8 @@ class SubZeroSelect(SubZeroEntity, SelectEntity):
             properties = {
                 k: False for k in control_keys(key, data) if k not in ("ice_maker_on", selected)
             }
-            properties["ice_maker_on"] = option != "Off"
+            if option != "Night ice":
+                properties["ice_maker_on"] = option != "Off"
             if selected is not None:
                 properties[selected] = True
         else:

@@ -160,6 +160,67 @@ async def test_ice_maker_select_sets_one_coherent_mode(hass, controls, option, w
     assert freezer.state == ("unavailable" if option == "Max ice" else "0")
 
 
+async def test_night_ice_stays_selected_while_ice_maker_power_is_off(hass, controls):
+    for powered in (False, True, False):
+        controls.states["test-fridge"]["ice_maker_on"] = powered
+        await controls.updates.put(
+            ("test-fridge", StateUpdate({"ice_maker_on": powered}, full=False))
+        )
+        await hass.async_block_till_done()
+        assert hass.states.get("select.kitchen_ice_maker").state == "Night ice"
+        assert hass.states.get("binary_sensor.kitchen_ice_maker_enabled").state == (
+            "on" if powered else "off"
+        )
+    await hass.services.async_call(
+        "select",
+        "select_option",
+        {"entity_id": "select.kitchen_ice_maker", "option": "Night ice"},
+        blocking=True,
+    )
+    controls.client.set_property.assert_not_awaited()
+
+
+async def test_selecting_night_ice_from_off_does_not_force_ice_maker_power(hass, controls):
+    properties = {"ice_maker_on": False, "night_ice_on": False}
+    controls.states["test-fridge"].update(properties)
+    await controls.updates.put(("test-fridge", StateUpdate(properties, full=False)))
+    await hass.async_block_till_done()
+    assert hass.states.get("select.kitchen_ice_maker").state == "Off"
+    await hass.services.async_call(
+        "select",
+        "select_option",
+        {"entity_id": "select.kitchen_ice_maker", "option": "Night ice"},
+        blocking=True,
+    )
+    controls.client.set_property.assert_awaited_once_with("test-fridge", "night_ice_on", True)
+    assert hass.states.get("select.kitchen_ice_maker").state == "Night ice"
+    assert hass.states.get("binary_sensor.kitchen_ice_maker_enabled").state == "off"
+
+
+@pytest.mark.parametrize(
+    ("option", "writes"),
+    [
+        ("Off", [("night_ice_on", False)]),
+        ("On", [("night_ice_on", False), ("ice_maker_on", True)]),
+        ("Max ice", [("night_ice_on", False), ("ice_maker_on", True), ("max_ice_on", True)]),
+    ],
+)
+async def test_leaving_night_ice_while_power_is_off(hass, controls, option, writes):
+    controls.states["test-fridge"]["ice_maker_on"] = False
+    await controls.updates.put(("test-fridge", StateUpdate({"ice_maker_on": False}, full=False)))
+    await hass.async_block_till_done()
+    await hass.services.async_call(
+        "select",
+        "select_option",
+        {"entity_id": "select.kitchen_ice_maker", "option": option},
+        blocking=True,
+    )
+    assert controls.client.set_property.await_args_list == [
+        call("test-fridge", key, value) for key, value in writes
+    ]
+    assert hass.states.get("select.kitchen_ice_maker").state == option
+
+
 @pytest.mark.parametrize(
     ("option", "property_key"),
     [
