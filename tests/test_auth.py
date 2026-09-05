@@ -11,8 +11,20 @@ import jwt
 import pytest
 from aiohttp import web
 from cryptography.hazmat.primitives.asymmetric import rsa
+from homeassistant.helpers.aiohttp_client import async_create_clientsession, async_get_clientsession
 
 from custom_components.subzero import auth
+
+
+@pytest.fixture
+async def login_client():
+    async with (
+        aiohttp.ClientSession(
+            cookie_jar=aiohttp.CookieJar(quote_cookie=False, unsafe=True)
+        ) as session,
+        aiohttp.ClientSession() as token_session,
+    ):
+        yield auth.SubZeroLogin(session, token_session)
 
 
 @pytest.fixture
@@ -20,10 +32,19 @@ async def login_server(aiohttp_server, monkeypatch, socket_enabled):
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     public_key = json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(private_key.public_key()))
     public_key["kid"] = "test-key"
-    journey = {"failure": None, "form_accepted": False, "exchanged": False}
+    journey = {"failure": None, "form_accepted": False, "exchanged": False, "requests": []}
+
+    @web.middleware
+    async def record_headers(request, handler):
+        journey["requests"].append((request.path, request.headers.copy()))
+        return await handler(request)
+
+    async def start(request):
+        raise web.HTTPFound("/authorize?" + request.query_string)
 
     async def authorize(request):
         journey.update(request.query)
+        journey["authorize_url"] = str(request.url)
         settings = {
             "api": "CombinedSigninAndSignup",
             "hosts": {"tenant": "/policy", "policy": "test-policy"},
@@ -36,6 +57,7 @@ async def login_server(aiohttp_server, monkeypatch, socket_enabled):
 
     async def form(request):
         assert request.headers["X-CSRF-TOKEN"] == "test-csrf"
+        assert request.headers["Referer"] == journey["authorize_url"]
         assert "x-ms-cpim-csrf=abc==" in request.headers["Cookie"]
         assert 'x-ms-cpim-csrf="' not in request.headers["Cookie"]
         assert request.query == {"tx": "test-transaction", "p": "test-policy"}
@@ -92,7 +114,8 @@ async def login_server(aiohttp_server, monkeypatch, socket_enabled):
     async def keys(request):
         return web.json_response({"keys": [public_key]})
 
-    app = web.Application()
+    app = web.Application(middlewares=[record_headers])
+    app.router.add_get("/start", start)
     app.router.add_get("/authorize", authorize)
     app.router.add_post("/policy/SelfAsserted", form)
     app.router.add_get("/policy/api/CombinedSigninAndSignup/confirmed", confirmed)
@@ -108,14 +131,56 @@ async def login_server(aiohttp_server, monkeypatch, socket_enabled):
     return journey
 
 
-async def test_password_login_with_b2c_cookies_and_text_json(login_server):
-    async with aiohttp.ClientSession(
-        cookie_jar=aiohttp.CookieJar(quote_cookie=False, unsafe=True)
-    ) as session:
-        tokens = await auth.SubZeroLogin(session).login("owner@example.test", "test-only-password")
+async def test_password_login_with_b2c_cookies_and_text_json(login_server, login_client):
+    tokens = await login_client.login("owner@example.test", "test-only-password")
     assert tokens["refresh_token"] == "test-refresh"
     assert login_server["exchanged"]
     assert "password" not in tokens
+
+
+async def test_login_headers_override_home_assistant_through_redirects(
+    hass, login_server, monkeypatch
+):
+    monkeypatch.setattr(auth, "AUTHORIZE_URL", auth.LOGIN_ORIGIN + "/start")
+    session = async_create_clientsession(
+        hass, cookie_jar=aiohttp.CookieJar(quote_cookie=False, unsafe=True)
+    )
+    token_session = async_get_clientsession(hass)
+    original_headers = dict(session.headers)
+    original_token_headers = dict(token_session.headers)
+    await auth.SubZeroLogin(session, token_session).login(
+        "owner@example.test", "test-only-password"
+    )
+    assert dict(session.headers) == original_headers
+    assert dict(token_session.headers) == original_token_headers
+    browser_paths = [
+        "/start",
+        "/authorize",
+        "/policy/SelfAsserted",
+        "/policy/api/CombinedSigninAndSignup/confirmed",
+    ]
+    assert [path for path, _ in login_server["requests"]] == [
+        *browser_paths,
+        "/token",
+        "/metadata",
+        "/keys",
+    ]
+    for path, headers in login_server["requests"]:
+        if path in browser_paths:
+            assert headers.getall("User-Agent") == [
+                "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/153.0.0.0 Mobile Safari/537.36"
+            ]
+            assert headers["Accept-Language"] == "en-US,en;q=0.9"
+        else:
+            assert headers.getall("User-Agent") == [
+                "Dalvik/2.1.0 (Linux; U; Android 16; Pixel 9 Build/BP2A.250605.031.A2)"
+            ]
+            assert headers["Accept"] == "application/json"
+            assert headers["Accept-Encoding"] == "gzip"
+            assert "Cookie" not in headers
+            assert "X-CSRF-TOKEN" not in headers
+        assert not {"Authorization", "Userid", "Ocp-Apim-Subscription-Key"} & headers.keys()
 
 
 @pytest.mark.parametrize(
@@ -132,16 +197,15 @@ async def test_password_login_with_b2c_cookies_and_text_json(login_server):
         ("signature", auth.LoginError),
     ],
 )
-async def test_rejects_failed_or_unverified_login(login_server, failure, exception):
+async def test_rejects_failed_or_unverified_login(login_server, login_client, failure, exception):
     login_server["failure"] = failure
-    async with aiohttp.ClientSession(
-        cookie_jar=aiohttp.CookieJar(quote_cookie=False, unsafe=True)
-    ) as session:
-        with pytest.raises(exception):
-            await auth.SubZeroLogin(session).login("owner@example.test", "test-only-password")
+    with pytest.raises(exception):
+        await login_client.login("owner@example.test", "test-only-password")
+    assert login_server["form_accepted"]
+    if failure not in {"password", "mfa", "state"}:
+        assert login_server["exchanged"]
 
 
-async def test_rejects_external_redirect_without_requesting_it():
-    async with aiohttp.ClientSession() as session:
-        with pytest.raises(auth.LoginError, match="unsupported sign-in provider"):
-            await auth.SubZeroLogin(session)._navigate("https://unexpected.example.test/login")
+async def test_rejects_external_redirect_without_requesting_it(login_client):
+    with pytest.raises(auth.LoginError, match="unsupported sign-in provider"):
+        await login_client._navigate("https://unexpected.example.test/login")

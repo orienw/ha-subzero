@@ -15,6 +15,7 @@ from urllib.parse import quote
 import aiohttp
 from yarl import URL
 
+from .app_config import APP_HEADERS, AUTH_HEADERS
 from .auth import CLIENT_ID, SCOPES, TOKEN_URL, InvalidAuth
 from .const import WRITABLE_BOOLEAN_KEYS, WRITABLE_INTEGER_KEYS
 
@@ -150,13 +151,22 @@ class SubZeroClient:
         self._refresh_lock = asyncio.Lock()
         self._retry_at = 0.0
 
-    async def _json(self, method: str, url: str | URL, *, token_request=False, **kwargs) -> dict:
+    async def _json(
+        self,
+        method: str,
+        url: str | URL,
+        *,
+        token_request=False,
+        headers: dict[str, str] | None = None,
+        **kwargs,
+    ) -> dict:
         if self._retry_at > time.monotonic():
             raise RateLimited(self._retry_at - time.monotonic())
         try:
             async with self.session.request(
                 method,
                 url,
+                headers={**(AUTH_HEADERS if token_request else APP_HEADERS), **(headers or {})},
                 allow_redirects=False,
                 timeout=aiohttp.ClientTimeout(total=40),
                 **kwargs,
@@ -283,7 +293,15 @@ class SubZeroClient:
         negotiate = endpoint.with_path(
             endpoint.path.rstrip("/") + "/negotiate", keep_query=True
         ).update_query(negotiateVersion=1)
-        transport = await self._json("POST", negotiate, headers=headers)
+        transport = await self._json(
+            "POST",
+            negotiate,
+            headers={
+                **headers,
+                "X-Requested-With": "FlutterHttpClient",
+                "Content-Type": "text/plain;charset=UTF-8",
+            },
+        )
         connection = transport.get("connectionToken") or transport.get("connectionId")
         if not connection:
             raise ApiError("Sub-Zero did not open a notification connection.")
@@ -292,7 +310,7 @@ class SubZeroClient:
         )
         try:
             async with self.session.ws_connect(
-                ws_url, headers=headers, max_msg_size=262144
+                ws_url, headers={**APP_HEADERS, **headers}, max_msg_size=262144
             ) as websocket:
                 await websocket.send_str('{"protocol":"json","version":1}' + SEPARATOR)
                 first = await websocket.receive(timeout=20)

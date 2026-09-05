@@ -63,7 +63,7 @@ class SubZeroConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 timeout=aiohttp.ClientTimeout(total=40),
             )
             try:
-                tokens = await SubZeroLogin(session).login(
+                tokens = await SubZeroLogin(session, async_get_clientsession(self.hass)).login(
                     user_input["username"], user_input["password"]
                 )
                 self._client = SubZeroClient(

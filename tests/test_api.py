@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 import aiohttp
 import pytest
 from aiohttp import web
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from custom_components.subzero import api
 from custom_components.subzero.auth import InvalidAuth
@@ -72,6 +73,13 @@ async def api_server(aiohttp_server, monkeypatch, socket_enabled):
     behavior = {"requests": [], "status": 200, "refreshes": 0, "user_id": "test-owner"}
 
     async def token(request):
+        assert request.headers.getall("User-Agent") == [
+            "Dalvik/2.1.0 (Linux; U; Android 16; Pixel 9 Build/BP2A.250605.031.A2)"
+        ]
+        assert request.headers["Accept"] == "application/json"
+        assert request.headers["Accept-Encoding"] == "gzip"
+        assert request.content_type == "application/x-www-form-urlencoded"
+        assert not {"Authorization", "Userid", "Ocp-Apim-Subscription-Key"} & request.headers.keys()
         behavior["refreshes"] += 1
         data = await request.post()
         assert data["grant_type"] == "refresh_token"
@@ -80,6 +88,10 @@ async def api_server(aiohttp_server, monkeypatch, socket_enabled):
         )
 
     async def devices(request):
+        assert request.headers.getall("User-Agent") == ["Dart/3.11 (dart:io)"]
+        assert request.headers["Accept-Encoding"] == "gzip"
+        assert request.headers["Userid"] == "test-owner"
+        assert request.headers["Ocp-Apim-Subscription-Key"] == "test-key"
         behavior["requests"].append(request.headers.get("Authorization"))
         status = behavior["status"]
         if status == 429:
@@ -142,6 +154,17 @@ async def test_unauthorized_request_refreshes_then_retries_once(api_server, toke
     assert not hasattr(appliances[0], "pin")
 
 
+async def test_requests_override_shared_home_assistant_headers(hass, api_server, tokens):
+    api_server["status"] = 401
+    session = async_get_clientsession(hass)
+    original_headers = dict(session.headers)
+    client = api.SubZeroClient(session, "test-key", tokens)
+    assert await client.appliances()
+    assert api_server["refreshes"] == 1
+    assert len(api_server["requests"]) == 2
+    assert dict(session.headers) == original_headers
+
+
 async def test_rate_limit_blocks_followup_requests(api_server, tokens):
     api_server["status"] = 429
     async with aiohttp.ClientSession() as session:
@@ -156,12 +179,15 @@ async def test_rate_limit_blocks_followup_requests(api_server, tokens):
 
 @pytest.mark.parametrize("offline", [False, True])
 async def test_single_signalr_connection_routes_multiple_appliances(
-    aiohttp_server, monkeypatch, socket_enabled, tokens, offline
+    hass, aiohttp_server, monkeypatch, socket_enabled, tokens, offline
 ):
     sockets = []
     opened = []
 
     async def negotiate_user(request):
+        assert request.headers.getall("User-Agent") == ["Dart/3.11 (dart:io)"]
+        assert request.headers["Accept-Encoding"] == "gzip"
+        assert request.headers["Ocp-Apim-Subscription-Key"] == "test-key"
         assert request.query["userId"] == "test-owner"
         return web.json_response(
             {
@@ -171,10 +197,21 @@ async def test_single_signalr_connection_routes_multiple_appliances(
         )
 
     async def negotiate_transport(request):
+        assert request.headers.getall("User-Agent") == ["Dart/3.11 (dart:io)"]
+        assert request.headers["Accept-Encoding"] == "gzip"
+        assert request.headers["Authorization"] == "Bearer test-signalr-token"
+        assert request.headers["X-Requested-With"] == "FlutterHttpClient"
+        assert request.headers["Content-Type"] == "text/plain;charset=UTF-8"
+        assert not {"Userid", "Ocp-Apim-Subscription-Key"} & request.headers.keys()
         assert request.query == {"hub": "connectedappliances", "negotiateVersion": "1"}
         return web.json_response({"connectionToken": "connection"})
 
     async def websocket(request):
+        assert request.headers.getall("User-Agent") == ["Dart/3.11 (dart:io)"]
+        assert request.headers["Accept-Encoding"] == "gzip"
+        assert request.headers["Authorization"] == "Bearer test-signalr-token"
+        assert "X-Requested-With" not in request.headers
+        assert not {"Userid", "Ocp-Apim-Subscription-Key"} & request.headers.keys()
         assert request.query == {"hub": "connectedappliances", "id": "connection"}
         socket = web.WebSocketResponse()
         await socket.prepare(request)
@@ -189,6 +226,7 @@ async def test_single_signalr_connection_routes_multiple_appliances(
         return socket
 
     async def command(request):
+        assert request.headers.getall("User-Agent") == ["Dart/3.11 (dart:io)"]
         device_id = request.match_info["device_id"]
         assert (await request.json())["pload"]["cmd"] == "open_cloud_async"
         opened.append(device_id)
@@ -213,16 +251,18 @@ async def test_single_signalr_connection_routes_multiple_appliances(
     monkeypatch.setattr(api, "API_BASE", origin)
     monkeypatch.setattr(api, "SIGNALR_ORIGIN", origin)
     received = {}
-    async with aiohttp.ClientSession() as session:
-        stream = api.SubZeroClient(session, "test-key", tokens).watch(["test-fridge", "test-oven"])
-        async with asyncio.timeout(5):
-            try:
-                async for device_id, update in stream:
-                    received[device_id] = update
-                    if len(received) == 2:
-                        break
-            finally:
-                await stream.aclose()
+    session = async_get_clientsession(hass)
+    original_headers = dict(session.headers)
+    stream = api.SubZeroClient(session, "test-key", tokens).watch(["test-fridge", "test-oven"])
+    async with asyncio.timeout(5):
+        try:
+            async for device_id, update in stream:
+                received[device_id] = update
+                if len(received) == 2:
+                    break
+        finally:
+            await stream.aclose()
+    assert dict(session.headers) == original_headers
     assert len(sockets) == 1
     assert opened == ["test-fridge", "test-oven"]
     assert isinstance(received["test-fridge"], api.StateUpdate)
@@ -234,6 +274,8 @@ async def control_server(aiohttp_server, monkeypatch, socket_enabled):
     behavior = {"requests": [], "status": 200, "response": {}}
 
     async def command(request):
+        assert request.headers.getall("User-Agent") == ["Dart/3.11 (dart:io)"]
+        assert request.headers["Accept-Encoding"] == "gzip"
         assert request.match_info["device_id"] == "test-fridge"
         assert request.headers["Userid"] == "test-owner"
         assert request.headers["Ocp-Apim-Subscription-Key"] == "test-key"
@@ -250,11 +292,13 @@ async def control_server(aiohttp_server, monkeypatch, socket_enabled):
     return behavior
 
 
-async def test_control_writes_use_the_authenticated_app_envelope(control_server, tokens):
-    async with aiohttp.ClientSession() as session:
-        client = api.SubZeroClient(session, "test-key", tokens)
-        await client.set_property("test-fridge", "night_ice_on", True)
-        await client.set_property("test-fridge", "ref_set_temp", 39)
+async def test_control_writes_use_the_authenticated_app_envelope(hass, control_server, tokens):
+    session = async_get_clientsession(hass)
+    original_headers = dict(session.headers)
+    client = api.SubZeroClient(session, "test-key", tokens)
+    await client.set_property("test-fridge", "night_ice_on", True)
+    await client.set_property("test-fridge", "ref_set_temp", 39)
+    assert dict(session.headers) == original_headers
     first, second = control_server["requests"]
     assert first["pload"] == {"cmd": "set", "params": {"night_ice_on": True}}
     assert second["pload"] == {"cmd": "set", "params": {"ref_set_temp": 39}}

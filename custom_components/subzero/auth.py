@@ -11,6 +11,8 @@ from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
 import aiohttp
 import jwt
 
+from .app_config import AUTH_HEADERS, LOGIN_HEADERS
+
 LOGIN_ORIGIN = "https://login.subzero-wolf.com"
 POLICY_BASE = LOGIN_ORIGIN + "/SubZeroB2CPrd.onmicrosoft.com/B2C_1A_SIGNUP_SIGNIN"
 AUTHORIZE_URL = POLICY_BASE + "/oauth2/v2.0/authorize"
@@ -50,12 +52,15 @@ class SubZeroLogin:
     """Keep login state in a session using CookieJar(quote_cookie=False).
 
     B2C rejects quoted cookie values that browsers send without quotes.
+    Token requests use a separate session without the browser's cookies.
     """
 
-    def __init__(self, session: aiohttp.ClientSession):
+    def __init__(self, session: aiohttp.ClientSession, token_session: aiohttp.ClientSession):
         self.session = session
+        self.token_session = token_session
         self.settings: dict = {}
         self.last_page = ""
+        self.last_url = ""
         self.response_info: dict = {}
         self.state = secrets.token_urlsafe(32)
         self.nonce = secrets.token_urlsafe(32)
@@ -88,9 +93,10 @@ class SubZeroLogin:
         path = settings["hosts"]["tenant"] + "/SelfAsserted"
         params = {"tx": settings["transId"], "p": settings["hosts"]["policy"]}
         headers = {
+            **LOGIN_HEADERS,
             "X-CSRF-TOKEN": settings["csrf"],
             "Origin": LOGIN_ORIGIN,
-            "Referer": AUTHORIZE_URL,
+            "Referer": self.last_url,
             "X-Requested-With": "XMLHttpRequest",
             "Accept": "application/json, text/javascript, */*; q=0.01",
         }
@@ -147,7 +153,9 @@ class SubZeroLogin:
             origin = urlsplit(LOGIN_ORIGIN)
             if (parsed.scheme, parsed.netloc) != (origin.scheme, origin.netloc):
                 raise LoginError("Sub-Zero requested an unsupported sign-in provider.")
-            async with self.session.get(url, allow_redirects=False) as response:
+            async with self.session.get(
+                url, headers=LOGIN_HEADERS, allow_redirects=False
+            ) as response:
                 if response.status in (301, 302, 303, 307, 308):
                     location = response.headers.get("Location")
                     if not location:
@@ -157,6 +165,7 @@ class SubZeroLogin:
                 if response.status != 200:
                     raise LoginError(f"Sub-Zero's sign-in page returned HTTP {response.status}.")
                 self.last_page = await response.text()
+                self.last_url = str(response.url)
                 self.settings = page_variable(self.last_page, "SETTINGS")
                 return None
         raise LoginError("Sub-Zero returned too many sign-in redirects.")
@@ -170,7 +179,13 @@ class SubZeroLogin:
             "code_verifier": self.verifier,
             "scope": SCOPES,
         }
-        async with self.session.post(TOKEN_URL, data=data, allow_redirects=False) as response:
+        async with self.token_session.post(
+            TOKEN_URL,
+            headers=AUTH_HEADERS,
+            data=data,
+            timeout=self.session.timeout,
+            allow_redirects=False,
+        ) as response:
             self.response_info = {
                 "stage": "code_exchange",
                 "status": response.status,
@@ -188,7 +203,12 @@ class SubZeroLogin:
         return tokens
 
     async def _validate_identity(self, token: str) -> None:
-        async with self.session.get(METADATA_URL, allow_redirects=False) as response:
+        async with self.token_session.get(
+            METADATA_URL,
+            headers=AUTH_HEADERS,
+            timeout=self.session.timeout,
+            allow_redirects=False,
+        ) as response:
             self.response_info = {
                 "stage": "openid_metadata",
                 "status": response.status,
@@ -208,7 +228,12 @@ class SubZeroLogin:
             ("https", "subzerob2cprd.b2clogin.com"),
         }:
             raise LoginError("Sub-Zero returned an unexpected signing-key location.")
-        async with self.session.get(metadata["jwks_uri"], allow_redirects=False) as response:
+        async with self.token_session.get(
+            metadata["jwks_uri"],
+            headers=AUTH_HEADERS,
+            timeout=self.session.timeout,
+            allow_redirects=False,
+        ) as response:
             self.response_info = {
                 "stage": "signing_keys",
                 "status": response.status,
