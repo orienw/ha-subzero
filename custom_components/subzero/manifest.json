@@ -1,0 +1,12 @@
+{
+  "domain": "subzero",
+  "name": "Sub-Zero",
+  "codeowners": ["@orienw"],
+  "config_flow": true,
+  "documentation": "https://github.com/orienw/ha-subzero",
+  "integration_type": "device",
+  "iot_class": "cloud_push",
+  "issue_tracker": "https://github.com/orienw/ha-subzero/issues",
+  "requirements": ["PyJWT==2.13.0"],
+  "version": "0.1.0"
+}

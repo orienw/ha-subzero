@@ -1,0 +1,29 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Sign in to Sub-Zero",
+        "description": "Use the email and password for your Sub-Zero Group Owner account. Your password is used to sign in and is not saved.",
+        "data": {"username": "Email", "password": "Password"}
+      },
+      "device": {
+        "title": "Select your appliance",
+        "description": "Entities are created for recognized properties reported by your appliance. The CL4850UFDID has been tested; other models can also be added.",
+        "data": {"device_id": "Appliance"}
+      }
+    },
+    "error": {
+      "invalid_auth": "Sub-Zero did not accept the sign-in details, or the session expired. Start setup again if needed.",
+      "cannot_connect": "Could not connect to Sub-Zero or read the appliance. Try again later.",
+      "rate_limited": "Sub-Zero asked us to slow down. Wait before trying again.",
+      "verification_required": "This account requires an additional verification step that this release does not yet support.",
+      "invalid_device": "Select an appliance from this account."
+    },
+    "abort": {
+      "already_configured": "This appliance is already configured.",
+      "no_appliances": "No connected appliances were found on this account.",
+      "wrong_account": "Sign in with the original account that has access to this appliance.",
+      "reauth_successful": "Sub-Zero sign-in renewed."
+    }
+  }
+}

@@ -1,0 +1,16 @@
+.private/
+.research/
+.venv/
+__pycache__/
+*.py[cod]
+*.private.json
+*.apk
+*.xapk
+*.pcap
+*.pcapng
+*.har
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
