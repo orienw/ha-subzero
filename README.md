@@ -10,13 +10,19 @@ The integration reads appliance status over Sub-Zero's cloud service using the a
 
 Requires Home Assistant **2026.9.0 or newer** and an appliance already connected to your Sub-Zero account.
 
+[![Open this repository in HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=orienw&repository=ha-subzero&category=integration)
+
+Use the button above, or add the repository manually:
+
 1. Open **HACS → ⋮ → Custom repositories**.
 2. Add `https://github.com/orienw/ha-subzero` with type **Integration**.
 3. Download **Sub-Zero**, then restart Home Assistant.
 4. Open **Settings → Devices & services → Add integration → Sub-Zero**.
-5. Enter your Sub-Zero account email and password, then select an appliance.
+5. Enter your Sub-Zero account email and password, then select the appliances to include.
 
-Repeat the integration setup to add another appliance. This repository does not need to be in HACS's default catalog.
+To add appliances later, open **Settings → Devices & services → Sub-Zero → Configure**. This refreshes the account's appliance list and lets you change the selection using your saved connection. Deselecting an appliance removes its Home Assistant device and entities.
+
+Existing entries upgrade automatically, keeping their selected appliance and entity IDs. If you previously created separate entries for multiple appliances, those entries remain separate; appliances selected in another entry are omitted from the picker.
 
 For manual installation, copy `custom_components/subzero` into your Home Assistant configuration's `custom_components` directory, restart, and follow steps 4–5.
 
@@ -29,11 +35,12 @@ Entities are created only for recognized properties reported by the appliance. N
 | Temperature setpoints | Refrigerator, freezer, crisper |
 | Filters | Air and water filter life remaining |
 | Doors | Refrigerator and freezer door open |
-| Status | Service required, power, ice maker, max ice, air purification |
-| Optional status | Night ice, Sabbath mode, high use, short and long vacation |
+| Ice-maker settings | Enabled, max ice, night ice |
+| Operating modes | Sabbath, high use, short vacation, long vacation |
+| Device status | Service required, power, air purification |
 | Diagnostic | Wi-Fi signal strength |
 
-Optional status and diagnostic entities are disabled by default. Enable them from the integration's entity list if needed.
+All reported, recognized properties are enabled by default. Ice-maker settings and operating modes report their current on/off states. Wi-Fi signal strength appears under Diagnostics.
 
 Temperature entities show **configured setpoints**, not measured interior temperatures. Setpoints have been verified with an appliance configured in Fahrenheit in the Sub-Zero app. For other app temperature settings, this release omits temperature entities until their units can be verified; other entities remain available. Home Assistant can display verified Fahrenheit readings in your preferred temperature unit.
 
@@ -41,11 +48,11 @@ Temperature entities show **configured setpoints**, not measured interior temper
 
 **Tested with CL4850UFDID. There is no model allowlist.** Other models can be added if the cloud service returns their status. Their available entities depend on which recognized properties they report. Adding an appliance does not imply every feature of that model is supported.
 
-This first release provides status monitoring. Appliance controls and local network access are not implemented. Accounts requiring additional verification or an external sign-in provider are not supported yet.
+This integration provides status monitoring. Appliance controls and local network access are not implemented. Accounts requiring additional verification or an external sign-in provider are not supported yet.
 
 ## Updates and account access
 
-The integration uses SignalR push notifications. It requests a full status read at setup and after 30 minutes without a changed state update. It does not poll appliance status every minute. Connection heartbeats keep the notification socket alive; reconnect attempts back off after failures. HTTP 429 responses honor `Retry-After` where provided.
+Selected appliances share account tokens and one SignalR notification connection. Each appliance gets a full status read at setup and after 30 minutes without a changed state update. The integration does not poll appliance status every minute. Connection heartbeats keep the notification socket alive; reconnect attempts back off after failures. HTTP 429 responses honor `Retry-After` where provided.
 
 Sub-Zero has not published an API quota that this project has verified. Push reduces repeated status requests, but does not guarantee immunity from rate limits, particularly with multiple appliances or unstable connections.
 
@@ -64,5 +71,3 @@ python -m venv .venv
 .venv/bin/ruff check .
 .venv/bin/ruff format --check .
 ```
-
-Tests use synthetic account and appliance data. Research captures, account tokens, app binaries, and local diagnostic probes are excluded from this repository.

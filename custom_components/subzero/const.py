@@ -2,6 +2,19 @@
 
 DOMAIN = "subzero"
 
+
+def selected_devices(entry) -> dict[str, dict]:
+    """Return the appliance selection, including entries awaiting migration."""
+    if "device_id" in entry.data:
+        return {
+            entry.data["device_id"]: {
+                "name": entry.title,
+                "temperature_unit": entry.data.get("temperature_unit"),
+            }
+        }
+    return entry.options.get("devices", entry.data["devices"])
+
+
 SENSOR_KEYS = {
     "ref_set_temp",
     "frz_set_temp",

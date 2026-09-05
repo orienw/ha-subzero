@@ -1,4 +1,4 @@
-"""Normal HA sign-in, appliance selection and reauthentication."""
+"""Account setup, appliance selection and reauthentication through HA."""
 
 from unittest.mock import patch
 
@@ -14,42 +14,41 @@ from .conftest import make_tokens
 
 pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
 CREDENTIALS = {"username": "owner@example.test", "password": "test-only-password"}
+DEVICES = {
+    "test-fridge": {"name": "Kitchen", "temperature_unit": "F"},
+    "test-oven": {"name": "Wall oven", "temperature_unit": "C"},
+}
+APPLIANCES = [
+    Appliance("test-fridge", "Kitchen", "F", "17.11.2.3"),
+    Appliance("test-oven", "Wall oven", "C", "99.1.2.3"),
+]
 
 
-@pytest.mark.parametrize(
-    ("model", "appliance_type", "unit"),
-    [("CL4850UFDID", "17.11.2.3", "F"), ("ANOTHER-MODEL", "99.1.2.3", "C")],
-)
-async def test_create_entry_without_model_or_family_allowlist(
-    hass, tokens, model, appliance_type, unit
+@pytest.mark.parametrize("selected", [["test-fridge"], ["test-fridge", "test-oven"]])
+async def test_create_account_with_multiple_appliances_and_no_family_allowlist(
+    hass, tokens, selected
 ):
-    appliance = Appliance("test-fridge", "Kitchen", unit, appliance_type)
     with (
         patch("custom_components.subzero.config_flow.SubZeroLogin.login", return_value=tokens),
-        patch("custom_components.subzero.api.SubZeroClient.appliances", return_value=[appliance]),
-        patch(
-            "custom_components.subzero.api.SubZeroClient.state",
-            return_value={"appliance_model": model},
-        ),
+        patch("custom_components.subzero.api.SubZeroClient.appliances", return_value=APPLIANCES),
         patch("custom_components.subzero.async_setup_entry", return_value=True),
     ):
         result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": "user"})
-        assert result["type"] is FlowResultType.FORM
         result = await hass.config_entries.flow.async_configure(result["flow_id"], CREDENTIALS)
         assert result["step_id"] == "device"
         result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], {"device_id": "test-fridge"}
+            result["flow_id"], {"device_ids": selected}
         )
         await hass.async_block_till_done()
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["title"] == model
+    assert result["title"] == CREDENTIALS["username"]
     assert result["data"] == {
-        "device_id": "test-fridge",
-        "temperature_unit": unit,
+        "devices": {key: DEVICES[key] for key in selected},
         "tokens": token_state(tokens),
     }
     assert "password" not in result["data"]
-    assert result["result"].unique_id == "test-fridge"
+    assert result["result"].unique_id == "test-owner"
+    assert result["result"].version == 2
 
 
 @pytest.mark.parametrize(
@@ -83,33 +82,38 @@ async def test_no_appliances(hass, tokens):
     assert result["reason"] == "no_appliances"
 
 
-async def test_already_added_appliance_does_not_read_it_again(hass, tokens):
-    MockConfigEntry(domain=DOMAIN, unique_id="test-fridge", data={}).add_to_hass(hass)
+@pytest.mark.parametrize("legacy", [True, False])
+async def test_existing_account_uses_configure_instead_of_duplicate_setup(hass, tokens, legacy):
+    data = {"tokens": token_state(tokens)}
+    data.update({"device_id": "test-fridge"} if legacy else {"devices": DEVICES})
+    MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="test-fridge" if legacy else "test-owner",
+        version=1 if legacy else 2,
+        data=data,
+    ).add_to_hass(hass)
     with (
         patch("custom_components.subzero.config_flow.SubZeroLogin.login", return_value=tokens),
-        patch(
-            "custom_components.subzero.api.SubZeroClient.appliances",
-            return_value=[Appliance("test-fridge", "Kitchen", "F", "99")],
-        ),
-        patch("custom_components.subzero.api.SubZeroClient.state") as state,
+        patch("custom_components.subzero.api.SubZeroClient.appliances") as appliances,
     ):
         result = await hass.config_entries.flow.async_init(
             DOMAIN, context={"source": "user"}, data=CREDENTIALS
         )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], {"device_id": "test-fridge"}
-        )
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "already_configured"
-    state.assert_not_awaited()
+    appliances.assert_not_awaited()
 
 
 @pytest.mark.parametrize("wrong_account", [False, True])
-async def test_reauthentication_preserves_account_identity(hass, tokens, wrong_account):
+async def test_reauthentication_preserves_account_and_appliance_selection(
+    hass, tokens, wrong_account
+):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        unique_id="test-fridge",
-        data={"device_id": "test-fridge", "temperature_unit": "F", "tokens": token_state(tokens)},
+        unique_id="test-owner",
+        version=2,
+        data={"devices": DEVICES, "tokens": token_state(tokens)},
+        options={"devices": {"test-oven": DEVICES["test-oven"]}},
     )
     entry.add_to_hass(hass)
     renewed = make_tokens(
@@ -117,14 +121,6 @@ async def test_reauthentication_preserves_account_identity(hass, tokens, wrong_a
     )
     with (
         patch("custom_components.subzero.config_flow.SubZeroLogin.login", return_value=renewed),
-        patch(
-            "custom_components.subzero.api.SubZeroClient.appliances",
-            return_value=[Appliance("test-fridge", "Kitchen", "F", "99")],
-        ),
-        patch(
-            "custom_components.subzero.api.SubZeroClient.state",
-            return_value={"appliance_model": "OTHER"},
-        ),
         patch("custom_components.subzero.async_setup_entry", return_value=True),
     ):
         result = await hass.config_entries.flow.async_init(
@@ -134,5 +130,66 @@ async def test_reauthentication_preserves_account_identity(hass, tokens, wrong_a
         await hass.async_block_till_done()
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == ("wrong_account" if wrong_account else "reauth_successful")
-    expected = tokens if wrong_account else renewed
-    assert entry.data["tokens"] == token_state(expected)
+    assert entry.data["tokens"] == token_state(tokens if wrong_account else renewed)
+    assert entry.options["devices"] == {"test-oven": DEVICES["test-oven"]}
+
+
+@pytest.mark.parametrize("error", [ApiError("Unavailable"), RateLimited(300)])
+async def test_options_list_failure_can_be_retried_without_changing_selection(hass, tokens, error):
+    entry = MockConfigEntry(
+        domain=DOMAIN, version=2, data={"tokens": token_state(tokens), "devices": DEVICES}
+    )
+    entry.add_to_hass(hass)
+    with patch(
+        "custom_components.subzero.api.SubZeroClient.appliances", side_effect=[error, APPLIANCES]
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        assert result["type"] is FlowResultType.FORM
+        assert result["errors"]
+        result = await hass.config_entries.options.async_configure(result["flow_id"], {})
+    assert not result["errors"]
+    assert result["data_schema"]({})["device_ids"] == list(DEVICES)
+    assert entry.options == {}
+
+
+async def test_options_expired_tokens_start_reauth(hass, tokens):
+    entry = MockConfigEntry(
+        domain=DOMAIN, version=2, data={"tokens": token_state(tokens), "devices": DEVICES}
+    )
+    entry.add_to_hass(hass)
+    with patch(
+        "custom_components.subzero.api.SubZeroClient.appliances", side_effect=InvalidAuth("Expired")
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        await hass.async_block_till_done()
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reauth_required"
+    assert (
+        hass.config_entries.flow.async_progress_by_handler(DOMAIN)[0]["context"]["source"]
+        == "reauth"
+    )
+
+
+async def test_options_preserve_temporarily_missing_appliances_and_exclude_other_entries(
+    hass, tokens
+):
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Kitchen",
+        version=2,
+        data={"tokens": token_state(tokens), "devices": {"test-fridge": DEVICES["test-fridge"]}},
+    )
+    entry.add_to_hass(hass)
+    MockConfigEntry(
+        domain=DOMAIN,
+        title="Legacy oven",
+        data={"tokens": token_state(tokens), "device_id": "test-oven", "temperature_unit": "F"},
+    ).add_to_hass(hass)
+    with patch(
+        "custom_components.subzero.api.SubZeroClient.appliances", return_value=[APPLIANCES[1]]
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+    schema = result["data_schema"]
+    assert schema({})["device_ids"] == ["test-fridge"]
+    selector = next(iter(schema.schema.values()))
+    assert selector.config["options"] == [{"value": "test-fridge", "label": "Kitchen"}]

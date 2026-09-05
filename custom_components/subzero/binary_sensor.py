@@ -32,7 +32,6 @@ DESCRIPTIONS = (
         key="night_ice_on",
         name="Night ice",
         icon="mdi:weather-night",
-        entity_registry_enabled_default=False,
     ),
     BinarySensorEntityDescription(
         key="air_filter_on", name="Air purification", icon="mdi:air-filter"
@@ -41,25 +40,21 @@ DESCRIPTIONS = (
         key="sabbath_on",
         name="Sabbath mode",
         icon="mdi:star-david",
-        entity_registry_enabled_default=False,
     ),
     BinarySensorEntityDescription(
         key="high_use_on",
-        name="High use",
+        name="High use mode",
         icon="mdi:fridge-outline",
-        entity_registry_enabled_default=False,
     ),
     BinarySensorEntityDescription(
         key="short_vacation_on",
-        name="Short vacation",
+        name="Short vacation mode",
         icon="mdi:bag-suitcase-outline",
-        entity_registry_enabled_default=False,
     ),
     BinarySensorEntityDescription(
         key="long_vacation_on",
-        name="Long vacation",
+        name="Long vacation mode",
         icon="mdi:bag-suitcase-outline",
-        entity_registry_enabled_default=False,
     ),
 )
 
@@ -67,23 +62,22 @@ DESCRIPTIONS = (
 async def async_setup_entry(
     hass: HomeAssistant, entry: SubZeroConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    coordinator = entry.runtime_data
-    discovered: set[str] = set()
+    discovered: set[tuple[str, str]] = set()
 
     @callback
     def discover_entities() -> None:
-        descriptions = [
-            description
-            for description in DESCRIPTIONS
-            if description.key in coordinator.data and description.key not in discovered
-        ]
-        discovered.update(description.key for description in descriptions)
-        async_add_entities(
-            SubZeroBinarySensor(coordinator, description) for description in descriptions
-        )
+        entities = []
+        for device_id, coordinator in entry.runtime_data.coordinators.items():
+            for description in DESCRIPTIONS:
+                key = (device_id, description.key)
+                if key not in discovered and description.key in coordinator.data:
+                    discovered.add(key)
+                    entities.append(SubZeroBinarySensor(coordinator, description))
+        async_add_entities(entities)
 
     discover_entities()
-    entry.async_on_unload(coordinator.async_add_listener(discover_entities))
+    for coordinator in entry.runtime_data.coordinators.values():
+        entry.async_on_unload(coordinator.async_add_listener(discover_entities))
 
 
 class SubZeroBinarySensor(SubZeroEntity, BinarySensorEntity):

@@ -7,9 +7,9 @@
         "data": {"username": "Email", "password": "Password"}
       },
       "device": {
-        "title": "Select your appliance",
-        "description": "Entities are created for recognized properties reported by your appliance. The CL4850UFDID has been tested; other models can also be added.",
-        "data": {"device_id": "Appliance"}
+        "title": "Select appliances",
+        "description": "Choose the appliances to include in Home Assistant. You can change this selection later using Configure.",
+        "data": {"device_ids": "Appliances"}
       }
     },
     "error": {
@@ -17,13 +17,33 @@
       "cannot_connect": "Could not connect to Sub-Zero or read the appliance. Try again later.",
       "rate_limited": "Sub-Zero asked us to slow down. Wait before trying again.",
       "verification_required": "This account requires an additional verification step that this release does not yet support.",
-      "invalid_device": "Select an appliance from this account."
+      "invalid_device": "Select appliances from this account.",
+      "select_device": "Select at least one appliance."
     },
     "abort": {
-      "already_configured": "This appliance is already configured.",
+      "already_configured": "This account is already configured. Open Configure on its existing Sub-Zero entry to add appliances.",
+      "all_configured": "These appliances are already managed by another Sub-Zero entry.",
       "no_appliances": "No connected appliances were found on this account.",
-      "wrong_account": "Sign in with the original account that has access to this appliance.",
+      "wrong_account": "Sign in with the original Sub-Zero account.",
       "reauth_successful": "Sub-Zero sign-in renewed."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Choose appliances",
+        "description": "The list is refreshed from your Sub-Zero account. Deselecting an appliance removes its Home Assistant device and entities.",
+        "data": {"device_ids": "Appliances"}
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not refresh the appliance list. Try again later.",
+      "rate_limited": "Sub-Zero asked us to slow down. Wait before trying again.",
+      "invalid_device": "Select appliances from this account."
+    },
+    "abort": {
+      "reauth_required": "Sign in again using Home Assistant's Sub-Zero sign-in prompt, then reopen Configure.",
+      "all_configured": "These appliances are already managed by another Sub-Zero entry. Reopen Configure to refresh the list."
     }
   }
 }

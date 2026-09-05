@@ -4,7 +4,7 @@
   "codeowners": ["@orienw"],
   "config_flow": true,
   "documentation": "https://github.com/orienw/ha-subzero",
-  "integration_type": "device",
+  "integration_type": "hub",
   "iot_class": "cloud_push",
   "issue_tracker": "https://github.com/orienw/ha-subzero/issues",
   "requirements": ["PyJWT==2.13.0"],

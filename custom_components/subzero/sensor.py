@@ -56,7 +56,6 @@ DESCRIPTIONS = (
         native_unit_of_measurement=SIGNAL_STRENGTH_DECIBELS_MILLIWATT,
         state_class=SensorStateClass.MEASUREMENT,
         entity_category=EntityCategory.DIAGNOSTIC,
-        entity_registry_enabled_default=False,
     ),
 )
 
@@ -64,26 +63,28 @@ DESCRIPTIONS = (
 async def async_setup_entry(
     hass: HomeAssistant, entry: SubZeroConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    coordinator = entry.runtime_data
-    discovered: set[str] = set()
+    discovered: set[tuple[str, str]] = set()
 
     @callback
     def discover_entities() -> None:
-        descriptions = [
-            description
-            for description in DESCRIPTIONS
-            if description.key in coordinator.data
-            and description.key not in discovered
-            and (
-                description.device_class != SensorDeviceClass.TEMPERATURE
-                or entry.data.get("temperature_unit") == "F"
-            )
-        ]
-        discovered.update(description.key for description in descriptions)
-        async_add_entities(SubZeroSensor(coordinator, description) for description in descriptions)
+        entities = []
+        for device_id, coordinator in entry.runtime_data.coordinators.items():
+            for description in DESCRIPTIONS:
+                key = (device_id, description.key)
+                if key in discovered or description.key not in coordinator.data:
+                    continue
+                if (
+                    description.device_class == SensorDeviceClass.TEMPERATURE
+                    and coordinator.device.get("temperature_unit") != "F"
+                ):
+                    continue
+                discovered.add(key)
+                entities.append(SubZeroSensor(coordinator, description))
+        async_add_entities(entities)
 
     discover_entities()
-    entry.async_on_unload(coordinator.async_add_listener(discover_entities))
+    for coordinator in entry.runtime_data.coordinators.values():
+        entry.async_on_unload(coordinator.async_add_listener(discover_entities))
 
 
 class SubZeroSensor(SubZeroEntity, SensorEntity):

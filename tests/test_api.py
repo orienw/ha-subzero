@@ -152,3 +152,78 @@ async def test_rate_limit_blocks_followup_requests(api_server, tokens):
             assert 298 <= error.value.retry_after <= 300
     assert len(api_server["requests"]) == 1
     assert api_server["refreshes"] == 0
+
+
+@pytest.mark.parametrize("offline", [False, True])
+async def test_single_signalr_connection_routes_multiple_appliances(
+    aiohttp_server, monkeypatch, socket_enabled, tokens, offline
+):
+    sockets = []
+    opened = []
+
+    async def negotiate_user(request):
+        assert request.query["userId"] == "test-owner"
+        return web.json_response(
+            {
+                "url": origin + "/client/?hub=connectedappliances",
+                "accessToken": "test-signalr-token",
+            }
+        )
+
+    async def negotiate_transport(request):
+        assert request.query == {"hub": "connectedappliances", "negotiateVersion": "1"}
+        return web.json_response({"connectionToken": "connection"})
+
+    async def websocket(request):
+        assert request.query == {"hub": "connectedappliances", "id": "connection"}
+        socket = web.WebSocketResponse()
+        await socket.prepare(request)
+        sockets.append(socket)
+        assert json.loads((await socket.receive_str()).rstrip(api.SEPARATOR)) == {
+            "protocol": "json",
+            "version": 1,
+        }
+        await socket.send_str("{}" + api.SEPARATOR)
+        async for _ in socket:
+            pass
+        return socket
+
+    async def command(request):
+        device_id = request.match_info["device_id"]
+        assert (await request.json())["pload"]["cmd"] == "open_cloud_async"
+        opened.append(device_id)
+        if offline and device_id == "test-oven":
+            return web.json_response({}, status=503)
+        event = notification(
+            {"appliance_model": "ANY-MODEL", "service_required": False}, full=True, device=device_id
+        )
+        unrelated = notification({"unit_on": True}, device="other-owner-device")
+        await sockets[0].send_str(
+            json.dumps(unrelated) + api.SEPARATOR + json.dumps(event) + api.SEPARATOR
+        )
+        return web.json_response({})
+
+    app = web.Application()
+    app.router.add_post("/signal-r/negotiateUser", negotiate_user)
+    app.router.add_post("/client/negotiate", negotiate_transport)
+    app.router.add_get("/client/", websocket)
+    app.router.add_post("/consumerapp/device/{device_id}/directmethod/executeAPICmd", command)
+    server = await aiohttp_server(app)
+    origin = str(server.make_url("/")).rstrip("/")
+    monkeypatch.setattr(api, "API_BASE", origin)
+    monkeypatch.setattr(api, "SIGNALR_ORIGIN", origin)
+    received = {}
+    async with aiohttp.ClientSession() as session:
+        stream = api.SubZeroClient(session, "test-key", tokens).watch(["test-fridge", "test-oven"])
+        async with asyncio.timeout(5):
+            try:
+                async for device_id, update in stream:
+                    received[device_id] = update
+                    if len(received) == 2:
+                        break
+            finally:
+                await stream.aclose()
+    assert len(sockets) == 1
+    assert opened == ["test-fridge", "test-oven"]
+    assert isinstance(received["test-fridge"], api.StateUpdate)
+    assert isinstance(received["test-oven"], api.ApiError if offline else api.StateUpdate)

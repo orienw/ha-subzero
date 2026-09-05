@@ -247,7 +247,12 @@ class SubZeroClient:
             raise ApiError("The appliance did not return a status snapshot.")
         return data
 
-    async def watch(self, device_id: str) -> AsyncIterator[StateUpdate]:
+    async def open_channel(self, device_id: str) -> None:
+        await self._read_command(device_id, "open_cloud_async")
+
+    async def watch(
+        self, device_ids: list[str]
+    ) -> AsyncIterator[tuple[str, StateUpdate | ApiError]]:
         info = await self._request(
             "POST", "/signal-r/negotiateUser", params={"userId": self.tokens["user_id"]}
         )
@@ -280,7 +285,13 @@ class SubZeroClient:
                 handshake, pending = first.data.split(SEPARATOR, 1)
                 if _object(handshake) != {}:
                     raise ApiError("Sub-Zero rejected the notification handshake.")
-                await self._read_command(device_id, "open_cloud_async")
+                for device_id in device_ids:
+                    try:
+                        await self.open_channel(device_id)
+                    except RateLimited:
+                        raise
+                    except ApiError as error:
+                        yield device_id, error
                 next_ping = time.monotonic() + 15
                 last_received = time.monotonic()
                 while True:
@@ -291,9 +302,11 @@ class SubZeroClient:
                         event = _object(frame)
                         if event.get("type") == 7:
                             raise ApiError("Sub-Zero closed the notification connection.")
-                        update = parse_notification(event, device_id, self.tokens["user_id"])
-                        if update:
-                            yield update
+                        for device_id in device_ids:
+                            update = parse_notification(event, device_id, self.tokens["user_id"])
+                            if update:
+                                yield device_id, update
+                                break
                     now = time.monotonic()
                     if now - last_received > 60:
                         raise ApiError("Sub-Zero's notification connection stopped responding.")

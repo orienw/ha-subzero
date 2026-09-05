@@ -18,7 +18,7 @@ class SubZeroEntity(CoordinatorEntity[SubZeroCoordinator]):
         version = coordinator.data.get("version")
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, coordinator.device_id)},
-            name=coordinator.config_entry.title,
+            name=coordinator.device["name"],
             manufacturer="Sub-Zero",
             model=coordinator.data.get("appliance_model"),
             sw_version=version.get("fw") if isinstance(version, dict) else None,
