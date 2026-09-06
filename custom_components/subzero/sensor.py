@@ -1,7 +1,6 @@
 """Appliance temperatures, timers, cycle status, and diagnostics."""
 
 import math
-from dataclasses import replace
 from datetime import datetime
 
 from homeassistant.components.sensor import (
@@ -26,6 +25,15 @@ from .const import COOK_MODES, OVEN_PREFIXES, WASH_CYCLES, WASH_STATUSES
 from .controls import appliance_datetime
 from .entity import SubZeroEntity, async_setup_entities
 
+ENUM_VALUES = {
+    "wash_cycle": WASH_CYCLES,
+    "wash_status": WASH_STATUSES,
+    **{
+        f"{prefix}_cook_mode": {value: name for name, value in COOK_MODES.items()}
+        for prefix in OVEN_PREFIXES
+    },
+}
+# Entities write state in this order within one update, and automations can observe it.
 DESCRIPTIONS = (
     SensorEntityDescription(
         key="ref_set_temp",
@@ -91,26 +99,32 @@ DESCRIPTIONS = (
         state_class=SensorStateClass.MEASUREMENT,
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
-)
-
-ENUM_VALUES = {
-    "wash_cycle": WASH_CYCLES,
-    "wash_status": WASH_STATUSES,
-    **{
-        f"{prefix}_cook_mode": {value: name for name, value in COOK_MODES.items()}
-        for prefix in OVEN_PREFIXES
-    },
-}
-DESCRIPTIONS += tuple(
-    replace(
-        description,
-        key=description.key.replace("cav_", "cav2_", 1),
-        name=f"Lower oven {description.name.removeprefix('Oven ').lower()}",
-    )
-    for description in DESCRIPTIONS
-    if description.key.startswith("cav_")
-)
-DESCRIPTIONS += (
+    SensorEntityDescription(
+        key="cav2_temp",
+        name="Lower oven temperature",
+        device_class=SensorDeviceClass.TEMPERATURE,
+        native_unit_of_measurement=UnitOfTemperature.FAHRENHEIT,
+        state_class=SensorStateClass.MEASUREMENT,
+    ),
+    SensorEntityDescription(
+        key="cav2_set_temp",
+        name="Lower oven setpoint",
+        device_class=SensorDeviceClass.TEMPERATURE,
+        native_unit_of_measurement=UnitOfTemperature.FAHRENHEIT,
+    ),
+    SensorEntityDescription(
+        key="cav2_probe_temp",
+        name="Lower oven probe temperature",
+        device_class=SensorDeviceClass.TEMPERATURE,
+        native_unit_of_measurement=UnitOfTemperature.FAHRENHEIT,
+        state_class=SensorStateClass.MEASUREMENT,
+    ),
+    SensorEntityDescription(
+        key="cav2_probe_set_temp",
+        name="Lower oven probe setpoint",
+        device_class=SensorDeviceClass.TEMPERATURE,
+        native_unit_of_measurement=UnitOfTemperature.FAHRENHEIT,
+    ),
     SensorEntityDescription(
         key="live_reporting_mode",
         name="Live reporting mode",

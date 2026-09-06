@@ -10,9 +10,10 @@ import pytest
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
+from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_system import METRIC_SYSTEM, US_CUSTOMARY_SYSTEM
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant_custom_component.common import MockConfigEntry, async_capture_events
 
 from custom_components.subzero.api import ApiError, Appliance, StateUpdate, token_state
 from custom_components.subzero.const import DOMAIN
@@ -718,3 +719,35 @@ async def test_dishwasher_start_requires_a_closed_reported_door(appliances, door
             {"wash_cycle_on": True}
         )
     appliances.client.set_property.assert_not_called()
+
+
+async def test_timer_complete_is_written_before_timer_active(hass, appliances):
+    """Entities write state in registration order, which same-update automations observe."""
+    assert await async_setup_component(
+        hass,
+        "automation",
+        {
+            "automation": [
+                {
+                    "trigger": {
+                        "platform": "state",
+                        "entity_id": "binary_sensor.oven_cooking_timer_active",
+                        "to": "off",
+                    },
+                    "condition": {
+                        "condition": "state",
+                        "entity_id": "binary_sensor.oven_cooking_timer_complete",
+                        "state": "on",
+                    },
+                    "action": {"event": "timer_done"},
+                }
+            ]
+        },
+    )
+    events = async_capture_events(hass, "timer_done")
+    await appliances.update("oven", {"cav_cook_timer_active": True})
+    await appliances.update(
+        "oven", {"cav_cook_timer_active": False, "cav_cook_timer_complete": True}
+    )
+    await hass.async_block_till_done()
+    assert len(events) == 1

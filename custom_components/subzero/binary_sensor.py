@@ -1,7 +1,5 @@
 """Door, operating-mode and service indicators."""
 
-from dataclasses import replace
-
 from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
     BinarySensorEntity,
@@ -13,6 +11,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from . import SubZeroConfigEntry
 from .entity import SubZeroEntity, async_setup_entities
 
+# Entities write state in this order within one update, and automations can observe it.
 DESCRIPTIONS = (
     BinarySensorEntityDescription(
         key="ref_door_ajar", name="Refrigerator door", device_class=BinarySensorDeviceClass.DOOR
@@ -30,30 +29,16 @@ DESCRIPTIONS = (
     ),
     BinarySensorEntityDescription(key="ice_maker_on", name="Ice maker enabled", icon="mdi:ice-pop"),
     BinarySensorEntityDescription(key="max_ice_on", name="Max ice", icon="mdi:ice-pop"),
+    BinarySensorEntityDescription(key="night_ice_on", name="Night ice", icon="mdi:weather-night"),
+    BinarySensorEntityDescription(key="sabbath_on", name="Sabbath mode", icon="mdi:star-david"),
     BinarySensorEntityDescription(
-        key="night_ice_on",
-        name="Night ice",
-        icon="mdi:weather-night",
+        key="high_use_on", name="High use mode", icon="mdi:fridge-outline"
     ),
     BinarySensorEntityDescription(
-        key="sabbath_on",
-        name="Sabbath mode",
-        icon="mdi:star-david",
+        key="short_vacation_on", name="Short vacation mode", icon="mdi:bag-suitcase-outline"
     ),
     BinarySensorEntityDescription(
-        key="high_use_on",
-        name="High use mode",
-        icon="mdi:fridge-outline",
-    ),
-    BinarySensorEntityDescription(
-        key="short_vacation_on",
-        name="Short vacation mode",
-        icon="mdi:bag-suitcase-outline",
-    ),
-    BinarySensorEntityDescription(
-        key="long_vacation_on",
-        name="Long vacation mode",
-        icon="mdi:bag-suitcase-outline",
+        key="long_vacation_on", name="Long vacation mode", icon="mdi:bag-suitcase-outline"
     ),
     BinarySensorEntityDescription(
         key="cav_door_ajar", name="Oven door", device_class=BinarySensorDeviceClass.DOOR
@@ -87,26 +72,48 @@ DESCRIPTIONS = (
         name="Kitchen timer 2 complete",
         icon="mdi:timer-check-outline",
     ),
-)
-
-DESCRIPTIONS += (
     BinarySensorEntityDescription(
         key="cav_cook_timer_active", name="Cooking timer active", icon="mdi:timer-outline"
     ),
     BinarySensorEntityDescription(
         key="cav_mode_change_enabled", name="Cooking mode change enabled", icon="mdi:stove"
     ),
-)
-DESCRIPTIONS += tuple(
-    replace(
-        description,
-        key=description.key.replace("cav_", "cav2_", 1),
-        name=f"Lower oven {description.name.removeprefix('Oven ').lower()}",
-    )
-    for description in DESCRIPTIONS
-    if description.key.startswith("cav_")
-)
-DESCRIPTIONS += (
+    BinarySensorEntityDescription(
+        key="cav2_door_ajar", name="Lower oven door", device_class=BinarySensorDeviceClass.DOOR
+    ),
+    BinarySensorEntityDescription(key="cav2_unit_on", name="Lower oven cooking", icon="mdi:stove"),
+    BinarySensorEntityDescription(
+        key="cav2_at_set_temp", name="Lower oven preheated", icon="mdi:thermometer-check"
+    ),
+    BinarySensorEntityDescription(
+        key="cav2_remote_ready", name="Lower oven remote ready", icon="mdi:remote"
+    ),
+    BinarySensorEntityDescription(
+        key="cav2_probe_on", name="Lower oven probe in use", icon="mdi:thermometer"
+    ),
+    BinarySensorEntityDescription(
+        key="cav2_probe_at_set_temp",
+        name="Lower oven probe target reached",
+        icon="mdi:thermometer-check",
+    ),
+    BinarySensorEntityDescription(
+        key="cav2_gourmet_mode_on", name="Lower oven gourmet mode", icon="mdi:chef-hat"
+    ),
+    BinarySensorEntityDescription(
+        key="cav2_cook_timer_complete",
+        name="Lower oven cooking timer complete",
+        icon="mdi:timer-check-outline",
+    ),
+    BinarySensorEntityDescription(
+        key="cav2_cook_timer_active",
+        name="Lower oven cooking timer active",
+        icon="mdi:timer-outline",
+    ),
+    BinarySensorEntityDescription(
+        key="cav2_mode_change_enabled",
+        name="Lower oven cooking mode change enabled",
+        icon="mdi:stove",
+    ),
     BinarySensorEntityDescription(
         key="door_ajar", name="Door", device_class=BinarySensorDeviceClass.DOOR
     ),

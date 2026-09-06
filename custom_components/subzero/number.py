@@ -18,21 +18,21 @@ from .const import KITCHEN_TIMERS
 from .controls import supports_control, temperature_range, timer_minutes
 from .entity import SubZeroEntity, async_setup_entities
 
-DESCRIPTIONS = tuple(
-    NumberEntityDescription(
-        key=key,
-        name=name,
-        device_class=NumberDeviceClass.TEMPERATURE,
-        native_unit_of_measurement=UnitOfTemperature.FAHRENHEIT,
-        native_step=1,
-    )
-    for key, name in (
-        ("ref_set_temp", "Refrigerator setpoint"),
-        ("frz_set_temp", "Freezer setpoint"),
-        ("crisp_set_temp", "Crisper setpoint"),
-    )
-)
-DESCRIPTIONS += (
+DESCRIPTIONS = (
+    *(
+        NumberEntityDescription(
+            key=key,
+            name=name,
+            device_class=NumberDeviceClass.TEMPERATURE,
+            native_unit_of_measurement=UnitOfTemperature.FAHRENHEIT,
+            native_step=1,
+        )
+        for key, name in (
+            ("ref_set_temp", "Refrigerator setpoint"),
+            ("frz_set_temp", "Freezer setpoint"),
+            ("crisp_set_temp", "Crisper setpoint"),
+        )
+    ),
     NumberEntityDescription(
         key="accent_light_level",
         name="Accent light",

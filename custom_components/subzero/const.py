@@ -13,8 +13,6 @@ FRIDGE_ENUM_OPTIONS = {
     "humidity_control": {"Normal": 1, "Enhanced": 2},
     "night_mode": {"Disabled": 0, "Enabled": 1},
 }
-WRITABLE_BOOLEAN_KEYS = {*FRIDGE_MODE_KEYS, *ICE_KEYS, "air_filter_on"}
-WRITABLE_INTEGER_KEYS = SETPOINT_KEYS | set(FRIDGE_ENUM_OPTIONS)
 
 OVEN_PREFIXES = ("cav", "cav2")
 COOK_MODES = {
@@ -39,6 +37,7 @@ KITCHEN_TIMERS = {
     "kitchen_timer_duration": "kitchen_timer",
     "kitchen_timer2_duration": "kitchen_timer2",
 }
+
 DISHWASHER_SWITCHES = {
     "heated_dry_on": "Heated dry",
     "extended_dry_on": "Extended dry",
@@ -70,17 +69,102 @@ WASH_STATUSES = {
     5: "Drying",
     6: "Complete",
 }
-WRITABLE_BOOLEAN_KEYS |= {
+
+WRITABLE_BOOLEAN_KEYS = {
+    *FRIDGE_MODE_KEYS,
+    *ICE_KEYS,
+    "air_filter_on",
     *(f"{prefix}_{suffix}" for prefix in OVEN_PREFIXES for suffix in ("unit_on", "light_on")),
     *DISHWASHER_SWITCHES,
     "wash_cycle_on",
 }
-WRITABLE_INTEGER_KEYS |= {
+WRITABLE_INTEGER_KEYS = {
+    *SETPOINT_KEYS,
+    *FRIDGE_ENUM_OPTIONS,
+    "accent_light_level",
     *(f"{prefix}_{suffix}" for prefix in OVEN_PREFIXES for suffix in ("set_temp", "cook_mode")),
     *KITCHEN_TIMERS,
-    "accent_light_level",
     "delay_start_timer_duration",
 }
+SENSOR_KEYS = {
+    *SETPOINT_KEYS,
+    "ref_display_temp",
+    "frz_display_temp",
+    "air_filter_pct_remaining",
+    "water_filter_pct_remaining",
+    "water_filter_gal_remaining",
+    *(
+        f"{prefix}_{suffix}"
+        for prefix in OVEN_PREFIXES
+        for suffix in ("temp", "set_temp", "probe_temp", "probe_set_temp")
+    ),
+    "wash_cycle",
+    "wash_status",
+    "ap_rssi",
+    "uptime",
+    "ipv4_addr",
+    "device_wlan_id",
+}
+BINARY_KEYS = {
+    "ref_door_ajar",
+    "frz_door_ajar",
+    "service_required",
+    "unit_on",
+    *ICE_KEYS,
+    *FRIDGE_MODE_KEYS,
+    "air_filter_on",
+    *(
+        f"{prefix}_{suffix}"
+        for prefix in OVEN_PREFIXES
+        for suffix in (
+            "door_ajar",
+            "unit_on",
+            "at_set_temp",
+            "light_on",
+            "remote_ready",
+            "probe_on",
+            "probe_at_set_temp",
+            "gourmet_mode_on",
+            "mode_change_enabled",
+            "cook_timer_active",
+            "cook_timer_complete",
+        )
+    ),
+    *(
+        f"{prefix}_{state}"
+        for prefix in KITCHEN_TIMERS.values()
+        for state in ("active", "complete")
+    ),
+    "door_ajar",
+    "wash_cycle_on",
+    "remote_ready",
+    "rinse_aid_low",
+    "softener_low",
+    "delay_start_timer_active",
+    *DISHWASHER_SWITCHES,
+}
+TIMESTAMP_KEYS = {
+    "max_ice_start_time",
+    "max_ice_end_time",
+    "high_use_start_time",
+    "high_use_end_time",
+    *(
+        f"{prefix}_cook_timer_{point}_time"
+        for prefix in OVEN_PREFIXES
+        for point in ("start", "end")
+    ),
+    *(f"{prefix}_{point}_time" for prefix in KITCHEN_TIMERS.values() for point in ("start", "end")),
+    "wash_cycle_end_time",
+    "delay_start_timer_start_time",
+    "delay_start_timer_end_time",
+}
+STATE_KEYS = (
+    SENSOR_KEYS
+    | BINARY_KEYS
+    | TIMESTAMP_KEYS
+    | WRITABLE_INTEGER_KEYS
+    | {"appliance_model", "appliance_type", "version", "time"}
+)
 
 
 def selected_devices(entry) -> dict[str, dict]:
@@ -93,94 +177,3 @@ def selected_devices(entry) -> dict[str, dict]:
             }
         }
     return entry.options.get("devices", entry.data["devices"])
-
-
-SENSOR_KEYS = {
-    "ref_set_temp",
-    "frz_set_temp",
-    "crisp_set_temp",
-    "air_filter_pct_remaining",
-    "water_filter_pct_remaining",
-    "ap_rssi",
-    "cav_temp",
-    "cav_set_temp",
-    "cav_probe_temp",
-    "cav_probe_set_temp",
-}
-BINARY_KEYS = {
-    "ref_door_ajar",
-    "frz_door_ajar",
-    "service_required",
-    "unit_on",
-    "ice_maker_on",
-    "max_ice_on",
-    "night_ice_on",
-    "air_filter_on",
-    "sabbath_on",
-    "high_use_on",
-    "short_vacation_on",
-    "long_vacation_on",
-    "cav_door_ajar",
-    "cav_unit_on",
-    "cav_at_set_temp",
-    "cav_light_on",
-    "cav_remote_ready",
-    "cav_probe_on",
-    "cav_probe_at_set_temp",
-    "cav_gourmet_mode_on",
-    "cav_cook_timer_complete",
-    "kitchen_timer_active",
-    "kitchen_timer_complete",
-    "kitchen_timer2_active",
-    "kitchen_timer2_complete",
-}
-SENSOR_KEYS |= {
-    "ref_display_temp",
-    "frz_display_temp",
-    "water_filter_gal_remaining",
-    "wash_cycle",
-    "wash_status",
-    "uptime",
-    "ipv4_addr",
-    "device_wlan_id",
-    *(key.replace("cav_", "cav2_", 1) for key in SENSOR_KEYS if key.startswith("cav_")),
-}
-BINARY_KEYS |= {
-    "cav_mode_change_enabled",
-    "cav_cook_timer_active",
-    "door_ajar",
-    "wash_cycle_on",
-    "remote_ready",
-    "rinse_aid_low",
-    "softener_low",
-    "delay_start_timer_active",
-    *DISHWASHER_SWITCHES,
-}
-BINARY_KEYS |= {key.replace("cav_", "cav2_", 1) for key in BINARY_KEYS if key.startswith("cav_")}
-TIMESTAMP_KEYS = {
-    "max_ice_start_time",
-    "max_ice_end_time",
-    "high_use_start_time",
-    "high_use_end_time",
-    "wash_cycle_end_time",
-    "delay_start_timer_start_time",
-    "delay_start_timer_end_time",
-    *(
-        f"{prefix}_cook_timer_{point}_time"
-        for prefix in OVEN_PREFIXES
-        for point in ("start", "end")
-    ),
-    *(f"{prefix}_{point}_time" for prefix in KITCHEN_TIMERS.values() for point in ("start", "end")),
-}
-STATE_KEYS = (
-    SENSOR_KEYS
-    | BINARY_KEYS
-    | TIMESTAMP_KEYS
-    | WRITABLE_INTEGER_KEYS
-    | {
-        "appliance_model",
-        "appliance_type",
-        "version",
-        "time",
-    }
-)
