@@ -226,14 +226,38 @@ async def test_reload_saves_units_for_fallback_without_changing_selection(hass, 
     assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "38"
 
 
-async def test_missing_metadata_keeps_appliance_without_assuming_temperature_units(hass, loaded):
+@pytest.mark.parametrize("options", [False, True])
+async def test_missing_metadata_preserves_saved_units(hass, loaded, options):
     entry, client, _, _, _ = loaded
-    client.appliances.return_value = []
+    selected = {
+        **entry.data["devices"],
+        "test-oven": {"name": "Wall oven", "temperature_unit": "F"},
+    }
+    if options:
+        hass.config_entries.async_update_entry(entry, options={"devices": selected})
+    else:
+        hass.config_entries.async_update_entry(entry, data={**entry.data, "devices": selected})
+    client.appliances.return_value = [Appliance("test-oven", "Wall oven", "C")]
     await hass.config_entries.async_reload(entry.entry_id)
     await hass.async_block_till_done()
-    assert entry.runtime_data.coordinators["test-fridge"].device["temperature_unit"] is None
-    assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "unavailable"
+    assert entry.state is ConfigEntryState.LOADED
+    source = entry.options if options else entry.data
+    assert source["devices"] == {
+        "test-fridge": {"name": "Kitchen", "temperature_unit": "F"},
+        "test-oven": {"name": "Wall oven", "temperature_unit": "C"},
+    }
+    assert entry.runtime_data.coordinators["test-fridge"].device["temperature_unit"] == "F"
+    assert entry.runtime_data.coordinators["test-oven"].device["temperature_unit"] == "C"
+    assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "38"
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
+
+    client.appliances.side_effect = ApiError("Appliance list unavailable")
+    await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.LOADED
+    assert entry.runtime_data.coordinators["test-fridge"].device["temperature_unit"] == "F"
+    assert entry.runtime_data.coordinators["test-oven"].device["temperature_unit"] == "C"
+    assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "38"
 
 
 async def test_refreshed_units_are_saved_even_when_appliance_status_fails(hass, loaded):

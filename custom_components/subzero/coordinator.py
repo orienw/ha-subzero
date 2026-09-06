@@ -180,7 +180,8 @@ class SubZeroAccount:
         else:
             units = {appliance.id: appliance.temperature_unit for appliance in appliances}
             for coordinator in self.coordinators.values():
-                coordinator.device["temperature_unit"] = units.get(coordinator.device_id)
+                if coordinator.device_id in units:
+                    coordinator.device["temperature_unit"] = units[coordinator.device_id]
             devices = {
                 device_id: dict(coordinator.device)
                 for device_id, coordinator in self.coordinators.items()
