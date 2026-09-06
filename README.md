@@ -124,7 +124,7 @@ Unknown wash cycle/status codes show as unknown. The integration sends only supp
 
 Wi-Fi signal strength is enabled by default. Uptime, IP address, MAC address, connection mode, and live reporting mode are diagnostic sensors disabled by default. Enable them from the entity settings when needed.
 
-Download diagnostics from the integration or individual device page. Downloads use the cached appliance state and omit account credentials, appliance names, serial numbers, and network identifiers.
+Download diagnostics from the integration or individual device page. Downloads use the cached appliance state and omit account credentials, appliance names, serial numbers, and network identifiers. They also list unrecognized state key names seen since the last reload, without their values, to help investigate support for other models.
 
 Timer timestamps require an explicit timezone offset, either in the timestamp or the appliance clock. A missing timestamp or an unverifiable timezone shows as unknown.
 

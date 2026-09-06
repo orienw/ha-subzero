@@ -52,6 +52,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self.entry = entry
         self.device_id = device_id
         self.device = dict(device)
+        self.unrecognized_keys: set[str] = set()
         self._command_lock = asyncio.Lock()
 
     async def async_set_properties(self, properties: dict) -> None:
@@ -119,10 +120,12 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             raise UpdateFailed(str(error), retry_after=error.retry_after) from error
         except ApiError as error:
             raise UpdateFailed(str(error)) from error
+        self.unrecognized_keys.update(data.keys() - STATE_KEYS)
         return {key: value for key, value in data.items() if key in STATE_KEYS}
 
     @callback
     def apply_update(self, update: StateUpdate) -> None:
+        self.unrecognized_keys.update(update.properties.keys() - STATE_KEYS)
         if not self.last_update_success and not update.full:
             return
         properties = {key: value for key, value in update.properties.items() if key in STATE_KEYS}

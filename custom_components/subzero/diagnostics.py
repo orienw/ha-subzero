@@ -13,6 +13,7 @@ def appliance_diagnostics(coordinator: SubZeroCoordinator) -> dict:
     return {
         "available": coordinator.last_update_success,
         "temperature_unit": coordinator.device.get("temperature_unit"),
+        "unrecognized_state_keys": sorted(coordinator.unrecognized_keys),
         "state": async_redact_data(coordinator.data, {"ipv4_addr", "device_wlan_id"}),
     }
 

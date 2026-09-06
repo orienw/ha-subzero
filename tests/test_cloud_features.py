@@ -549,6 +549,41 @@ async def test_diagnostics_omit_credentials_names_and_network_identifiers(hass, 
     assert appliances.client.state.await_count == 3
 
 
+async def test_diagnostics_keep_unknown_key_names_from_reads_and_push_without_values(
+    hass, appliances
+):
+    coordinator = appliances.entry.runtime_data.coordinators["fridge"]
+    appliances.states["fridge"]["new_read_feature"] = {"private_nested_key": "private-read-value"}
+    await coordinator.async_refresh()
+    await appliances.update("fridge", {"new_push_feature": "private-push-value"})
+    await appliances.update(
+        "fridge",
+        {"appliance_model": "TEST-MODEL", "new_snapshot_feature": "private-snapshot-value"},
+        full=True,
+    )
+    device = dr.async_get(hass).async_get_device_by_identifier(
+        (DOMAIN, "fridge"), appliances.entry.entry_id
+    )
+    result = await async_get_device_diagnostics(hass, appliances.entry, device)
+    assert result["unrecognized_state_keys"] == [
+        "ap_ssid",
+        "appliance_serial",
+        "new_push_feature",
+        "new_read_feature",
+        "new_snapshot_feature",
+        "remote_svc_reg_token",
+    ]
+    assert result["state"] == {"appliance_model": "TEST-MODEL"}
+    encoded = json.dumps(await async_get_config_entry_diagnostics(hass, appliances.entry))
+    for private in (
+        "private_nested_key",
+        "private-read-value",
+        "private-push-value",
+        "private-snapshot-value",
+    ):
+        assert private not in encoded
+
+
 async def test_cloud_failure_disables_controls_without_changing_other_appliances(hass, appliances):
     await appliances.updates.put(("oven", ApiError("Disconnected")))
     await hass.async_block_till_done()
