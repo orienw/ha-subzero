@@ -51,7 +51,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self.client = client
         self.entry = entry
         self.device_id = device_id
-        self.device = device
+        self.device = dict(device)
         self._command_lock = asyncio.Lock()
 
     async def async_set_properties(self, properties: dict) -> None:
@@ -149,8 +149,18 @@ class SubZeroAccount:
         }
 
     async def async_setup(self) -> None:
+        if not self.coordinators:
+            return
+        try:
+            appliances = await self.client.appliances()
+        except InvalidAuth as error:
+            raise ConfigEntryAuthFailed(str(error)) from error
+        except ApiError as error:
+            raise ConfigEntryNotReady(str(error)) from error
+        units = {appliance.id: appliance.temperature_unit for appliance in appliances}
         errors = []
         for coordinator in self.coordinators.values():
+            coordinator.device["temperature_unit"] = units.get(coordinator.device_id)
             try:
                 await coordinator.async_config_entry_first_refresh()
             except ConfigEntryNotReady as error:

@@ -58,7 +58,7 @@ async def loaded(hass, tokens, request):
         client.open_channel = AsyncMock()
         client.appliances = AsyncMock(
             return_value=[
-                Appliance("test-fridge", "Kitchen", "F"),
+                Appliance("test-fridge", "Kitchen", getattr(request, "param", "F")),
                 Appliance("test-oven", "Wall oven", "F"),
             ]
         )
@@ -159,6 +159,64 @@ async def test_other_unit_accounts_keep_status_without_guessing_temperature_unit
     assert hass.states.get("sensor.kitchen_refrigerator_setpoint") is None
 
 
+async def test_reload_refreshes_units_without_changing_selection_or_saved_metadata(hass, loaded):
+    entry, client, _, _, _ = loaded
+    selected = {"test-fridge": {"name": "Kitchen", "temperature_unit": "F"}}
+    hass.config_entries.async_update_entry(entry, options={"devices": selected})
+    client.appliances.return_value = [
+        Appliance("test-fridge", "Renamed in app", "C"),
+        Appliance("test-oven", "Unselected oven", "F"),
+    ]
+    await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert client.appliances.await_count == 2
+    assert entry.options["devices"] == selected
+    assert entry.data["devices"] == selected
+    assert set(entry.runtime_data.coordinators) == {"test-fridge"}
+    assert entry.runtime_data.coordinators["test-fridge"].device == {
+        "name": "Kitchen",
+        "temperature_unit": "C",
+    }
+    assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "unavailable"
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
+
+    client.appliances.return_value = [Appliance("test-fridge", "Kitchen", "F")]
+    await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert client.appliances.await_count == 3
+    assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "38"
+
+
+async def test_missing_metadata_keeps_appliance_without_assuming_temperature_units(hass, loaded):
+    entry, client, _, _, _ = loaded
+    client.appliances.return_value = []
+    await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.runtime_data.coordinators["test-fridge"].device["temperature_unit"] is None
+    assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "unavailable"
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
+
+
+@pytest.mark.parametrize(
+    "error", [ApiError("Unavailable"), RateLimited(300), InvalidAuth("Expired")]
+)
+async def test_metadata_failure_uses_setup_retry_or_reauth(hass, loaded, error):
+    entry, client, _, _, _ = loaded
+    client.appliances.side_effect = error
+    client.state.reset_mock()
+    await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    client.state.assert_not_awaited()
+    if isinstance(error, InvalidAuth):
+        assert entry.state is ConfigEntryState.SETUP_ERROR
+        assert (
+            hass.config_entries.flow.async_progress_by_handler(DOMAIN)[0]["context"]["source"]
+            == "reauth"
+        )
+    else:
+        assert entry.state is ConfigEntryState.SETUP_RETRY
+
+
 @pytest.mark.parametrize("error", [ApiError("offline"), RateLimited(300)])
 async def test_stream_failure_marks_entities_unavailable_without_immediate_retry(
     hass, loaded, error
@@ -224,7 +282,7 @@ async def test_configure_adds_devices_with_saved_login_and_one_stream(hass, load
         await hass.async_block_till_done()
     assert result["type"] is FlowResultType.CREATE_ENTRY
     login.assert_not_awaited()
-    client.appliances.assert_awaited_once()
+    assert client.appliances.await_count == 3
     assert client.watched == [["test-fridge"], ["test-fridge", "test-oven"]]
     assert registry.async_get(original.entity_id).id == original.id
     assert len(dr.async_entries_for_config_entry(dr.async_get(hass), entry.entry_id)) == 2
@@ -257,7 +315,7 @@ async def test_deselection_removes_only_that_device_and_its_entities(hass, loade
         entity.unique_id.startswith("test-fridge_")
         for entity in er.async_entries_for_config_entry(er.async_get(hass), entry.entry_id)
     )
-    assert client.appliances.await_count == 2
+    assert client.appliances.await_count == 5
     assert client.watched[-1] == ["test-fridge"]
 
 
@@ -330,6 +388,10 @@ async def test_upgrade_enables_old_defaults_and_preserves_user_disabled_entities
         suggested_object_id="custom_wifi",
     )
     with (
+        patch(
+            "custom_components.subzero.api.SubZeroClient.appliances",
+            return_value=[Appliance("test-fridge", "Kitchen", "F")],
+        ),
         patch(
             "custom_components.subzero.api.SubZeroClient.state",
             return_value={

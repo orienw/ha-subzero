@@ -14,7 +14,7 @@ from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_system import METRIC_SYSTEM, US_CUSTOMARY_SYSTEM
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.subzero.api import ApiError, StateUpdate, token_state
+from custom_components.subzero.api import ApiError, Appliance, StateUpdate, token_state
 from custom_components.subzero.const import DOMAIN
 from custom_components.subzero.diagnostics import (
     async_get_config_entry_diagnostics,
@@ -168,6 +168,12 @@ async def appliances(hass, tokens, request):
     ):
         client = factory.return_value
         client.tokens = token_state(tokens)
+        client.appliances = AsyncMock(
+            return_value=[
+                Appliance(device_id, device["name"], unit)
+                for device_id, device in entry.data["devices"].items()
+            ]
+        )
         client.push_connected = True
         client.state = AsyncMock(side_effect=lambda device_id: dict(states[device_id]))
         client.set_property = AsyncMock(side_effect=write)
