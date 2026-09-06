@@ -1,16 +1,13 @@
-"""Exercise B2C's form journey, browser-compatible cookies and ID validation."""
+"""Exercise B2C's form journey and browser-compatible cookies."""
 
 import hashlib
 import json
-import time
 from base64 import urlsafe_b64encode
 from urllib.parse import urlencode
 
 import aiohttp
-import jwt
 import pytest
 from aiohttp import web
-from cryptography.hazmat.primitives.asymmetric import rsa
 from homeassistant.helpers.aiohttp_client import async_create_clientsession, async_get_clientsession
 
 from custom_components.subzero import auth
@@ -29,9 +26,6 @@ async def login_client():
 
 @pytest.fixture
 async def login_server(aiohttp_server, monkeypatch, socket_enabled):
-    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    public_key = json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(private_key.public_key()))
-    public_key["kid"] = "test-key"
     journey = {"failure": None, "form_accepted": False, "exchanged": False, "requests": []}
 
     @web.middleware
@@ -87,34 +81,10 @@ async def login_server(aiohttp_server, monkeypatch, socket_enabled):
         assert journey["code_challenge"] == challenge
         assert journey["code_challenge_method"] == "S256"
         assert data["redirect_uri"] == auth.REDIRECT_URI
-        claims = {
-            "sub": "test-owner",
-            "iss": origin + "/issuer",
-            "aud": auth.CLIENT_ID,
-            "exp": int(time.time()) + 3600,
-            "nonce": journey["nonce"],
-        }
-        failure = journey["failure"]
-        if failure in {"nonce", "aud", "iss"}:
-            claims[failure] = "unexpected-value"
-        if failure == "expired":
-            claims["exp"] = int(time.time()) - 60
-        if failure == "missing_exp":
-            del claims["exp"]
-        key = private_key
-        if failure == "signature":
-            key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-        identity = jwt.encode(claims, key, algorithm="RS256", headers={"kid": "test-key"})
         journey["exchanged"] = True
         return web.json_response(
-            {"id_token": identity, "access_token": "test-access", "refresh_token": "test-refresh"}
+            {"id_token": "test-id", "access_token": "test-access", "refresh_token": "test-refresh"}
         )
-
-    async def metadata(request):
-        return web.json_response({"issuer": origin + "/issuer", "jwks_uri": origin + "/keys"})
-
-    async def keys(request):
-        return web.json_response({"keys": [public_key]})
 
     app = web.Application(middlewares=[record_headers])
     app.router.add_get("/start", start)
@@ -122,14 +92,11 @@ async def login_server(aiohttp_server, monkeypatch, socket_enabled):
     app.router.add_post("/policy/SelfAsserted", form)
     app.router.add_get("/policy/api/CombinedSigninAndSignup/confirmed", confirmed)
     app.router.add_post("/token", token)
-    app.router.add_get("/metadata", metadata)
-    app.router.add_get("/keys", keys)
     server = await aiohttp_server(app)
     origin = str(server.make_url("/")).rstrip("/")
     monkeypatch.setattr(auth, "LOGIN_ORIGIN", origin)
     monkeypatch.setattr(auth, "AUTHORIZE_URL", origin + "/authorize")
     monkeypatch.setattr(auth, "TOKEN_URL", origin + "/token")
-    monkeypatch.setattr(auth, "METADATA_URL", origin + "/metadata")
     return journey
 
 
@@ -161,12 +128,7 @@ async def test_login_headers_override_home_assistant_through_redirects(
         "/policy/SelfAsserted",
         "/policy/api/CombinedSigninAndSignup/confirmed",
     ]
-    assert [path for path, _ in login_server["requests"]] == [
-        *browser_paths,
-        "/token",
-        "/metadata",
-        "/keys",
-    ]
+    assert [path for path, _ in login_server["requests"]] == [*browser_paths, "/token"]
     for path, headers in login_server["requests"]:
         if path in browser_paths:
             assert headers.getall("User-Agent") == [
@@ -191,21 +153,14 @@ async def test_login_headers_override_home_assistant_through_redirects(
         ("password", auth.InvalidAuth),
         ("mfa", auth.LoginChallenge),
         ("state", auth.LoginError),
-        ("nonce", auth.LoginError),
-        ("aud", auth.LoginError),
-        ("iss", auth.LoginError),
-        ("expired", auth.LoginError),
-        ("missing_exp", auth.LoginError),
-        ("signature", auth.LoginError),
     ],
 )
-async def test_rejects_failed_or_unverified_login(login_server, login_client, failure, exception):
+async def test_rejects_failed_login(login_server, login_client, failure, exception):
     login_server["failure"] = failure
     with pytest.raises(exception):
         await login_client.login("owner@example.test", "test-only-password")
     assert login_server["form_accepted"]
-    if failure not in {"password", "mfa", "state"}:
-        assert login_server["exchanged"]
+    assert not login_server["exchanged"]
 
 
 async def test_rejects_external_redirect_without_requesting_it(login_client):
@@ -218,8 +173,6 @@ async def test_rejects_external_redirect_without_requesting_it(login_client):
     [
         ("/authorize", 'SETTINGS = {"api":"CombinedSigninAndSignup"};', 200),
         ("/token", "<html>Temporarily unavailable</html>", 200),
-        ("/metadata", "<html>Temporarily unavailable</html>", 200),
-        ("/keys", "<html>Temporarily unavailable</html>", 200),
         ("/token", "Service unavailable", 503),
     ],
 )

@@ -8,7 +8,6 @@ from base64 import urlsafe_b64encode
 from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
 
 import aiohttp
-import jwt
 
 from .app_config import AUTH_HEADERS, LOGIN_HEADERS
 
@@ -16,7 +15,6 @@ LOGIN_ORIGIN = "https://login.subzero-wolf.com"
 POLICY_BASE = LOGIN_ORIGIN + "/SubZeroB2CPrd.onmicrosoft.com/B2C_1A_SIGNUP_SIGNIN"
 AUTHORIZE_URL = POLICY_BASE + "/oauth2/v2.0/authorize"
 TOKEN_URL = POLICY_BASE + "/oauth2/v2.0/token"
-METADATA_URL = POLICY_BASE + "/v2.0/.well-known/openid-configuration"
 CLIENT_ID = "6eefabd0-49a3-4b92-b329-81b9f638e940"
 REDIRECT_URI = "com.szg.szgdigitalproductexperience://oauth/redirect"
 SCOPES = "openid offline_access " + CLIENT_ID
@@ -74,6 +72,7 @@ class SubZeroLogin:
             "response_type": "code",
             "scope": SCOPES,
             "state": self.state,
+            # B2C lists nonce as required; state and PKCE already bind the response.
             "nonce": self.nonce,
             "code_challenge": challenge,
             "code_challenge_method": "S256",
@@ -188,54 +187,7 @@ class SubZeroLogin:
                 raise LoginError(f"Sub-Zero's token service returned HTTP {response.status}.")
             tokens = await response.json(content_type=None)
         if not isinstance(tokens, dict) or not all(
-            tokens.get(key) for key in ("access_token", "id_token", "refresh_token")
+            tokens.get(key) for key in ("access_token", "refresh_token")
         ):
             raise LoginError("Sub-Zero did not return the required login tokens.")
-        await self._validate_identity(tokens["id_token"])
         return tokens
-
-    async def _validate_identity(self, token: str) -> None:
-        async with self.token_session.get(
-            METADATA_URL,
-            headers=AUTH_HEADERS,
-            timeout=self.session.timeout,
-            allow_redirects=False,
-        ) as response:
-            if response.status != 200:
-                raise LoginError("Sub-Zero's signing metadata is unavailable.")
-            metadata = await response.json(content_type=None)
-        if not isinstance(metadata, dict) or not all(
-            isinstance(metadata.get(key), str) for key in ("jwks_uri", "issuer")
-        ):
-            raise LoginError("Sub-Zero returned invalid signing metadata.")
-        key_url = urlsplit(metadata["jwks_uri"])
-        origin = urlsplit(LOGIN_ORIGIN)
-        if (key_url.scheme, key_url.netloc) not in {
-            (origin.scheme, origin.netloc),
-            ("https", "subzerob2cprd.b2clogin.com"),
-        }:
-            raise LoginError("Sub-Zero returned an unexpected signing-key location.")
-        async with self.token_session.get(
-            metadata["jwks_uri"],
-            headers=AUTH_HEADERS,
-            timeout=self.session.timeout,
-            allow_redirects=False,
-        ) as response:
-            if response.status != 200:
-                raise LoginError("Sub-Zero's signing keys are unavailable.")
-            keys = await response.json(content_type=None)
-        try:
-            kid = jwt.get_unverified_header(token)["kid"]
-            key = next(jwt.PyJWK.from_dict(key) for key in keys["keys"] if key["kid"] == kid)
-            identity = jwt.decode(
-                token,
-                key.key,
-                algorithms=["RS256"],
-                audience=CLIENT_ID,
-                issuer=metadata["issuer"],
-                options={"require": ["exp", "aud", "iss", "nonce"]},
-            )
-            if not secrets.compare_digest(identity.get("nonce", ""), self.nonce):
-                raise LoginError("Sub-Zero returned an unexpected login nonce.")
-        except jwt.PyJWTError, KeyError, StopIteration, TypeError, ValueError:
-            raise LoginError("Sub-Zero's login token could not be verified.") from None
