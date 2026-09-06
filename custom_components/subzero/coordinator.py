@@ -172,12 +172,31 @@ class SubZeroAccount:
             appliances = await self.client.appliances()
         except InvalidAuth as error:
             raise ConfigEntryAuthFailed(str(error)) from error
-        except ApiError as error:
+        except RateLimited as error:
             raise ConfigEntryNotReady(str(error)) from error
-        units = {appliance.id: appliance.temperature_unit for appliance in appliances}
+        except ApiError as error:
+            _LOGGER.warning(
+                "Could not refresh appliance units; using cached units where available: %s", error
+            )
+        else:
+            units = {appliance.id: appliance.temperature_unit for appliance in appliances}
+            for coordinator in self.coordinators.values():
+                coordinator.device["temperature_unit"] = units.get(coordinator.device_id)
+            devices = {
+                device_id: dict(coordinator.device)
+                for device_id, coordinator in self.coordinators.items()
+            }
+            if devices != selected_devices(self.entry):
+                if "devices" in self.entry.options:
+                    self.hass.config_entries.async_update_entry(
+                        self.entry, options={**self.entry.options, "devices": devices}
+                    )
+                else:
+                    self.hass.config_entries.async_update_entry(
+                        self.entry, data={**self.entry.data, "devices": devices}
+                    )
         errors = []
         for coordinator in self.coordinators.values():
-            coordinator.device["temperature_unit"] = units.get(coordinator.device_id)
             try:
                 await coordinator.async_config_entry_first_refresh()
             except ConfigEntryNotReady as error:

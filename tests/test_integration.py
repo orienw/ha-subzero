@@ -180,10 +180,13 @@ async def test_other_unit_accounts_keep_status_without_guessing_temperature_unit
     assert hass.states.get("sensor.kitchen_refrigerator_setpoint") is None
 
 
-async def test_reload_refreshes_units_without_changing_selection_or_saved_metadata(hass, loaded):
+@pytest.mark.parametrize("options", [False, True])
+async def test_reload_saves_units_for_fallback_without_changing_selection(hass, loaded, options):
     entry, client, _, _, _ = loaded
     selected = {"test-fridge": {"name": "Kitchen", "temperature_unit": "F"}}
-    hass.config_entries.async_update_entry(entry, options={"devices": selected})
+    if options:
+        hass.config_entries.async_update_entry(entry, options={"devices": selected})
+    tokens = entry.data["tokens"]
     client.appliances.return_value = [
         Appliance("test-fridge", "Renamed in app", "C"),
         Appliance("test-oven", "Unselected oven", "F"),
@@ -191,8 +194,11 @@ async def test_reload_refreshes_units_without_changing_selection_or_saved_metada
     await hass.config_entries.async_reload(entry.entry_id)
     await hass.async_block_till_done()
     assert client.appliances.await_count == 2
-    assert entry.options["devices"] == selected
-    assert entry.data["devices"] == selected
+    source = entry.options if options else entry.data
+    assert source["devices"] == {"test-fridge": {"name": "Kitchen", "temperature_unit": "C"}}
+    assert entry.data["tokens"] == tokens
+    if options:
+        assert entry.data["devices"] == selected
     assert set(entry.runtime_data.coordinators) == {"test-fridge"}
     assert entry.runtime_data.coordinators["test-fridge"].device == {
         "name": "Kitchen",
@@ -201,10 +207,22 @@ async def test_reload_refreshes_units_without_changing_selection_or_saved_metada
     assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "unavailable"
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
 
+    client.appliances.side_effect = ApiError("Temporarily unavailable")
+    await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.LOADED
+    assert client.appliances.await_count == 3
+    assert entry.runtime_data.coordinators["test-fridge"].device["temperature_unit"] == "C"
+    assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "unavailable"
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
+
+    client.appliances.side_effect = None
     client.appliances.return_value = [Appliance("test-fridge", "Kitchen", "F")]
     await hass.config_entries.async_reload(entry.entry_id)
     await hass.async_block_till_done()
-    assert client.appliances.await_count == 3
+    assert client.appliances.await_count == 4
+    source = entry.options if options else entry.data
+    assert source["devices"] == selected
     assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "38"
 
 
@@ -218,9 +236,49 @@ async def test_missing_metadata_keeps_appliance_without_assuming_temperature_uni
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
 
 
-@pytest.mark.parametrize(
-    "error", [ApiError("Unavailable"), RateLimited(300), InvalidAuth("Expired")]
-)
+async def test_refreshed_units_are_saved_even_when_appliance_status_fails(hass, loaded):
+    entry, client, _, _, _ = loaded
+    client.appliances.return_value = [Appliance("test-fridge", "Kitchen", "C")]
+    client.state.side_effect = ApiError("Appliance unavailable")
+    await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.SETUP_RETRY
+    assert entry.data["devices"]["test-fridge"]["temperature_unit"] == "C"
+
+    client.appliances.side_effect = ApiError("Appliance list unavailable")
+    client.state.side_effect = None
+    await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.LOADED
+    assert entry.runtime_data.coordinators["test-fridge"].device["temperature_unit"] == "C"
+    assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "unavailable"
+
+
+@pytest.mark.parametrize("loaded", ["F", "C", None], indirect=True)
+async def test_metadata_outage_loads_appliances_with_cached_or_unknown_units(hass, loaded, caplog):
+    entry, client, _, _, _ = loaded
+    saved = dict(entry.data)
+    unit = entry.runtime_data.coordinators["test-fridge"].device["temperature_unit"]
+    client.appliances.side_effect = ApiError("Temporarily unavailable")
+    client.state.return_value["air_filter_on"] = False
+    client.state.reset_mock()
+    await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.LOADED
+    assert entry.data == saved
+    client.state.assert_awaited_once_with("test-fridge")
+    assert entry.runtime_data.coordinators["test-fridge"].device["temperature_unit"] == unit
+    temperature = hass.states.get("sensor.kitchen_refrigerator_setpoint")
+    if unit == "F":
+        assert temperature.state == "38"
+    else:
+        assert temperature is None
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
+    assert hass.states.get("switch.kitchen_air_purification").state == "off"
+    assert "using cached units where available" in caplog.text
+
+
+@pytest.mark.parametrize("error", [RateLimited(300), InvalidAuth("Expired")])
 async def test_metadata_failure_uses_setup_retry_or_reauth(hass, loaded, error):
     entry, client, _, _, _ = loaded
     client.appliances.side_effect = error

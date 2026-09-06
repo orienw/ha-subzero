@@ -79,7 +79,7 @@ Refrigerator temperatures on the primary tested model are **configured setpoints
 
 Temperature entities require an appliance configured in Fahrenheit in the Sub-Zero app. Temperature entities are omitted for other app temperature settings until their units can be verified. Other entities remain available. Home Assistant can display Fahrenheit readings in your preferred temperature unit.
 
-Appliance temperature units refresh automatically at startup and whenever the integration reloads. After changing the unit in the Sub-Zero app, reload the integration to apply it immediately. Other app temperature settings still leave temperature entities unavailable.
+Appliance temperature units refresh automatically at startup and whenever the integration reloads. If the appliance list is temporarily unavailable, the integration uses the last saved units. Without a known unit, other features remain available and temperature entities are omitted. After changing the unit in the Sub-Zero app, reload the integration to refresh it. Other app temperature settings still leave temperature entities unavailable.
 
 ## Wolf ovens
 
