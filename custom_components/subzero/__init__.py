@@ -11,8 +11,8 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import SubZeroClient
 from .app_config import SUBSCRIPTION_KEY
-from .const import DISHWASHER_SWITCHES, DOMAIN, selected_devices
-from .coordinator import SubZeroAccount, SubZeroCoordinator
+from .const import DISHWASHER_SWITCHES, DOMAIN
+from .coordinator import SubZeroAccount, SubZeroCoordinator, selected_devices
 
 PLATFORMS = [
     Platform.SENSOR,

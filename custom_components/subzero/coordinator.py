@@ -27,11 +27,22 @@ from .const import (
     MAX_RECONNECT_DELAY,
     RECONNECT_DELAY,
     STATE_KEYS,
-    selected_devices,
 )
 from .controls import control_matches, is_dishwasher, is_oven, validate_control_properties
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def selected_devices(entry: ConfigEntry) -> dict[str, dict]:
+    """Return the appliance selection, including entries awaiting migration."""
+    if "device_id" in entry.data:
+        return {
+            entry.data["device_id"]: {
+                "name": entry.title,
+                "temperature_unit": entry.data.get("temperature_unit"),
+            }
+        }
+    return entry.options.get("devices", entry.data["devices"])
 
 
 class SubZeroCoordinator(DataUpdateCoordinator[dict]):

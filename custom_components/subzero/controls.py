@@ -142,7 +142,7 @@ def temperature_range(key: str, data: dict) -> tuple[int, int] | None:
     if key == "ref_set_temp":
         model = data.get("appliance_model", "")
         legacy = isinstance(model, str) and model.startswith(("BI", "IT", "IC", "ID"))
-        return 34, 45 if legacy else 42
+        return 34, (45 if legacy else 42)
     return None
 
 

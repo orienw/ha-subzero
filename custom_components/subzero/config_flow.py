@@ -17,7 +17,8 @@ from homeassistant.helpers.selector import (
 from .api import ApiError, RateLimited, SubZeroClient
 from .app_config import SUBSCRIPTION_KEY
 from .auth import InvalidAuth, LoginChallenge, LoginError, SubZeroLogin
-from .const import DOMAIN, selected_devices
+from .const import DOMAIN
+from .coordinator import selected_devices
 
 
 def device_schema(devices: dict, selected: list[str]) -> vol.Schema:
@@ -48,6 +49,9 @@ def configured_devices(hass, exclude_entry_id=None) -> set[str]:
 class SubZeroConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 2
     MINOR_VERSION = 2
+    _client: SubZeroClient
+    _devices: dict[str, dict]
+    _title: str
 
     @staticmethod
     @callback
@@ -166,11 +170,13 @@ class SubZeroConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class SubZeroOptionsFlow(config_entries.OptionsFlowWithReload):
+    _devices: dict[str, dict] | None = None
+
     async def async_step_init(self, user_input=None):
         errors = {}
         entry = self.config_entry
         current = selected_devices(entry)
-        if not hasattr(self, "_devices"):
+        if self._devices is None:
 
             async def save_tokens(tokens: dict) -> None:
                 self.hass.config_entries.async_update_entry(
