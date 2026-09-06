@@ -4,9 +4,7 @@
 
 A custom integration for connected Sub-Zero refrigerators and freezers, Wolf ovens, and Cove dishwashers, installed through HACS.
 
-Sign in with your Sub-Zero Group Owner email and password directly in Home Assistant.
-
-Monitor and control your appliances over Sub-Zero's cloud service using their existing Wi-Fi connections. Bluetooth is not required.
+Sign in with your Sub-Zero Group Owner email and password directly in Home Assistant. Appliances are monitored and controlled over Sub-Zero's cloud service using their existing Wi-Fi connections. Bluetooth is not required.
 
 ## Install with HACS
 
@@ -24,13 +22,21 @@ Use the button above, or add the repository manually:
 4. Open **Settings → Devices & services → Add integration → Sub-Zero**.
 5. Enter your Sub-Zero account email and password, then select the appliances to include.
 
-To add appliances later, open **Settings → Devices & services → Sub-Zero → Configure**. This refreshes the account's appliance list and lets you change the selection using your saved connection. Deselecting an appliance removes its Home Assistant device and entities.
+To change the selection later, open **Settings → Devices & services → Sub-Zero → Configure**. This refreshes the account's appliance list using the saved connection. Deselecting an appliance removes its Home Assistant device and entities.
 
 For manual installation, copy `custom_components/subzero` into your Home Assistant configuration's `custom_components` directory, restart, and follow steps 4–5.
 
-## Sub-Zero fridge entities
+## Entities
 
-Entities are created only for recognized properties reported by the appliance. New recognized properties can also be discovered during push updates.
+Entities are created only for recognized properties that each appliance reports, at setup and as new properties appear in push updates. There is no model allowlist.
+
+Temperature entities require the appliance to be set to Fahrenheit in the Sub-Zero app. Setpoints are sent as whole degrees Fahrenheit, and Home Assistant converts readings and inputs to your preferred display unit. Appliance units are read at startup and on reload, falling back to the last saved unit if the appliance list is temporarily unavailable. After changing the unit in the app, reload the integration. Appliances set to other units keep all of their non-temperature entities.
+
+Timestamp sensors require an explicit timezone offset, either in the timestamp or in the appliance clock, and otherwise show as unknown.
+
+Installing, restarting, or reconnecting the integration never changes appliance settings. Settings change only when you use a control or run an automation.
+
+## Sub-Zero refrigerators
 
 ### Controls
 
@@ -45,13 +51,11 @@ Entities are created only for recognized properties reported by the appliance. N
 | Air purification | On, Off |
 | Accent light | 0–100%, optional control for glass-front models, disabled by default |
 
-The available choices follow the properties reported by each fridge. Settings change only when you use a control or run an automation. Installing, restarting, or reconnecting the integration does not change appliance settings.
-
 The **Ice maker** control shows the selected mode. In [**Night ice**](https://www.subzero-wolf.com/assistance/answers/sub-zero/common/sub-zero-night-ice-mode), the separate **Ice maker enabled** status may be Off while the schedule pauses ice production.
 
-Select **Manual** crisper temperature mode to adjust its setpoint. In Automatic mode, the setpoint control is unavailable and the temperature sensor continues to show the configured value. The manual range stays within 2°F of the refrigerator setpoint, between 34°F and 42°F. See [Sub-Zero's crisper temperature guide](https://www.subzero-wolf.com/assistance/answers/sub-zero/next-classic/sub-zero-classic-series-cl-refrigerator-drawer-temperature-contr).
+Select **Manual** crisper temperature mode to adjust its setpoint. In Automatic mode, the setpoint control is unavailable and the sensor continues to show the configured value. The manual range stays within 2°F of the refrigerator setpoint, between 34°F and 42°F. See [Sub-Zero's crisper temperature guide](https://www.subzero-wolf.com/assistance/answers/sub-zero/next-classic/sub-zero-classic-series-cl-refrigerator-drawer-temperature-contr).
 
-Turn off **Max ice** before adjusting the freezer setpoint. Home Assistant enforces the supported temperature ranges and converts your preferred display unit to whole Fahrenheit setpoints.
+Turn off **Max ice** before adjusting the freezer setpoint. Refrigerator and freezer zones also provide climate entities for thermostat cards, with the same temperature limits and Max ice interlock as the number controls.
 
 [Humidity control](https://www.subzero-wolf.com/assistance/answers/sub-zero/next-classic/next-classic-humidity-control) affects the refrigerator zone. [Night mode](https://www.subzero-wolf.com/assistance/answers/sub-zero/next-classic/next-classic-night-mode) dims the interior lights when the room is dark; **Night ice** is a separate ice-maker setting.
 
@@ -60,30 +64,21 @@ Turn off **Max ice** before adjusting the freezer setpoint. Home Assistant enfor
 | Type | Available properties |
 | --- | --- |
 | Temperature setpoints | Refrigerator, freezer, crisper |
-| Filters | Air and water filter life remaining |
+| Display temperatures | Refrigerator and freezer, on models that report them |
+| Filters | Air and water filter life remaining, water filter capacity in gallons |
 | Doors | Refrigerator and freezer door open |
-| Ice-maker settings | Enabled, max ice, night ice |
-| Operating modes | Sabbath, high use, short vacation, long vacation |
+| Ice-maker settings | Enabled, max ice, night ice, plus Max ice start and end times |
+| Operating modes | Sabbath, high use, short vacation, long vacation, plus High use start and end times |
 | Device status | Service required, power |
 | Diagnostic | Wi-Fi signal strength |
 
-Most reported, recognized properties are enabled by default. Accent light and the optional diagnostic sensors are disabled by default. Ice-maker settings and operating modes report their current on/off states. Wi-Fi signal strength appears under Diagnostics.
+Ice-maker settings and operating modes report their on/off state alongside their selectors. Switches report their own On/Off state, so they have no duplicate binary sensors.
 
-Ice-maker settings and operating-mode sensors remain available alongside their selectors. Switches report their own On/Off state for dashboards and automations.
-
-Fridge and freezer zones also provide climate entities for thermostat cards. They use the same temperature limits and Max ice interlock as the number controls.
-
-Additional sensors report water filter capacity remaining in gallons and the start/end times for Max ice and High use when available. A negative filter capacity indicates usage beyond the reported filter capacity.
-
-Refrigerator temperatures on the primary tested model are **configured setpoints**. Separate display-temperature sensors appear on models that report them. The integration does not infer a measured temperature from a setpoint.
-
-Temperature entities require an appliance configured in Fahrenheit in the Sub-Zero app. Temperature entities are omitted for other app temperature settings until their units can be verified. Other entities remain available. Home Assistant can display Fahrenheit readings in your preferred temperature unit.
-
-Appliance temperature units refresh automatically at startup and whenever the integration reloads. If the appliance list is temporarily unavailable, the integration uses the last saved units. Without a known unit, other features remain available and temperature entities are omitted. After changing the unit in the Sub-Zero app, reload the integration to refresh it. Other app temperature settings still leave temperature entities unavailable.
+Refrigerator temperatures on the primary tested model are **configured setpoints**. The integration does not infer a measured temperature from a setpoint. A negative water filter capacity indicates usage beyond the reported filter capacity.
 
 ## Wolf ovens
 
-Each reported oven cavity has its own entities. Existing first-cavity entity IDs are preserved; a second cavity uses names prefixed with **Lower oven**.
+Each reported oven cavity has its own entities. First-cavity entity IDs are preserved from earlier releases; a second cavity uses names prefixed with **Lower oven**.
 
 | Type | Available properties |
 | --- | --- |
@@ -106,8 +101,6 @@ Oven temperature fields that report zero while idle show as unknown; probe readi
 
 ## Cove dishwashers
 
-Entities are created for the recognized properties reported by the dishwasher:
-
 | Type | Features |
 | --- | --- |
 | Cycle monitoring | Wash cycle, wash status, cycle active, cycle end time |
@@ -126,31 +119,21 @@ Wi-Fi signal strength is enabled by default. Uptime, IP address, MAC address, an
 
 Download diagnostics from the integration or individual device page. Downloads use the cached appliance state and omit account credentials, appliance names, serial numbers, and network identifiers. They also list unrecognized state key names seen since the last reload, without their values, to help investigate support for other models.
 
-Timer timestamps require an explicit timezone offset, either in the timestamp or the appliance clock. A missing timestamp or an unverifiable timezone shows as unknown.
-
 ## Compatibility
 
-**Sub-Zero CL4850UFDID is the primary tested appliance.** Cloud status and push snapshots have also been tested with Wolf SO3050PMSP. The additional fridge features, oven controls, second-cavity support, and Cove entities have automated coverage using simulated appliance responses. These additions have not yet been tested against physical appliances.
+**Sub-Zero CL4850UFDID is the primary tested appliance.** Cloud status and push snapshots have also been tested with Wolf SO3050PMSP. The additional fridge features, oven controls, second-cavity support, and Cove entities are covered by automated tests using simulated appliance responses and have not yet been verified against physical appliances.
 
-There is no model allowlist. Other models can be added if the cloud service returns their status. Their available entities depend on which recognized properties they report. Adding an appliance does not imply every feature of that model is supported.
+Other models can be added if the cloud service returns their status. Their entities depend on which recognized properties they report.
 
 Local network access and accounts requiring additional verification or an external sign-in provider are not supported.
 
-## Updates and account access
+## How it works
 
-Selected appliances share account tokens and one SignalR notification connection. Each appliance gets a full status read at setup, then receives push updates. An idle fridge does not trigger periodic status requests.
+Selected appliances share account tokens and one cloud notification connection. Each appliance gets a full status read at setup and then receives push updates, so an idle appliance triggers no periodic status requests. Lost connections reconnect with increasing delays, and rate-limit responses are honored. An appliance that silently stops reporting may go unnoticed until a notification or a failed control request reveals it.
 
-Connection heartbeats keep the notification socket alive, including while another appliance is slow to connect. A disconnected socket reconnects, and failed appliance channels retry independently, with increasing delays. Reopening an appliance channel supplies a fresh push snapshot. API HTTP 429 responses honor `Retry-After` where provided.
+Control changes are confirmed from appliance status, not from the command acknowledgement. If no push update arrives, the integration makes one status request to check the setting. Changing a mode sends only the settings that differ, one at a time, and stops if a change fails.
 
-The notification connection renews before its separate SignalR token expires, at least every 50 minutes. Renewal reopens the selected appliance channels without periodic status polling. Status reads support both direct and wrapped snapshots, with a remembered `get_async` fallback for appliances that acknowledge `get` without returning state.
-
-A healthy cloud socket does not independently verify an idle appliance's connectivity. Without periodic status reads, an appliance that silently stops reporting may go undetected until a notification or a failed control request reveals it.
-
-Control changes are confirmed from appliance status. When a push update does not arrive, the integration makes one status request to check the setting. Changing a mode sends only the settings that differ, one at a time, and stops if a change fails.
-
-Kitchen-timer commands are confirmed from their active state and end time. A successful command acknowledgement alone does not confirm that an appliance applied a change.
-
-Sub-Zero has not published an API quota that this project has verified. Push reduces repeated status requests, but does not guarantee immunity from rate limits, particularly with multiple appliances or unstable connections.
+Sub-Zero does not document an API quota. Push updates keep requests low, but multiple appliances or unstable connections can still hit rate limits.
 
 Your password is used for sign-in and is not saved. Home Assistant stores renewable account tokens in its configuration and refreshes them automatically. If renewal fails, Home Assistant asks you to sign in again. Protect Home Assistant backups as you would other account credentials.
 
