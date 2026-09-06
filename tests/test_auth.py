@@ -100,7 +100,7 @@ async def login_server(aiohttp_server, monkeypatch, socket_enabled):
     return journey
 
 
-async def test_password_login_with_b2c_cookies_and_text_json(login_server, login_client):
+async def test_password_login_through_the_b2c_form(login_server, login_client):
     tokens = await login_client.login("owner@example.test", "test-only-password")
     assert tokens["refresh_token"] == "test-refresh"
     assert login_server["exchanged"]

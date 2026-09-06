@@ -101,7 +101,7 @@ async def controls(hass, tokens, request):
         await hass.async_block_till_done()
 
 
-async def test_controls_are_grouped_and_require_reported_properties(hass, controls):
+async def test_controls_follow_reported_properties(hass, controls):
     entities = er.async_entries_for_config_entry(er.async_get(hass), controls.entry.entry_id)
     control_entities = {e.entity_id for e in entities if e.domain in {"number", "select", "switch"}}
     assert control_entities == {
@@ -128,7 +128,7 @@ async def test_controls_are_grouped_and_require_reported_properties(hass, contro
     controls.client.set_property.assert_not_called()
 
 
-async def test_air_purification_switch_confirms_push_without_duplicate_status(hass, controls):
+async def test_air_purification_switch_confirms_from_push(hass, controls):
     reads = controls.client.state.await_count
     await hass.services.async_call(
         "switch", "turn_off", {"entity_id": "switch.kitchen_air_purification"}, blocking=True
@@ -187,7 +187,7 @@ async def test_night_ice_stays_selected_while_ice_maker_power_is_off(hass, contr
     controls.client.set_property.assert_not_awaited()
 
 
-async def test_selecting_night_ice_from_off_does_not_force_ice_maker_power(hass, controls):
+async def test_night_ice_from_off_leaves_ice_maker_power_alone(hass, controls):
     properties = {"ice_maker_on": False, "night_ice_on": False}
     controls.states["test-fridge"].update(properties)
     await controls.updates.put(("test-fridge", StateUpdate(properties, full=False)))
@@ -263,9 +263,7 @@ async def test_operating_mode_select_clears_other_modes(hass, controls, option, 
         ("freezer", "frz_set_temp", -3),
     ],
 )
-async def test_temperature_setpoints_write_integers_and_update_sensors(
-    hass, controls, entity, key, value
-):
+async def test_setpoint_writes_send_integers(hass, controls, entity, key, value):
     await hass.services.async_call(
         "number",
         "set_value",
@@ -278,7 +276,7 @@ async def test_temperature_setpoints_write_integers_and_update_sensors(
     assert hass.states.get(f"sensor.kitchen_{entity}_setpoint").state == str(value)
 
 
-async def test_crisper_manual_mode_and_limits_follow_refrigerator(hass, controls):
+async def test_crisper_limits_follow_the_fridge_setpoint(hass, controls):
     await hass.services.async_call(
         "select",
         "select_option",
@@ -316,9 +314,7 @@ async def test_crisper_manual_mode_and_limits_follow_refrigerator(hass, controls
         ("night_mode", "Disabled", 0, "Enabled"),
     ],
 )
-async def test_humidity_and_night_mode_use_integer_values(
-    hass, controls, key, option, value, original
-):
+async def test_enum_selects_write_integer_codes(hass, controls, key, option, value, original):
     await hass.services.async_call(
         "select",
         "select_option",
@@ -358,7 +354,7 @@ async def test_unknown_mode_values_are_not_treated_as_enabled(hass, controls, ke
     controls.client.set_property.assert_not_called()
 
 
-async def test_mode_change_stops_on_partial_failure_without_replaying_settings(hass, controls):
+async def test_failed_mode_change_preserves_partial_state(hass, controls):
     original = controls.client.set_property.side_effect
 
     async def write(device_id, key, value):
@@ -484,7 +480,7 @@ async def test_missing_push_uses_one_status_read_to_confirm(hass, controls):
     assert controls.client.set_property.await_count == 1
 
 
-async def test_silent_rejection_reports_failure_and_actual_state(hass, controls):
+async def test_unconfirmed_write_reports_failure(hass, controls):
     controls.behavior["accept"] = False
     with pytest.raises(HomeAssistantError, match="did not confirm"):
         await hass.services.async_call(
@@ -494,7 +490,7 @@ async def test_silent_rejection_reports_failure_and_actual_state(hass, controls)
     assert controls.client.set_property.await_count == 1
 
 
-async def test_failed_write_is_not_retried_and_does_not_change_state(hass, controls):
+async def test_failed_write_is_not_retried(hass, controls):
     controls.client.set_property.side_effect = ApiError("Could not connect to Sub-Zero.")
     with pytest.raises(HomeAssistantError, match="Could not connect"):
         await hass.services.async_call(
@@ -515,7 +511,7 @@ async def test_expired_write_authentication_starts_reauthentication(hass, contro
     assert flows[0]["context"]["source"] == "reauth"
 
 
-async def test_queued_temperature_write_rechecks_max_ice_after_previous_command(hass, controls):
+async def test_queued_write_revalidates_after_the_previous_one(hass, controls):
     entered = asyncio.Event()
     release = asyncio.Event()
     original = controls.client.set_property.side_effect

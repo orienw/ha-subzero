@@ -84,7 +84,7 @@ async def loaded(hass, tokens, request):
             await hass.async_block_till_done()
 
 
-async def test_only_reported_entities_are_created_and_private_fields_discarded(hass, loaded):
+async def test_reported_properties_drive_entity_discovery(hass, loaded):
     entry, client, _, _, _ = loaded
     registry = er.async_get(hass)
     entities = er.async_entries_for_config_entry(registry, entry.entry_id)
@@ -115,7 +115,7 @@ async def test_idle_push_connection_does_not_request_periodic_status(hass, loade
     assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "38"
 
 
-async def test_push_merges_updates_and_discovers_new_capabilities(hass, loaded):
+async def test_partial_push_merges_new_properties(hass, loaded):
     entry, client, updates, _, _ = loaded
     await updates.put(StateUpdate({"ref_door_ajar": True, "frz_set_temp": 0}, full=False))
     await hass.async_block_till_done()
@@ -128,7 +128,7 @@ async def test_push_merges_updates_and_discovers_new_capabilities(hass, loaded):
     client.state.assert_awaited_once()
 
 
-async def test_full_snapshot_removes_missing_property_without_stale_values(hass, loaded):
+async def test_full_snapshot_drops_missing_properties(hass, loaded):
     _, _, updates, _, _ = loaded
     await updates.put(
         StateUpdate({"appliance_model": "ANOTHER-MODEL", "ref_door_ajar": False}, full=True)
@@ -175,13 +175,13 @@ async def test_unload_closes_push_listener(hass, loaded):
 
 
 @pytest.mark.parametrize("loaded", ["C", None], indirect=True)
-async def test_other_unit_accounts_keep_status_without_guessing_temperature_units(hass, loaded):
+async def test_celsius_or_unknown_units_skip_temperature_entities(hass, loaded):
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
     assert hass.states.get("sensor.kitchen_refrigerator_setpoint") is None
 
 
 @pytest.mark.parametrize("options", [False, True])
-async def test_reload_saves_units_for_fallback_without_changing_selection(hass, loaded, options):
+async def test_reload_refreshes_saved_units(hass, loaded, options):
     entry, client, _, _, _ = loaded
     selected = {"test-fridge": {"name": "Kitchen", "temperature_unit": "F"}}
     if options:
@@ -260,7 +260,7 @@ async def test_missing_metadata_preserves_saved_units(hass, loaded, options):
     assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "38"
 
 
-async def test_refreshed_units_are_saved_even_when_appliance_status_fails(hass, loaded):
+async def test_units_are_saved_even_if_status_fails(hass, loaded):
     entry, client, _, _, _ = loaded
     client.appliances.return_value = [Appliance("test-fridge", "Kitchen", "C")]
     client.state.side_effect = ApiError("Appliance unavailable")
@@ -279,7 +279,7 @@ async def test_refreshed_units_are_saved_even_when_appliance_status_fails(hass, 
 
 
 @pytest.mark.parametrize("loaded", ["F", "C", None], indirect=True)
-async def test_metadata_outage_loads_appliances_with_cached_or_unknown_units(hass, loaded, caplog):
+async def test_appliance_list_outage_uses_cached_units(hass, loaded, caplog):
     entry, client, _, _, _ = loaded
     saved = dict(entry.data)
     unit = entry.runtime_data.coordinators["test-fridge"].device["temperature_unit"]
@@ -360,9 +360,7 @@ async def test_metadata_failure_uses_setup_retry_or_reauth(hass, loaded, error):
 
 
 @pytest.mark.parametrize("error", [ApiError("offline"), RateLimited(300)])
-async def test_stream_failure_marks_entities_unavailable_without_immediate_retry(
-    hass, loaded, error
-):
+async def test_stream_failure_marks_entities_unavailable(hass, loaded, error):
     entry, client, updates, _, _ = loaded
     await updates.put(error)
     await hass.async_block_till_done()
@@ -456,7 +454,7 @@ async def test_expired_login_starts_reauthentication(hass, loaded):
     assert flows[0]["context"]["entry_id"] == entry.entry_id
 
 
-async def test_configure_adds_devices_with_saved_login_and_one_stream(hass, loaded):
+async def test_configure_adds_appliances_with_the_saved_login(hass, loaded):
     entry, client, updates, _, _ = loaded
     registry = er.async_get(hass)
     original = registry.async_get("binary_sensor.kitchen_refrigerator_door")
@@ -484,7 +482,7 @@ async def test_configure_adds_devices_with_saved_login_and_one_stream(hass, load
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
 
 
-async def test_deselection_removes_only_that_device_and_its_entities(hass, loaded):
+async def test_deselecting_removes_only_that_appliance(hass, loaded):
     entry, client, _, _, _ = loaded
     first = await hass.config_entries.options.async_init(entry.entry_id)
     await hass.config_entries.options.async_configure(
@@ -554,7 +552,7 @@ async def test_one_offline_appliance_does_not_stop_another(hass, loaded):
     assert hass.states.get("binary_sensor.wall_oven_service_required").state == "off"
 
 
-async def test_upgrade_enables_old_defaults_and_preserves_user_disabled_entities(hass, tokens):
+async def test_v1_upgrade_enables_integration_disabled_entities(hass, tokens):
     entry = MockConfigEntry(
         domain=DOMAIN,
         title="Kitchen",
@@ -653,7 +651,7 @@ async def oven_loaded(hass, loaded):
     return entry, client, updates
 
 
-async def test_oven_entities_use_reported_properties_and_correct_manufacturer(hass, oven_loaded):
+async def test_oven_entities_follow_the_reported_snapshot(hass, oven_loaded):
     entry, _, _ = oven_loaded
     device = dr.async_get(hass).async_get_device_by_identifier(
         (DOMAIN, "test-oven"), entry.entry_id
@@ -681,7 +679,7 @@ async def test_oven_entities_use_reported_properties_and_correct_manufacturer(ha
     assert "cav_unrecognized_property" not in data
 
 
-async def test_oven_push_updates_and_idle_readings_do_not_change_fridge(hass, oven_loaded):
+async def test_oven_push_updates_leave_the_fridge_alone(hass, oven_loaded):
     _, client, updates = oven_loaded
     reads = client.state.await_count
     await updates.put(

@@ -251,9 +251,7 @@ async def test_switches_send_only_the_selected_appliance_property(
         ("dishwasher", "wash_cycle_on", "button.dishwasher_start_wash_cycle", "remote_ready"),
     ],
 )
-async def test_start_requires_physical_remote_ready_and_confirms_consumed_interlock(
-    hass, appliances, device, key, entity_id, ready
-):
+async def test_remote_start_consumes_remote_ready(hass, appliances, device, key, entity_id, ready):
     coordinator = appliances.entry.runtime_data.coordinators[device]
     with pytest.raises(ServiceValidationError, match="Remote Ready"):
         await coordinator.async_set_properties({key: True})
@@ -267,7 +265,7 @@ async def test_start_requires_physical_remote_ready_and_confirms_consumed_interl
     assert hass.states.get(entity_id).state == "unavailable"
 
 
-async def test_oven_temperature_modes_and_stop_are_independent_per_cavity(hass, appliances):
+async def test_lower_oven_controls_leave_the_upper_oven_alone(hass, appliances):
     await appliances.update("oven", {"cav2_remote_ready": True})
     await hass.services.async_call(
         "climate",
@@ -385,9 +383,7 @@ async def test_off_ack_without_canceling_remote_ready_is_not_success(hass, appli
     ],
 )
 @pytest.mark.parametrize("push", [True, False])
-async def test_write_only_timer_duration_is_confirmed_from_active_and_end_time(
-    hass, appliances, key, entity_id, push
-):
+async def test_timer_duration_is_confirmed_from_timer_state(hass, appliances, key, entity_id, push):
     appliances.behavior["push"] = push
     reads = appliances.client.state.await_count
     for minutes in (15, 15, 0):
@@ -448,7 +444,7 @@ async def test_invalid_new_control_values_never_reach_cloud(appliances, device, 
     appliances.client.set_property.assert_not_called()
 
 
-async def test_cove_delay_and_cycle_completion_updates(hass, appliances):
+async def test_dishwasher_delay_start_then_completion_updates(hass, appliances):
     await hass.services.async_call(
         "select",
         "select_option",
@@ -484,7 +480,7 @@ async def test_unknown_enum_values_do_not_become_known_modes(hass, appliances):
     assert hass.states.get("select.oven_cooking_mode").state == "unavailable"
 
 
-async def test_timestamps_require_an_offset_and_null_is_unknown(hass, appliances):
+async def test_naive_timestamps_need_the_appliance_clock_offset(hass, appliances):
     await appliances.update("fridge", {"max_ice_start_time": "2026-09-05T10:00:00"})
     assert hass.states.get("sensor.fridge_max_ice_start").state == "unknown"
     await appliances.update("fridge", {"time": "2026-09-05T11:00:00-07:00"})
@@ -493,7 +489,7 @@ async def test_timestamps_require_an_offset_and_null_is_unknown(hass, appliances
     assert hass.states.get("sensor.fridge_max_ice_start").state == "unknown"
 
 
-async def test_full_snapshot_removes_new_capabilities_without_stale_controls(hass, appliances):
+async def test_full_snapshot_marks_missing_controls_unavailable(hass, appliances):
     await appliances.update(
         "oven", {"appliance_model": "SINGLE-OVEN", "cav_light_on": False}, full=True
     )
@@ -510,7 +506,7 @@ async def test_full_snapshot_removes_new_capabilities_without_stale_controls(has
 
 
 @pytest.mark.parametrize("appliances", ["C", None], indirect=True)
-async def test_unverified_temperature_units_preserve_non_temperature_features(hass, appliances):
+async def test_non_fahrenheit_units_omit_temperature_entities(hass, appliances):
     assert hass.states.get("climate.oven_oven") is None
     assert hass.states.get("climate.fridge_refrigerator") is None
     assert hass.states.get("select.oven_cooking_mode").state == "Bake"
@@ -518,7 +514,7 @@ async def test_unverified_temperature_units_preserve_non_temperature_features(ha
     assert hass.states.get("switch.dishwasher_heated_dry").state == "off"
 
 
-async def test_climate_services_convert_display_units_to_native_fahrenheit(hass, appliances):
+async def test_climate_writes_convert_celsius_to_fahrenheit(hass, appliances):
     hass.config.units = METRIC_SYSTEM
     await appliances.update("oven", {"cav_unit_on": True})
     await hass.services.async_call(
@@ -530,7 +526,7 @@ async def test_climate_services_convert_display_units_to_native_fahrenheit(hass,
     appliances.client.set_property.assert_awaited_once_with("oven", "cav_set_temp", 392)
 
 
-async def test_diagnostics_omit_credentials_names_and_network_identifiers(hass, appliances):
+async def test_diagnostics_omit_private_values(hass, appliances):
     result = await async_get_config_entry_diagnostics(hass, appliances.entry)
     encoded = json.dumps(result)
     assert result["push_connected"] is True
@@ -550,9 +546,7 @@ async def test_diagnostics_omit_credentials_names_and_network_identifiers(hass, 
     assert appliances.client.state.await_count == 3
 
 
-async def test_diagnostics_keep_unknown_key_names_from_reads_and_push_without_values(
-    hass, appliances
-):
+async def test_diagnostics_list_unrecognized_keys_without_values(hass, appliances):
     coordinator = appliances.entry.runtime_data.coordinators["fridge"]
     appliances.states["fridge"]["new_read_feature"] = {"private_nested_key": "private-read-value"}
     await coordinator.async_refresh()
@@ -585,7 +579,7 @@ async def test_diagnostics_keep_unknown_key_names_from_reads_and_push_without_va
         assert private not in encoded
 
 
-async def test_cloud_failure_disables_controls_without_changing_other_appliances(hass, appliances):
+async def test_stream_error_only_affects_its_appliance(hass, appliances):
     await appliances.updates.put(("oven", ApiError("Disconnected")))
     await hass.async_block_till_done()
     assert hass.states.get("climate.oven_oven").state == "unavailable"
@@ -610,7 +604,7 @@ async def test_switch_states_update_without_duplicate_binary_sensors(hass, appli
         assert hass.states.get(f"binary_sensor.{name}") is None
 
 
-async def test_upgrade_removes_retired_entities_and_preserves_switches_and_modes(hass, appliances):
+async def test_minor_upgrade_removes_only_retired_entities(hass, appliances):
     entry = appliances.entry
     await appliances.update("fridge", {"air_filter_on": True})
     registry = er.async_get(hass)
@@ -664,7 +658,7 @@ async def test_upgrade_removes_retired_entities_and_preserves_switches_and_modes
     assert hass.states.get(mode.entity_id).state == "off"
 
 
-async def test_optional_fridge_control_and_connection_diagnostics(appliances):
+async def test_optional_entities_report_native_values(appliances):
     coordinator = appliances.entry.runtime_data.coordinators["fridge"]
     light = SubZeroNumber(
         coordinator, next(d for d in NUMBER_DESCRIPTIONS if d.key == "accent_light_level")

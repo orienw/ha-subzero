@@ -40,7 +40,7 @@ def notification(properties, *, full=False, device="test-fridge", user=None):
 
 
 @pytest.mark.parametrize("legacy", [False, True])
-def test_notifications_preserve_false_and_zero(legacy):
+def test_notifications_keep_falsy_values(legacy):
     properties = {"ref_door_ajar": False, "frz_set_temp": 0}
     event = notification(properties, user="TEST-OWNER" if legacy else None)
     assert api.parse_notification(event, "test-fridge", "test-owner") == api.StateUpdate(
@@ -126,7 +126,7 @@ async def api_server(aiohttp_server, monkeypatch, socket_enabled):
     return behavior
 
 
-async def test_concurrent_refresh_rotates_once_and_persists(api_server):
+async def test_concurrent_refreshes_rotate_the_token_once(api_server):
     save = AsyncMock()
     async with aiohttp.ClientSession() as session:
         client = api.SubZeroClient(session, "test-key", make_tokens(expires_in=-1), save)
@@ -165,7 +165,7 @@ async def test_unauthorized_request_refreshes_then_retries_once(
     assert api_server["requests"][0] != api_server["requests"][1]
 
 
-async def test_late_unauthorized_response_reuses_already_refreshed_token(api_server, tokens):
+async def test_stale_unauthorized_reply_reuses_refreshed_token(api_server, tokens):
     first_started = asyncio.Event()
     release_first = asyncio.Event()
     calls = []
@@ -362,7 +362,7 @@ async def test_single_signalr_connection_routes_multiple_appliances(
 
 
 @pytest.mark.parametrize("error", [None, InvalidAuth("Expired"), api.RateLimited(300)])
-async def test_signalr_cleans_up_pending_tasks_and_preserves_channel_errors(tokens, error):
+async def test_stream_surfaces_channel_errors_without_leaking_tasks(tokens, error):
     opening = asyncio.Event()
     receiving = asyncio.Event()
     channel_cancelled = asyncio.Event()
@@ -493,9 +493,7 @@ async def test_invalid_control_fields_never_send_a_request(control_server, token
 @pytest.mark.parametrize(
     "response", [{"status": 1}, {"status": False}, {"error": "private detail"}]
 )
-async def test_control_rejection_in_successful_http_response_is_an_error(
-    control_server, tokens, response
-):
+async def test_rejection_inside_http_200_is_an_error(control_server, tokens, response):
     control_server["response"] = response
     async with aiohttp.ClientSession() as session:
         client = api.SubZeroClient(session, "test-key", tokens)
@@ -565,9 +563,7 @@ async def test_cloud_controls_use_the_existing_direct_method(control_server, tok
         (500, {"Message": "OK"}),
     ],
 )
-async def test_cloud_command_acknowledgements_do_not_require_a_snapshot(
-    control_server, tokens, status, body
-):
+async def test_bare_acknowledgements_complete_the_write(control_server, tokens, status, body):
     control_server.update(status=status, response=body)
     async with aiohttp.ClientSession() as session:
         client = api.SubZeroClient(session, "test-key", tokens)
@@ -620,9 +616,7 @@ async def test_cloud_status_remembers_get_async_fallback(control_server, tokens,
     ]
 
 
-async def test_genuine_server_failure_never_uses_the_acknowledgement_exception(
-    control_server, tokens
-):
+async def test_http_500_without_ok_message_is_an_error(control_server, tokens):
     control_server.update(status=500, response={"Message": "Device offline"})
     async with aiohttp.ClientSession() as session:
         with pytest.raises(api.ApiError, match="HTTP 500"):

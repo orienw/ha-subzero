@@ -25,9 +25,7 @@ APPLIANCES = [
 
 
 @pytest.mark.parametrize("selected", [["test-fridge"], ["test-fridge", "test-oven"]])
-async def test_create_account_with_multiple_appliances_and_no_family_allowlist(
-    hass, tokens, selected
-):
+async def test_setup_creates_entry_with_selected_appliances(hass, tokens, selected):
     with (
         patch("custom_components.subzero.config_flow.SubZeroLogin.login", return_value=tokens),
         patch("custom_components.subzero.api.SubZeroClient.appliances", return_value=APPLIANCES),
@@ -85,7 +83,7 @@ async def test_no_appliances(hass, tokens):
 
 
 @pytest.mark.parametrize("legacy", [True, False])
-async def test_existing_account_uses_configure_instead_of_duplicate_setup(hass, tokens, legacy):
+async def test_second_setup_of_the_same_account_aborts(hass, tokens, legacy):
     data = {"tokens": token_state(tokens)}
     data.update({"device_id": "test-fridge"} if legacy else {"devices": DEVICES})
     MockConfigEntry(
@@ -107,9 +105,7 @@ async def test_existing_account_uses_configure_instead_of_duplicate_setup(hass, 
 
 
 @pytest.mark.parametrize("wrong_account", [False, True])
-async def test_reauthentication_preserves_account_and_appliance_selection(
-    hass, tokens, wrong_account
-):
+async def test_reauth_keeps_the_appliance_selection(hass, tokens, wrong_account):
     entry = MockConfigEntry(
         domain=DOMAIN,
         unique_id="test-owner",
@@ -147,9 +143,7 @@ async def test_reauthentication_preserves_account_and_appliance_selection(
         (None, "Kitchen @ home", None),
     ],
 )
-async def test_reauth_suggests_known_email_without_assuming_title_is_email(
-    hass, tokens, username, title, expected
-):
+async def test_reauth_suggests_the_saved_email(hass, tokens, username, title, expected):
     entry = MockConfigEntry(
         domain=DOMAIN,
         version=2,
@@ -178,7 +172,7 @@ async def test_reauth_suggests_known_email_without_assuming_title_is_email(
 
 
 @pytest.mark.parametrize("error", [ApiError("Unavailable"), RateLimited(300)])
-async def test_options_list_failure_can_be_retried_without_changing_selection(hass, tokens, error):
+async def test_options_list_failure_is_retryable(hass, tokens, error):
     entry = MockConfigEntry(
         domain=DOMAIN, version=2, data={"tokens": token_state(tokens), "devices": DEVICES}
     )
@@ -213,9 +207,7 @@ async def test_options_expired_tokens_start_reauth(hass, tokens):
     )
 
 
-async def test_options_preserve_temporarily_missing_appliances_and_exclude_other_entries(
-    hass, tokens
-):
+async def test_options_list_keeps_selected_but_missing_appliances(hass, tokens):
     entry = MockConfigEntry(
         domain=DOMAIN,
         title="Kitchen",
