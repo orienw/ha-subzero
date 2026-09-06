@@ -278,6 +278,45 @@ async def test_metadata_outage_loads_appliances_with_cached_or_unknown_units(has
     assert "using cached units where available" in caplog.text
 
 
+async def test_cached_unit_warning_only_when_setup_proceeds(hass, loaded, caplog):
+    entry, client, _, _, _ = loaded
+    hass.config_entries.async_update_entry(
+        entry,
+        options={
+            "devices": {
+                **entry.data["devices"],
+                "test-oven": {"name": "Wall oven", "temperature_unit": "F"},
+            }
+        },
+    )
+    client.appliances.side_effect = ApiError("Appliance list unavailable")
+    recovered = False
+
+    async def state(device_id):
+        if not recovered or device_id == "test-oven":
+            raise ApiError("Appliance unavailable")
+        return client.state.return_value
+
+    client.state.side_effect = state
+    for _ in range(2):
+        caplog.clear()
+        await hass.config_entries.async_reload(entry.entry_id)
+        await hass.async_block_till_done()
+        assert entry.state is ConfigEntryState.SETUP_RETRY
+        assert "using cached units" not in caplog.text
+
+    recovered = True
+    caplog.clear()
+    await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.LOADED
+    assert entry.runtime_data.coordinators["test-fridge"].last_update_success
+    assert not entry.runtime_data.coordinators["test-oven"].last_update_success
+    warnings = [record for record in caplog.records if "using cached units" in record.getMessage()]
+    assert len(warnings) == 1
+    assert warnings[0].levelname == "WARNING"
+
+
 @pytest.mark.parametrize("error", [RateLimited(300), InvalidAuth("Expired")])
 async def test_metadata_failure_uses_setup_retry_or_reauth(hass, loaded, error):
     entry, client, _, _, _ = loaded

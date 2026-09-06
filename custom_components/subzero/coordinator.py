@@ -168,6 +168,7 @@ class SubZeroAccount:
     async def async_setup(self) -> None:
         if not self.coordinators:
             return
+        metadata_error: ApiError | None = None
         try:
             appliances = await self.client.appliances()
         except InvalidAuth as error:
@@ -175,9 +176,7 @@ class SubZeroAccount:
         except RateLimited as error:
             raise ConfigEntryNotReady(str(error)) from error
         except ApiError as error:
-            _LOGGER.warning(
-                "Could not refresh appliance units; using cached units where available: %s", error
-            )
+            metadata_error = error
         else:
             units = {appliance.id: appliance.temperature_unit for appliance in appliances}
             for coordinator in self.coordinators.values():
@@ -204,6 +203,11 @@ class SubZeroAccount:
                 errors.append(error)
         if errors and len(errors) == len(self.coordinators):
             raise errors[0]
+        if metadata_error is not None:
+            _LOGGER.warning(
+                "Could not refresh appliance units; using cached units where available: %s",
+                metadata_error,
+            )
 
     @callback
     def set_error(self, error: Exception) -> None:
