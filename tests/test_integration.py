@@ -2,6 +2,7 @@
 
 import asyncio
 from datetime import timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -16,6 +17,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry, async_
 from custom_components.subzero.api import ApiError, Appliance, RateLimited, StateUpdate, token_state
 from custom_components.subzero.auth import InvalidAuth
 from custom_components.subzero.const import DOMAIN
+from custom_components.subzero.coordinator import SubZeroAccount
 
 pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
 
@@ -251,6 +253,56 @@ async def test_reconnect_waits_then_recovers_from_push_without_polling(
     await hass.async_block_till_done()
     assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "39"
     client.state.assert_awaited_once()
+
+
+@pytest.mark.parametrize("rate_limited", [False, True])
+@pytest.mark.parametrize(
+    ("lifetimes", "expected"),
+    [
+        ([1] * 7, [30, 60, 120, 240, 480, 900, 900]),
+        ([181] * 3, [30, 30, 30]),
+        ([1, 1, 181, 1], [30, 60, 30, 60]),
+    ],
+)
+async def test_reconnect_backoff_uses_lifetime_without_events(
+    hass, tokens, monkeypatch, rate_limited, lifetimes, expected
+):
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        version=2,
+        data={
+            "tokens": token_state(tokens),
+            "devices": {"test-fridge": {"name": "Kitchen", "temperature_unit": "F"}},
+        },
+    )
+    entry.add_to_hass(hass)
+    now = 0
+    delays = []
+
+    async def watch(device_ids):
+        nonlocal now
+        now += lifetimes[len(delays)]
+        raise RateLimited(75) if rate_limited else ApiError("Disconnected")
+        yield
+
+    async def sleep(delay):
+        delays.append(delay)
+        if len(delays) == len(lifetimes):
+            raise asyncio.CancelledError
+
+    account = SubZeroAccount(hass, entry, SimpleNamespace(watch=watch))
+    monkeypatch.setattr(
+        "custom_components.subzero.coordinator.time", SimpleNamespace(monotonic=lambda: now)
+    )
+    monkeypatch.setattr(
+        "custom_components.subzero.coordinator.random", SimpleNamespace(uniform=lambda *_: 0)
+    )
+    monkeypatch.setattr(
+        "custom_components.subzero.coordinator.asyncio", SimpleNamespace(sleep=sleep)
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await account.listen()
+    assert delays == [max(delay, 75) if rate_limited else delay for delay in expected]
 
 
 async def test_expired_login_starts_reauthentication(hass, loaded):

@@ -181,7 +181,6 @@ class SubZeroAccount:
         backoff = RECONNECT_DELAY
         while True:
             started = time.monotonic()
-            delay = backoff
             try:
                 async for device_id, update in self.client.watch(list(self.coordinators)):
                     coordinator = self.coordinators[device_id]
@@ -189,18 +188,17 @@ class SubZeroAccount:
                         coordinator.async_set_update_error(update)
                     else:
                         coordinator.apply_update(update)
-                    if time.monotonic() - started >= 120:
-                        backoff = RECONNECT_DELAY
                 raise ApiError("Sub-Zero's notification stream ended.")
             except InvalidAuth as error:
                 self.set_error(error)
                 self.entry.async_start_reauth(self.hass)
                 return
-            except RateLimited as error:
-                self.set_error(error)
-                delay = max(backoff, error.retry_after)
             except ApiError as error:
                 self.set_error(error)
-                delay = backoff
+                if time.monotonic() - started >= 120:
+                    backoff = RECONNECT_DELAY
+                delay = (
+                    max(backoff, error.retry_after) if isinstance(error, RateLimited) else backoff
+                )
             await asyncio.sleep(delay + random.uniform(0, 5))
             backoff = min(backoff * 2, MAX_RECONNECT_DELAY)
