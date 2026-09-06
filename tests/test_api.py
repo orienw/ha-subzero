@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import json
+import logging
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
 from unittest.mock import AsyncMock, MagicMock
@@ -693,4 +694,117 @@ async def test_live_signalr_socket_is_renewed_before_token_expiry(
         assert pings
     finally:
         await stream.aclose()
+    assert not client.push_connected
+
+
+@pytest.fixture
+async def notification_stream(hass, aiohttp_server, monkeypatch, socket_enabled, tokens):
+    frames = []
+    sockets = []
+
+    async def websocket(request):
+        socket = web.WebSocketResponse()
+        await socket.prepare(request)
+        sockets.append(socket)
+        await socket.receive_str()
+        await socket.send_str("{}" + api.SEPARATOR)
+        for frame in frames:
+            if isinstance(frame, bytes):
+                await socket.send_bytes(frame)
+            else:
+                await socket.send_str(frame)
+        async for _ in socket:
+            await socket.send_str('{"type":6}' + api.SEPARATOR)
+        return socket
+
+    app = web.Application()
+    app.router.add_get("/client/", websocket)
+    server = await aiohttp_server(app)
+    origin = str(server.make_url("/")).rstrip("/")
+    monkeypatch.setattr(api, "SIGNALR_ORIGIN", origin)
+    client = api.SubZeroClient(async_get_clientsession(hass), "test-key", tokens)
+    client._request = AsyncMock(
+        return_value={"url": origin + "/client/", "accessToken": "test-signalr"}
+    )
+    client._json = AsyncMock(return_value={"connectionToken": "test-connection"})
+    client.open_channel = AsyncMock()
+    stream = client.watch(["test-fridge", "test-oven"])
+    try:
+        yield client, stream, frames, sockets
+    finally:
+        await stream.aclose()
+
+
+@pytest.mark.parametrize(
+    "frame",
+    [
+        "private-invalid-json",
+        "[]",
+        json.dumps({"type": 1, "target": "ConnectedApplianceMessage", "arguments": {}}),
+        json.dumps({"type": 1, "target": "ConnectedApplianceMessage", "arguments": [None]}),
+        *(
+            json.dumps(
+                {
+                    "type": 1,
+                    "target": "ConnectedApplianceMessage",
+                    "arguments": [{"DeviceId": "test-fridge", "Payload": payload}],
+                }
+            )
+            for payload in (
+                "private-invalid-payload",
+                [],
+                {"api.async_channel": None},
+                {"api.async_channel": {"type": 2, "pload": []}},
+                {"api.async_channel": {"type": 2, "pload": {"props": None}}},
+            )
+        ),
+        json.dumps(notification({}, full=True)),
+    ],
+)
+async def test_malformed_notifications_do_not_interrupt_other_updates(
+    notification_stream, caplog, frame
+):
+    client, stream, frames, sockets = notification_stream
+    caplog.set_level(logging.DEBUG, logger="custom_components.subzero.api")
+    frames.append(
+        frame
+        + api.SEPARATOR
+        + json.dumps(notification({"appliance_model": "TEST-FRIDGE"}, full=True))
+        + api.SEPARATOR
+        + json.dumps(notification({"cav_light_on": False}, device="test-oven"))
+        + api.SEPARATOR
+    )
+    async with asyncio.timeout(5):
+        assert await anext(stream) == (
+            "test-fridge",
+            api.StateUpdate({"appliance_model": "TEST-FRIDGE"}, full=True),
+        )
+        assert await anext(stream) == (
+            "test-oven",
+            api.StateUpdate({"cav_light_on": False}, full=False),
+        )
+    assert client.push_connected
+    assert len(sockets) == 1 and not sockets[0].closed
+    client._request.assert_awaited_once()
+    assert "Skipping invalid" in caplog.text
+    assert "private-invalid" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("failure", "message"),
+    [("close", "closed"), ("binary", "disconnected"), ("oversized", "oversized")],
+)
+async def test_notification_protocol_failures_still_disconnect(
+    notification_stream, failure, message
+):
+    client, stream, frames, _ = notification_stream
+    if failure == "close":
+        frames.append('{"type":7}' + api.SEPARATOR)
+    elif failure == "binary":
+        frames.append(b"not-text")
+    else:
+        frames.extend(["x" * 131073, "x" * 131073])
+    async with asyncio.timeout(5):
+        with pytest.raises(api.ApiError, match=message):
+            await anext(stream)
     assert not client.push_connected

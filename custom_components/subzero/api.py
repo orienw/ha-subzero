@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import json
+import logging
 import math
 import random
 import time
@@ -31,6 +32,8 @@ API_BASE = "https://prod.iot.subzero.com"
 SIGNALR_ORIGIN = "https://sznacasigprod.service.signalr.net"
 SEPARATOR = "\x1e"
 PING_INTERVAL = 15
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def notification_lifetime(token: str) -> float:
@@ -430,18 +433,25 @@ class SubZeroClient:
                             frame, pending = pending.split(SEPARATOR, 1)
                             if not frame:
                                 continue
-                            event = _object(frame)
+                            try:
+                                event = _object(frame)
+                            except ApiError as error:
+                                _LOGGER.debug("Skipping invalid notification frame: %s", error)
+                                continue
                             if event.get("type") == 7:
                                 raise ApiError("Sub-Zero closed the notification connection.")
-                            for device_id in device_ids:
-                                update = parse_notification(
-                                    event, device_id, self.tokens["user_id"]
-                                )
-                                if update:
-                                    if update.full:
-                                        pending_channels.discard(device_id)
-                                    yield device_id, update
-                                    break
+                            try:
+                                for device_id in device_ids:
+                                    update = parse_notification(
+                                        event, device_id, self.tokens["user_id"]
+                                    )
+                                    if update:
+                                        if update.full:
+                                            pending_channels.discard(device_id)
+                                        yield device_id, update
+                                        break
+                            except ApiError as error:
+                                _LOGGER.debug("Skipping invalid appliance notification: %s", error)
                         now = time.monotonic()
                         if now >= renew_at:
                             return
