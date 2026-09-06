@@ -45,6 +45,7 @@ async def test_create_account_with_multiple_appliances_and_no_family_allowlist(
     assert result["data"] == {
         "devices": {key: DEVICES[key] for key in selected},
         "tokens": token_state(tokens),
+        "username": CREDENTIALS["username"],
     }
     assert "password" not in result["data"]
     assert result["result"].unique_id == "test-owner"
@@ -133,6 +134,47 @@ async def test_reauthentication_preserves_account_and_appliance_selection(
     assert result["reason"] == ("wrong_account" if wrong_account else "reauth_successful")
     assert entry.data["tokens"] == token_state(tokens if wrong_account else renewed)
     assert entry.options["devices"] == {"test-oven": DEVICES["test-oven"]}
+    if not wrong_account:
+        assert entry.data["username"] == CREDENTIALS["username"]
+
+
+@pytest.mark.parametrize(
+    ("username", "title", "expected"),
+    [
+        ("saved@example.test", "Renamed account", "saved@example.test"),
+        (None, "original@example.test", "original@example.test"),
+        (None, "Kitchen", None),
+        (None, "Kitchen @ home", None),
+    ],
+)
+async def test_reauth_suggests_known_email_without_assuming_title_is_email(
+    hass, tokens, username, title, expected
+):
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        version=2,
+        title=title,
+        data={
+            "devices": DEVICES,
+            "tokens": token_state(tokens),
+            **({"username": username} if username else {}),
+        },
+    )
+    entry.add_to_hass(hass)
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": "reauth", "entry_id": entry.entry_id}, data=entry.data
+    )
+    fields = {field.schema: field for field in result["data_schema"].schema}
+    assert fields["username"].description.get("suggested_value") == expected
+    assert not fields["password"].description
+    with patch(
+        "custom_components.subzero.config_flow.SubZeroLogin.login",
+        side_effect=InvalidAuth("Rejected"),
+    ):
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], CREDENTIALS)
+    fields = {field.schema: field for field in result["data_schema"].schema}
+    assert fields["username"].description["suggested_value"] == CREDENTIALS["username"]
+    assert not fields["password"].description
 
 
 @pytest.mark.parametrize("error", [ApiError("Unavailable"), RateLimited(300)])

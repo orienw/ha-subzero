@@ -76,7 +76,11 @@ class SubZeroConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     if user_id != original.data["tokens"]["user_id"].lower():
                         return self.async_abort(reason="wrong_account")
                     return self.async_update_reload_and_abort(
-                        original, data_updates={"tokens": self._client.tokens}
+                        original,
+                        data_updates={
+                            "tokens": self._client.tokens,
+                            "username": user_input["username"],
+                        },
                     )
                 await self.async_set_unique_id(user_id)
                 if any(
@@ -110,13 +114,20 @@ class SubZeroConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = "cannot_connect"
             finally:
                 session.detach()
+        username = (user_input or {}).get("username")
+        if username is None and self.source == config_entries.SOURCE_REAUTH:
+            entry = self._get_reauth_entry()
+            try:
+                username = vol.Email()(entry.data.get("username", entry.title))
+            except vol.Invalid:
+                pass
         return self.async_show_form(
             step_id="user",
             data_schema=vol.Schema(
                 {
-                    vol.Required("username"): TextSelector(
-                        TextSelectorConfig(type=TextSelectorType.EMAIL)
-                    ),
+                    vol.Required(
+                        "username", description={"suggested_value": username} if username else {}
+                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.EMAIL)),
                     vol.Required("password"): TextSelector(
                         TextSelectorConfig(type=TextSelectorType.PASSWORD)
                     ),
@@ -140,6 +151,7 @@ class SubZeroConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     title=self._title,
                     data={
                         "tokens": self._client.tokens,
+                        "username": self._title,
                         "devices": {key: self._devices[key] for key in selected},
                     },
                 )
