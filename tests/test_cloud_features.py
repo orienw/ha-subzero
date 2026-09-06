@@ -592,6 +592,77 @@ async def test_cloud_failure_disables_controls_without_changing_other_appliances
     assert hass.states.get("switch.dishwasher_heated_dry").state == "off"
 
 
+async def test_switch_states_update_without_duplicate_binary_sensors(hass, appliances):
+    switches = {
+        "oven_oven_light": ("oven", "cav_light_on"),
+        "oven_lower_oven_light": ("oven", "cav2_light_on"),
+        "dishwasher_heated_dry": ("dishwasher", "heated_dry_on"),
+        "dishwasher_extended_dry": ("dishwasher", "extended_dry_on"),
+        "dishwasher_high_temperature_wash": ("dishwasher", "high_temp_wash_on"),
+        "dishwasher_sanitize_rinse": ("dishwasher", "sani_rinse_on"),
+        "dishwasher_top_rack_only": ("dishwasher", "top_rack_only_on"),
+    }
+    for name, (device_id, key) in switches.items():
+        assert hass.states.get(f"switch.{name}").state == "off"
+        await appliances.update(device_id, {key: True})
+        assert hass.states.get(f"switch.{name}").state == "on"
+        assert hass.states.get(f"binary_sensor.{name}") is None
+
+
+async def test_upgrade_removes_retired_entities_and_preserves_switches_and_modes(hass, appliances):
+    entry = appliances.entry
+    await appliances.update("fridge", {"air_filter_on": True})
+    registry = er.async_get(hass)
+    switches = [
+        entity
+        for entity in er.async_entries_for_config_entry(registry, entry.entry_id)
+        if entity.domain == "switch"
+    ]
+    assert len(switches) == 8
+    mode = registry.async_get("binary_sensor.fridge_max_ice")
+    await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    switches[0] = registry.async_update_entity(
+        switches[0].entity_id, new_entity_id="switch.custom_control"
+    )
+    switches[1] = registry.async_update_entity(
+        switches[1].entity_id, disabled_by=er.RegistryEntryDisabler.USER
+    )
+    retired = [
+        registry.async_get_or_create(
+            "binary_sensor",
+            DOMAIN,
+            switch.unique_id,
+            config_entry=entry,
+            device_id=switch.device_id,
+            suggested_object_id=f"old_{index}",
+        )
+        for index, switch in enumerate(switches)
+    ]
+    retired.append(
+        registry.async_get_or_create(
+            "sensor",
+            DOMAIN,
+            "fridge_connection_mode",
+            config_entry=entry,
+            suggested_object_id="custom_connection_mode",
+        )
+    )
+    hass.config_entries.async_update_entry(entry, minor_version=1)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.minor_version == 2
+    for entity in retired:
+        assert registry.async_get(entity.entity_id) is None
+        assert hass.states.get(entity.entity_id) is None
+    for switch in switches:
+        current = registry.async_get(switch.entity_id)
+        assert current.id == switch.id
+        assert current.disabled_by is switch.disabled_by
+    assert registry.async_get(mode.entity_id).id == mode.id
+    assert hass.states.get(mode.entity_id).state == "off"
+
+
 async def test_optional_fridge_control_and_connection_diagnostics(appliances):
     coordinator = appliances.entry.runtime_data.coordinators["fridge"]
     light = SubZeroNumber(

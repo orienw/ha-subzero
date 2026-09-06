@@ -9,7 +9,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import SubZeroClient
 from .app_config import SUBSCRIPTION_KEY
-from .const import DOMAIN, selected_devices
+from .const import DISHWASHER_SWITCHES, DOMAIN, selected_devices
 from .coordinator import SubZeroAccount
 
 PLATFORMS = [
@@ -85,4 +85,23 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             data={"tokens": entry.data["tokens"], "devices": devices},
             version=2,
         )
+    if entry.minor_version < 2:
+        removed_binary_ids = {
+            f"{device_id}_{key}"
+            for device_id in selected_devices(entry)
+            for key in {"air_filter_on", "cav_light_on", "cav2_light_on", *DISHWASHER_SWITCHES}
+        }
+        removed_sensor_ids = {
+            f"{device_id}_connection_mode" for device_id in selected_devices(entry)
+        }
+        registry = er.async_get(hass)
+        for entity in er.async_entries_for_config_entry(registry, entry.entry_id):
+            if (
+                entity.domain == "binary_sensor"
+                and entity.unique_id in removed_binary_ids
+                or entity.domain == "sensor"
+                and entity.unique_id in removed_sensor_ids
+            ):
+                registry.async_remove(entity.entity_id)
+        hass.config_entries.async_update_entry(entry, minor_version=2)
     return True

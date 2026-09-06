@@ -89,7 +89,6 @@ async def test_only_reported_entities_are_created_and_private_fields_discarded(h
     assert {entity.unique_id for entity in entities} == {
         "test-fridge_ref_set_temp",
         "test-fridge_ref_door_ajar",
-        "test-fridge_connection_mode",
         "test-fridge_live_reporting_mode",
     }
     assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "38"
@@ -471,12 +470,11 @@ async def test_oven_entities_use_reported_properties_and_correct_manufacturer(ha
     entities = er.async_entries_for_device(
         er.async_get(hass), device.id, include_disabled_entities=True
     )
-    assert len(entities) == 25
+    assert len(entities) == 23
     assert {entity.unique_id for entity in entities if entity.disabled_by is not None} == {
-        "test-oven_connection_mode",
         "test-oven_live_reporting_mode",
     }
-    assert hass.states.get("binary_sensor.wall_oven_oven_light").state == "off"
+    assert hass.states.get("switch.wall_oven_oven_light").state == "off"
     assert hass.states.get("binary_sensor.wall_oven_cooking").state == "off"
     assert hass.states.get("binary_sensor.wall_oven_kitchen_timer_2_active").state == "off"
     assert hass.states.get("sensor.wall_oven_oven_temperature").state == "unknown"
@@ -521,7 +519,7 @@ async def test_oven_push_updates_and_idle_readings_do_not_change_fridge(hass, ov
     assert hass.states.get("sensor.wall_oven_probe_temperature").state == "125"
     assert hass.states.get("sensor.wall_oven_probe_setpoint").state == "145"
     assert hass.states.get("binary_sensor.wall_oven_cooking").state == "on"
-    assert hass.states.get("binary_sensor.wall_oven_oven_light").state == "on"
+    assert hass.states.get("switch.wall_oven_oven_light").state == "on"
     assert hass.states.get("binary_sensor.wall_oven_oven_door").state == "on"
     assert hass.states.get("binary_sensor.wall_oven_kitchen_timer_active").state == "on"
     assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "38"
@@ -543,7 +541,7 @@ async def test_oven_push_updates_and_idle_readings_do_not_change_fridge(hass, ov
 async def test_oven_discovery_recovers_after_an_unavailable_snapshot(hass, oven_loaded):
     entry, _, updates = oven_loaded
     registry = er.async_get(hass)
-    original = registry.async_get("binary_sensor.wall_oven_oven_light")
+    original = registry.async_get("switch.wall_oven_oven_light")
     await updates.put(("test-oven", ApiError("Temporarily unavailable")))
     await hass.async_block_till_done()
     assert hass.states.get(original.entity_id).state == "unavailable"
@@ -576,7 +574,6 @@ async def test_push_discovers_all_platforms_for_each_appliance(hass, oven_loaded
     expected = {
         "climate.wall_oven_lower_oven": "off",
         "sensor.wall_oven_lower_oven_temperature": "73",
-        "binary_sensor.wall_oven_lower_oven_light": "off",
         "switch.wall_oven_lower_oven_light": "off",
         "select.wall_oven_lower_oven_cooking_mode": "Bake",
         "number.wall_oven_kitchen_timer_duration": "0",

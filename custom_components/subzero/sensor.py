@@ -101,7 +101,6 @@ ENUM_VALUES = {
         for prefix in OVEN_PREFIXES
     },
 }
-CONNECTION_KEYS = {"connection_mode", "live_reporting_mode"}
 DESCRIPTIONS += tuple(
     replace(
         description,
@@ -112,14 +111,6 @@ DESCRIPTIONS += tuple(
     if description.key.startswith("cav_")
 )
 DESCRIPTIONS += (
-    SensorEntityDescription(
-        key="connection_mode",
-        name="Connection mode",
-        device_class=SensorDeviceClass.ENUM,
-        options=["Cloud"],
-        entity_category=EntityCategory.DIAGNOSTIC,
-        entity_registry_enabled_default=False,
-    ),
     SensorEntityDescription(
         key="live_reporting_mode",
         name="Live reporting mode",
@@ -210,7 +201,7 @@ async def async_setup_entry(
         DESCRIPTIONS,
         SubZeroSensor,
         lambda coordinator, description: (
-            (description.key in CONNECTION_KEYS or description.key in coordinator.data)
+            (description.key == "live_reporting_mode" or description.key in coordinator.data)
             and (
                 description.device_class != SensorDeviceClass.TEMPERATURE
                 or coordinator.device.get("temperature_unit") == "F"
@@ -222,7 +213,7 @@ async def async_setup_entry(
 class SubZeroSensor(SubZeroEntity, SensorEntity):
     @property
     def available(self) -> bool:
-        if self.entity_description.key in CONNECTION_KEYS:
+        if self.entity_description.key == "live_reporting_mode":
             return True
         return (
             self.coordinator.last_update_success
@@ -232,8 +223,6 @@ class SubZeroSensor(SubZeroEntity, SensorEntity):
     @property
     def native_value(self) -> int | float | str | datetime | None:
         key = self.entity_description.key
-        if key == "connection_mode":
-            return "Cloud"
         if key == "live_reporting_mode":
             return (
                 "Cloud push"

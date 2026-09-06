@@ -49,6 +49,7 @@ async def test_create_account_with_multiple_appliances_and_no_family_allowlist(
     assert "password" not in result["data"]
     assert result["result"].unique_id == "test-owner"
     assert result["result"].version == 2
+    assert result["result"].minor_version == 2
 
 
 @pytest.mark.parametrize(

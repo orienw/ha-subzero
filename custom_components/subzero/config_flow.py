@@ -47,6 +47,7 @@ def configured_devices(hass, exclude_entry_id=None) -> set[str]:
 
 class SubZeroConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 2
+    MINOR_VERSION = 2
 
     @staticmethod
     @callback

@@ -64,12 +64,12 @@ Turn off **Max ice** before adjusting the freezer setpoint. Home Assistant enfor
 | Doors | Refrigerator and freezer door open |
 | Ice-maker settings | Enabled, max ice, night ice |
 | Operating modes | Sabbath, high use, short vacation, long vacation |
-| Device status | Service required, power, air purification |
+| Device status | Service required, power |
 | Diagnostic | Wi-Fi signal strength |
 
 Most reported, recognized properties are enabled by default. Accent light and the optional diagnostic sensors are disabled by default. Ice-maker settings and operating modes report their current on/off states. Wi-Fi signal strength appears under Diagnostics.
 
-Status sensors remain available alongside the controls for dashboards and automations.
+Ice-maker settings and operating-mode sensors remain available alongside their selectors. Switches report their own On/Off state for dashboards and automations.
 
 Fridge and freezer zones also provide climate entities for thermostat cards. They use the same temperature limits and Max ice interlock as the number controls.
 
@@ -88,7 +88,7 @@ Each reported oven cavity has its own entities. Existing first-cavity entity IDs
 | Type | Available properties |
 | --- | --- |
 | Temperatures | Measured oven and probe temperatures, oven and probe setpoints |
-| Status | Door, cooking, preheated, light, remote ready, probe in use, probe target reached, Gourmet mode |
+| Status | Door, cooking, preheated, remote ready, probe in use, probe target reached, Gourmet mode |
 | Timers | Cooking timer active or complete, both kitchen timers active or complete, reported start/end times |
 | Cooking mode | Recognized mode name and whether the appliance permits mode changes |
 | Shared status | Sabbath mode, service required, Wi-Fi signal strength |
@@ -122,7 +122,7 @@ Unknown wash cycle/status codes show as unknown. The integration sends only supp
 
 ## Diagnostics
 
-Wi-Fi signal strength is enabled by default. Uptime, IP address, MAC address, connection mode, and live reporting mode are diagnostic sensors disabled by default. Enable them from the entity settings when needed.
+Wi-Fi signal strength is enabled by default. Uptime, IP address, MAC address, and live reporting mode are diagnostic sensors disabled by default. Enable them from the entity settings when needed.
 
 Download diagnostics from the integration or individual device page. Downloads use the cached appliance state and omit account credentials, appliance names, serial numbers, and network identifiers. They also list unrecognized state key names seen since the last reload, without their values, to help investigate support for other models.
 

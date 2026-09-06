@@ -128,14 +128,14 @@ async def test_controls_are_grouped_and_require_reported_properties(hass, contro
     controls.client.set_property.assert_not_called()
 
 
-async def test_air_purification_switch_confirms_push_and_keeps_status_entity(hass, controls):
+async def test_air_purification_switch_confirms_push_without_duplicate_status(hass, controls):
     reads = controls.client.state.await_count
     await hass.services.async_call(
         "switch", "turn_off", {"entity_id": "switch.kitchen_air_purification"}, blocking=True
     )
     controls.client.set_property.assert_awaited_once_with("test-fridge", "air_filter_on", False)
     assert hass.states.get("switch.kitchen_air_purification").state == "off"
-    assert hass.states.get("binary_sensor.kitchen_air_purification").state == "off"
+    assert hass.states.get("binary_sensor.kitchen_air_purification") is None
     await hass.services.async_call(
         "switch", "turn_on", {"entity_id": "switch.kitchen_air_purification"}, blocking=True
     )

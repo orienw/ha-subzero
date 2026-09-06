@@ -11,7 +11,6 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import SubZeroConfigEntry
-from .const import DISHWASHER_SWITCHES
 from .entity import SubZeroEntity, async_setup_entities
 
 DESCRIPTIONS = (
@@ -35,9 +34,6 @@ DESCRIPTIONS = (
         key="night_ice_on",
         name="Night ice",
         icon="mdi:weather-night",
-    ),
-    BinarySensorEntityDescription(
-        key="air_filter_on", name="Air purification", icon="mdi:air-filter"
     ),
     BinarySensorEntityDescription(
         key="sabbath_on",
@@ -66,7 +62,6 @@ DESCRIPTIONS = (
     BinarySensorEntityDescription(
         key="cav_at_set_temp", name="Preheated", icon="mdi:thermometer-check"
     ),
-    BinarySensorEntityDescription(key="cav_light_on", name="Oven light", icon="mdi:lightbulb"),
     BinarySensorEntityDescription(key="cav_remote_ready", name="Remote ready", icon="mdi:remote"),
     BinarySensorEntityDescription(key="cav_probe_on", name="Probe in use", icon="mdi:thermometer"),
     BinarySensorEntityDescription(
@@ -127,10 +122,6 @@ DESCRIPTIONS += (
     ),
     BinarySensorEntityDescription(
         key="delay_start_timer_active", name="Delay start active", icon="mdi:timer-sand"
-    ),
-    *(
-        BinarySensorEntityDescription(key=key, name=name)
-        for key, name in DISHWASHER_SWITCHES.items()
     ),
 )
 
