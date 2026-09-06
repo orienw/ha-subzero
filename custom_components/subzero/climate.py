@@ -59,12 +59,13 @@ class SubZeroClimate(SubZeroEntity, ClimateEntity):
 
     @property
     def available(self) -> bool:
+        data = self.coordinator.data
+        key = self.entity_description.key
         return (
             super().available
-            and supports_control(self.coordinator.data, self.entity_description.key)
-            and (
-                not self._oven or type(self.coordinator.data.get(f"{self._prefix}_unit_on")) is bool
-            )
+            and data.get(key) is not None
+            and supports_control(data, key)
+            and (not self._oven or type(data.get(f"{self._prefix}_unit_on")) is bool)
         )
 
     @property

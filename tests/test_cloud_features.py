@@ -751,3 +751,15 @@ async def test_timer_complete_is_written_before_timer_active(hass, appliances):
     )
     await hass.async_block_till_done()
     assert len(events) == 1
+
+
+async def test_null_binary_value_is_unknown(hass, appliances):
+    await appliances.update("fridge", {"max_ice_on": None})
+    assert hass.states.get("binary_sensor.fridge_max_ice").state == "unknown"
+
+
+async def test_null_setpoint_disables_controls_but_not_the_sensor(hass, appliances):
+    await appliances.update("fridge", {"ref_set_temp": None})
+    assert hass.states.get("climate.fridge_refrigerator").state == "unavailable"
+    assert hass.states.get("number.fridge_refrigerator_setpoint").state == "unavailable"
+    assert hass.states.get("sensor.fridge_refrigerator_setpoint").state == "unknown"

@@ -226,12 +226,7 @@ async def async_setup_entry(
 class SubZeroSensor(SubZeroEntity, SensorEntity):
     @property
     def available(self) -> bool:
-        if self.entity_description.key == "live_reporting_mode":
-            return True
-        return (
-            self.coordinator.last_update_success
-            and self.entity_description.key in self.coordinator.data
-        )
+        return self.entity_description.key == "live_reporting_mode" or super().available
 
     @property
     def native_value(self) -> int | float | str | datetime | None:

@@ -111,13 +111,11 @@ class SubZeroNumber(SubZeroEntity, NumberEntity):
             return False
         if key in KITCHEN_TIMERS:
             return type(data.get(f"{KITCHEN_TIMERS[key]}_active")) is bool
+        if self.native_value is None:
+            return False
         if key == "accent_light_level":
-            return self.native_value is not None
-        if (
-            not super().available
-            or self.native_value is None
-            or temperature_range(key, data) is None
-        ):
+            return True
+        if temperature_range(key, data) is None:
             return False
         if key == "crisp_set_temp":
             return type(data.get("crisp_temp_mode")) is int and data["crisp_temp_mode"] == 0

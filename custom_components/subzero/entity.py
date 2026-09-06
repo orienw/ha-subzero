@@ -27,9 +27,7 @@ class SubZeroEntity(CoordinatorEntity[SubZeroCoordinator]):
 
     @property
     def available(self) -> bool:
-        return (
-            super().available and self.coordinator.data.get(self.entity_description.key) is not None
-        )
+        return super().available and self.entity_description.key in self.coordinator.data
 
 
 @callback
