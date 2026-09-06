@@ -440,18 +440,21 @@ class SubZeroClient:
                                 continue
                             if event.get("type") == 7:
                                 raise ApiError("Sub-Zero closed the notification connection.")
-                            try:
-                                for device_id in device_ids:
+                            for device_id in device_ids:
+                                try:
                                     update = parse_notification(
                                         event, device_id, self.tokens["user_id"]
                                     )
-                                    if update:
-                                        if update.full:
-                                            pending_channels.discard(device_id)
-                                        yield device_id, update
-                                        break
-                            except ApiError as error:
-                                _LOGGER.debug("Skipping invalid appliance notification: %s", error)
+                                except ApiError as error:
+                                    _LOGGER.debug(
+                                        "Skipping invalid appliance notification: %s", error
+                                    )
+                                    break
+                                if update:
+                                    if update.full:
+                                        pending_channels.discard(device_id)
+                                    yield device_id, update
+                                    break
                         now = time.monotonic()
                         if now >= renew_at:
                             return
