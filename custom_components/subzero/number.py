@@ -1,7 +1,5 @@
 """Fridge setpoints, accent lighting, and oven kitchen timers."""
 
-import math
-
 from homeassistant.components.number import (
     NumberDeviceClass,
     NumberEntity,
@@ -15,7 +13,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import SubZeroConfigEntry
 from .const import KITCHEN_TIMERS
-from .controls import supports_control, temperature_range, timer_minutes
+from .controls import is_finite_number, supports_control, temperature_range, timer_minutes
 from .entity import SubZeroEntity, async_setup_entities
 
 DESCRIPTIONS = (
@@ -87,7 +85,7 @@ class SubZeroNumber(SubZeroEntity, NumberEntity):
         if self.entity_description.key in KITCHEN_TIMERS:
             return timer_minutes(self.coordinator.data, self.entity_description.key)
         value = self.coordinator.data.get(self.entity_description.key)
-        return value if type(value) in (int, float) and math.isfinite(value) else None
+        return value if is_finite_number(value) else None
 
     @property
     def native_min_value(self) -> float:
@@ -126,6 +124,6 @@ class SubZeroNumber(SubZeroEntity, NumberEntity):
         return key != "frz_set_temp" or "max_ice_on" not in data or data["max_ice_on"] is False
 
     async def async_set_native_value(self, value: float) -> None:
-        if type(value) not in (int, float) or not math.isfinite(value):
+        if not is_finite_number(value):
             raise ServiceValidationError("Enter a valid number.")
         await self.coordinator.async_set_properties({self.entity_description.key: round(value)})

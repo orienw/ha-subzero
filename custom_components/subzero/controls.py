@@ -20,6 +20,10 @@ from .const import (
 )
 
 
+def is_finite_number(value) -> bool:
+    return type(value) in (int, float) and math.isfinite(value)
+
+
 def is_fridge(data: dict) -> bool:
     return bool(SETPOINT_KEYS.intersection(data))
 
@@ -120,7 +124,7 @@ def validate_remote_start(data: dict, key: str) -> None:
     if mode in MANUAL_COOK_MODES or data.get(f"{prefix}_gourmet_mode_on") is True:
         raise ServiceValidationError("Start this cooking mode at the oven's control panel.")
     temperature = data.get(f"{prefix}_set_temp")
-    if type(temperature) not in (int, float) or not math.isfinite(temperature) or temperature <= 0:
+    if not is_finite_number(temperature) or temperature <= 0:
         raise ServiceValidationError("Set the oven temperature before starting it.")
 
 
@@ -131,7 +135,7 @@ def temperature_range(key: str, data: dict) -> tuple[int, int] | None:
         return -5, 5
     if key == "crisp_set_temp":
         refrigerator = data.get("ref_set_temp")
-        if type(refrigerator) not in (int, float) or not math.isfinite(refrigerator):
+        if not is_finite_number(refrigerator):
             return None
         lower, upper = max(34, refrigerator - 2), min(42, refrigerator + 2)
         return (math.ceil(lower), math.floor(upper)) if lower <= upper else None
@@ -179,7 +183,7 @@ def validate_control_properties(data: dict, temperature_unit: str | None, proper
         else:
             if temperature_unit != "F":
                 raise ServiceValidationError("Temperature controls require Fahrenheit in the app.")
-            if type(data[key]) not in (int, float) or not math.isfinite(data[key]):
+            if not is_finite_number(data[key]):
                 raise ServiceValidationError("The current appliance temperature is unknown.")
             bounds = temperature_range(key, data)
             if type(value) is not int or bounds is None or not bounds[0] <= value <= bounds[1]:

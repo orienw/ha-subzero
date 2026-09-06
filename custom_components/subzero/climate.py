@@ -1,7 +1,5 @@
 """Temperature controls for reported refrigeration zones and oven cavities."""
 
-import math
-
 from homeassistant.components.climate import ClimateEntity, ClimateEntityFeature, HVACMode
 from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
 from homeassistant.core import HomeAssistant
@@ -10,7 +8,7 @@ from homeassistant.helpers.entity import EntityDescription
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import SubZeroConfigEntry
-from .controls import supports_control, temperature_range
+from .controls import is_finite_number, supports_control, temperature_range
 from .entity import SubZeroEntity, async_setup_entities
 
 DESCRIPTIONS = tuple(
@@ -80,14 +78,14 @@ class SubZeroClimate(SubZeroEntity, ClimateEntity):
     def current_temperature(self) -> int | float | None:
         key = f"{self._prefix}_{'temp' if self._oven else 'display_temp'}"
         value = self.coordinator.data.get(key)
-        if type(value) not in (int, float) or not math.isfinite(value):
+        if not is_finite_number(value):
             return None
         return None if self._oven and value == 0 else value
 
     @property
     def target_temperature(self) -> int | float | None:
         value = self.coordinator.data.get(self.entity_description.key)
-        if type(value) not in (int, float) or not math.isfinite(value):
+        if not is_finite_number(value):
             return None
         return None if self._oven and value == 0 else value
 
@@ -101,7 +99,7 @@ class SubZeroClimate(SubZeroEntity, ClimateEntity):
 
     async def async_set_temperature(self, **kwargs) -> None:
         value = kwargs.get(ATTR_TEMPERATURE)
-        if type(value) not in (int, float) or not math.isfinite(value):
+        if not is_finite_number(value):
             raise ServiceValidationError("Enter a valid temperature.")
         mode = kwargs.get("hvac_mode")
         if mode is not None and mode not in self.hvac_modes:

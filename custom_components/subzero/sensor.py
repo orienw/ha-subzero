@@ -1,6 +1,5 @@
 """Appliance temperatures, timers, cycle status, and diagnostics."""
 
-import math
 from datetime import datetime
 
 from homeassistant.components.sensor import (
@@ -22,7 +21,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import SubZeroConfigEntry
 from .const import COOK_MODES, OVEN_PREFIXES, WASH_CYCLES, WASH_STATUSES
-from .controls import appliance_datetime
+from .controls import appliance_datetime, is_finite_number
 from .entity import SubZeroEntity, async_setup_entities
 
 ENUM_VALUES = {
@@ -260,7 +259,7 @@ class SubZeroSensor(SubZeroEntity, SensorEntity):
                 )
             except ValueError:
                 return None
-        if type(value) not in (int, float) or not math.isfinite(value):
+        if not is_finite_number(value):
             return None
         if key.startswith(("cav_", "cav2_")):
             if value == 0:
