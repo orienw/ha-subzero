@@ -1,8 +1,10 @@
 """Sub-Zero, Wolf, and Cove appliance cloud integration."""
 
+from functools import partial
+
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -10,7 +12,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from .api import SubZeroClient
 from .app_config import SUBSCRIPTION_KEY
 from .const import DISHWASHER_SWITCHES, DOMAIN, selected_devices
-from .coordinator import SubZeroAccount
+from .coordinator import SubZeroAccount, SubZeroCoordinator
 
 PLATFORMS = [
     Platform.SENSOR,
@@ -35,13 +37,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: SubZeroConfigEntry) -> b
     await account.async_setup()
     entry.runtime_data = account
     registry = dr.async_get(hass)
-    for device_id, coordinator in account.coordinators.items():
+
+    @callback
+    def update_device(coordinator: SubZeroCoordinator) -> None:
         registry.async_get_or_create(
             config_entry_id=entry.entry_id,
-            identifiers={(DOMAIN, device_id)},
-            name=coordinator.device["name"],
-            model=coordinator.data.get("appliance_model"),
+            **coordinator.device_info,
         )
+
+    for coordinator in account.coordinators.values():
+        update_device(coordinator)
+        entry.async_on_unload(coordinator.async_add_listener(partial(update_device, coordinator)))
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     if account.coordinators:
         entry.async_create_background_task(hass, account.listen(), "Sub-Zero notifications")

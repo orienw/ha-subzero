@@ -10,8 +10,6 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import SubZeroConfigEntry
-from .const import DOMAIN
-from .controls import is_dishwasher, is_oven
 from .coordinator import SubZeroCoordinator
 
 
@@ -22,20 +20,10 @@ class SubZeroEntity(CoordinatorEntity[SubZeroCoordinator]):
         super().__init__(coordinator)
         self.entity_description = description
         self._attr_unique_id = f"{coordinator.device_id}_{description.key}"
-        version = coordinator.data.get("version")
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, coordinator.device_id)},
-            name=coordinator.device["name"],
-            manufacturer=(
-                "Cove"
-                if is_dishwasher(coordinator.data)
-                else "Wolf"
-                if is_oven(coordinator.data)
-                else "Sub-Zero"
-            ),
-            model=coordinator.data.get("appliance_model"),
-            sw_version=version.get("fw") if isinstance(version, dict) else None,
-        )
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return self.coordinator.device_info
 
     @property
     def available(self) -> bool:

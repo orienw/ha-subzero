@@ -147,6 +147,26 @@ async def test_token_rotation_is_saved_without_password(hass, loaded):
     assert "password" not in entry.data
 
 
+@pytest.mark.parametrize("push", [False, True])
+async def test_firmware_updates_device_registry_without_reload(hass, loaded, push):
+    entry, client, updates, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    registry = dr.async_get(hass)
+    device = registry.async_get_device_by_identifier((DOMAIN, "test-fridge"), entry.entry_id)
+    assert device.sw_version == "1.0"
+    if push:
+        await updates.put(StateUpdate({"version": {"fw": "2.0"}}, full=False))
+    else:
+        client.state.return_value["version"] = {"fw": "2.0"}
+        await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    assert registry.async_get(device.id).sw_version == "2.0"
+    assert coordinator.device_info["sw_version"] == "2.0"
+    await hass.config_entries.async_unload(entry.entry_id)
+    coordinator.apply_update(StateUpdate({"version": {"fw": "3.0"}}, full=False))
+    assert registry.async_get(device.id).sw_version == "2.0"
+
+
 async def test_unload_closes_push_listener(hass, loaded):
     entry, _, _, disconnected, _ = loaded
     assert await hass.config_entries.async_unload(entry.entry_id)

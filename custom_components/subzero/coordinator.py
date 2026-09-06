@@ -14,6 +14,7 @@ from homeassistant.exceptions import (
     HomeAssistantError,
     ServiceValidationError,
 )
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
@@ -28,7 +29,7 @@ from .const import (
     STATE_KEYS,
     selected_devices,
 )
-from .controls import control_matches, validate_control_properties
+from .controls import control_matches, is_dishwasher, is_oven, validate_control_properties
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -54,6 +55,19 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self.device = dict(device)
         self.unrecognized_keys: set[str] = set()
         self._command_lock = asyncio.Lock()
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        version = self.data.get("version")
+        return DeviceInfo(
+            identifiers={(DOMAIN, self.device_id)},
+            name=self.device["name"],
+            manufacturer=(
+                "Cove" if is_dishwasher(self.data) else "Wolf" if is_oven(self.data) else "Sub-Zero"
+            ),
+            model=self.data.get("appliance_model"),
+            sw_version=version.get("fw") if isinstance(version, dict) else None,
+        )
 
     async def async_set_properties(self, properties: dict) -> None:
         """Serialize writes and confirm their result from appliance state."""
