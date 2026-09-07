@@ -522,6 +522,8 @@ async def test_single_signalr_connection_routes_multiple_appliances(
     async def collect():
         try:
             async for device_id, update in stream:
+                if isinstance(update, api.ChannelOpened):
+                    continue
                 received[device_id] = update
                 first_update.set()
                 if device_id == "test-oven" and isinstance(update, api.StateUpdate):
@@ -647,7 +649,13 @@ async def control_server(aiohttp_server, monkeypatch, socket_enabled, tokens):
 
 @pytest.mark.parametrize(
     "response",
-    [{"status": 1, "status_msg": "An error occurred"}, {"status": 0, "resp": {"status": 1}}],
+    [
+        {"status": 1, "status_msg": "An error occurred"},
+        {"status": 0, "resp": {"status": 1}},
+        {"status": 0, "pload": {"pload": {"status": 1}}},
+        {"status": 1, "pload": {"pload": {"status": 0}}},
+        {"pload": {"status": 1, "pload": {"status": 0}}},
+    ],
 )
 async def test_rejected_channel_opening_is_an_error(hass, control_server, tokens, response):
     control_server["response"] = response
@@ -769,6 +777,9 @@ async def test_cloud_controls_use_the_existing_direct_method(control_server, tok
         (200, {"status": 0}),
         (200, {"resp": {"status": 0}}),
         (200, {"status": 0, "resp": {}}),
+        (201, {"status": 0}),
+        (202, "OK"),
+        (204, ""),
         (500, {"Message": "OK"}),
     ],
 )
@@ -801,13 +812,56 @@ async def test_nested_cloud_command_errors_are_not_accepted(control_server, toke
 
 
 @pytest.mark.parametrize("wrapped", [False, True])
-async def test_cloud_status_accepts_both_snapshot_shapes(control_server, tokens, wrapped):
+@pytest.mark.parametrize("status", [200, 201, 202])
+async def test_cloud_status_accepts_both_snapshot_shapes(control_server, tokens, wrapped, status):
     data = {"appliance_model": "DW2450WS", "wash_cycle": 2, "wash_status": 0}
+    control_server["status"] = status
     control_server["response"] = {"status": 0, "resp": data} if wrapped else data
     async with aiohttp.ClientSession() as session:
         client = api.SubZeroClient(session, "test-key", tokens)
         assert await client.state("test-fridge") == data
     assert len(control_server["requests"]) == 1
+
+
+async def test_rejected_status_cannot_be_hidden_by_snapshot(control_server, tokens):
+    control_server["response"] = {"resp": {"status": 1, "appliance_model": "ANY-MODEL"}}
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(api.ApiError, match="rejected the status request"):
+            await api.SubZeroClient(session, "test-key", tokens).state("test-fridge")
+
+
+@pytest.mark.parametrize("status", [201, 202, 204])
+async def test_channel_open_accepts_successful_http_statuses(control_server, tokens, status):
+    control_server.update(status=status, response="")
+    async with aiohttp.ClientSession() as session:
+        await api.SubZeroClient(session, "test-key", tokens).open_channel("test-fridge")
+    assert len(control_server["requests"]) == 1
+
+
+@pytest.mark.parametrize("command", ["state", "open_channel", "set_property"])
+@pytest.mark.parametrize("layers", [1, 2])
+@pytest.mark.parametrize("rejected", [False, True])
+async def test_commands_handle_nested_appliance_responses(
+    control_server, tokens, command, layers, rejected
+):
+    response = {"status": 1 if rejected else 0}
+    for _ in range(layers):
+        response = {"pload": response}
+    if command == "state":
+        response["resp"] = {"appliance_model": "ANY-MODEL", "ref_door_ajar": True}
+    control_server["response"] = response
+    async with aiohttp.ClientSession() as session:
+        client = api.SubZeroClient(session, "test-key", tokens)
+        args = (
+            ("test-fridge", "ice_maker_on", True) if command == "set_property" else ("test-fridge",)
+        )
+        if rejected:
+            with pytest.raises(api.ApiError, match="rejected"):
+                await getattr(client, command)(*args)
+        else:
+            result = await getattr(client, command)(*args)
+            if command == "state":
+                assert result == {"appliance_model": "ANY-MODEL", "ref_door_ajar": True}
 
 
 @pytest.mark.parametrize(("status", "ack"), [(200, "OK"), (500, {"Message": "OK"})])
@@ -891,8 +945,13 @@ async def test_live_signalr_socket_is_renewed_before_token_expiry(
     stream = client.watch(["test-fridge"])
     try:
         async with asyncio.timeout(5):
-            first = await anext(stream)
-            second = await anext(stream)
+            snapshots = []
+            async for event in stream:
+                if isinstance(event[1], api.StateUpdate):
+                    snapshots.append(event)
+                if len(snapshots) == 2:
+                    break
+            first, second = snapshots
         assert first == second
         assert client.push_connected
         assert len(sockets) == 2 and sockets[0].closed
@@ -934,11 +993,68 @@ async def notification_stream(hass, aiohttp_server, monkeypatch, socket_enabled,
     )
     client._json = AsyncMock(return_value={"connectionToken": "test-connection"})
     client.open_channel = AsyncMock()
-    stream = client.watch(["test-fridge", "test-oven"])
+    watch = client.watch(["test-fridge", "test-oven"])
+
+    async def notifications():
+        async for event in watch:
+            if not isinstance(event[1], api.ChannelOpened):
+                yield event
+
+    stream = notifications()
     try:
         yield client, stream, frames, sockets
     finally:
         await stream.aclose()
+        await watch.aclose()
+
+
+@pytest.mark.parametrize("rejected", [False, True])
+async def test_channel_acceptance_is_reported_without_a_push_snapshot(
+    notification_stream, monkeypatch, rejected
+):
+    client, _, _, sockets = notification_stream
+    client.open_channel.side_effect = [api.ApiError("Rejected"), None] if rejected else [None]
+    monkeypatch.setattr(api, "RECONNECT_DELAY", 0.01)
+    monkeypatch.setattr(api.random, "uniform", lambda *_: 0)
+    stream = client.watch(["test-fridge"])
+    try:
+        async with asyncio.timeout(5):
+            if rejected:
+                device_id, error = await anext(stream)
+                assert device_id == "test-fridge"
+                assert isinstance(error, api.ApiError)
+            assert await anext(stream) == ("test-fridge", api.ChannelOpened())
+        assert len(sockets) == 1
+        assert client.notification_stats["received"] == 0
+        assert client.open_channel.await_count == (2 if rejected else 1)
+    finally:
+        await stream.aclose()
+
+
+async def test_partial_push_confirms_channel_despite_a_late_open_error(notification_stream):
+    client, stream, frames, sockets = notification_stream
+    release = asyncio.Event()
+
+    async def open_channel(device_id):
+        if device_id == "test-fridge":
+            await release.wait()
+            raise api.ApiError("Open request timed out")
+
+    client.open_channel.side_effect = open_channel
+    frames.append(json.dumps(notification({"ref_door_ajar": True})) + api.SEPARATOR)
+    async with asyncio.timeout(5):
+        assert await anext(stream) == (
+            "test-fridge",
+            api.StateUpdate({"ref_door_ajar": True}, full=False),
+        )
+        release.set()
+        await sockets[0].send_str(
+            json.dumps(notification({"ref_door_ajar": False})) + api.SEPARATOR
+        )
+        assert await anext(stream) == (
+            "test-fridge",
+            api.StateUpdate({"ref_door_ajar": False}, full=False),
+        )
 
 
 @pytest.mark.parametrize(

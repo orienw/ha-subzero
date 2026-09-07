@@ -133,7 +133,9 @@ Local network access and accounts requiring additional verification or an extern
 
 ## How it works
 
-Selected appliances share account tokens and one cloud notification connection. Each appliance gets a full status read at setup and then receives push updates, so an idle appliance triggers no periodic status requests. Lost connections reconnect with increasing delays, and rate-limit responses are honored. An appliance that silently stops reporting may go unnoticed until a notification or a failed control request reveals it.
+Selected appliances share account tokens and one cloud notification connection. Each appliance gets a full status read at setup and then receives push updates, so an idle appliance triggers no periodic status requests. Lost connections reconnect with increasing delays, and rate-limit responses are honored.
+
+After an error, a reopened channel or an incoming state update triggers a fresh status read if no full push snapshot has restored the appliance. Failed recovery reads retry with increasing delays. An appliance that silently stops reporting may go unnoticed until a notification or a failed control request reveals it.
 
 Control changes are confirmed from appliance status, not from the command acknowledgement. If no push update arrives, the integration makes one status request to check the setting. Changing a mode sends only the settings that differ, one at a time, and stops if a change fails.
 

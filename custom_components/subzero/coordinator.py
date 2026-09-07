@@ -18,7 +18,7 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
-from .api import ApiError, RateLimited, StateUpdate, SubZeroClient
+from .api import ApiError, ChannelOpened, RateLimited, StateUpdate, SubZeroClient
 from .auth import InvalidAuth
 from .const import (
     CONTROL_CONFIRM_TIMEOUT,
@@ -72,6 +72,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             "last_received": None,
         }
         self._command_lock = asyncio.Lock()
+        self._recovery_updates: dict | None = None
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -154,6 +155,34 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self.unrecognized_keys.update(data.keys() - STATE_KEYS)
         return {key: value for key, value in data.items() if key in STATE_KEYS}
 
+    async def async_recover(self) -> None:
+        """Restore unavailable state while the appliance is reporting again."""
+        backoff = RECONNECT_DELAY
+        while not self.last_update_success:
+            self._recovery_updates = {}
+            _LOGGER.debug("Refreshing %s to recover appliance state", self.device["name"])
+            try:
+                data = await self._async_update_data()
+            except ConfigEntryAuthFailed as error:
+                self.async_set_update_error(error)
+                self.entry.async_start_reauth(self.hass)
+                return
+            except Exception as error:
+                if self.last_update_success:
+                    return
+                if not isinstance(error, UpdateFailed):
+                    _LOGGER.exception("Sub-Zero state recovery failed unexpectedly")
+                self.async_set_update_error(error)
+                retry_after = (error.retry_after or 0) if isinstance(error, UpdateFailed) else 0
+            else:
+                if not self.last_update_success:
+                    self.async_set_updated_data({**data, **self._recovery_updates})
+                return
+            finally:
+                self._recovery_updates = None
+            await asyncio.sleep(max(backoff, retry_after) + random.uniform(0, 5))
+            backoff = min(backoff * 2, MAX_RECONNECT_DELAY)
+
     @callback
     def apply_update(self, update: StateUpdate) -> None:
         self.unrecognized_keys.update(update.properties.keys() - STATE_KEYS)
@@ -171,6 +200,8 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             },
         )
         if not self.last_update_success and not update.full:
+            if self._recovery_updates is not None:
+                self._recovery_updates.update(properties)
             return
         updated = properties if update.full else {**self.data, **properties}
         if (
@@ -248,13 +279,36 @@ class SubZeroAccount:
         backoff = RECONNECT_DELAY
         while True:
             started = time.monotonic()
+            recoveries: dict[str, asyncio.Task] = {}
             try:
                 async for device_id, update in self.client.watch(list(self.coordinators)):
                     coordinator = self.coordinators[device_id]
+                    recovery = None
+                    if isinstance(update, ApiError) or (
+                        isinstance(update, StateUpdate) and update.full
+                    ):
+                        if recovery := recoveries.pop(device_id, None):
+                            recovery.cancel()
                     if isinstance(update, ApiError):
                         coordinator.async_set_update_error(update)
-                    else:
+                    elif not isinstance(update, ChannelOpened):
                         coordinator.apply_update(update)
+                    if recovery:
+                        await asyncio.gather(recovery, return_exceptions=True)
+                    if (
+                        not coordinator.last_update_success
+                        and not isinstance(coordinator.last_exception, ConfigEntryAuthFailed)
+                        and (
+                            isinstance(update, ChannelOpened)
+                            or isinstance(update, StateUpdate)
+                            and not update.properties.keys().isdisjoint(STATE_KEYS)
+                        )
+                    ):
+                        recovery = recoveries.get(device_id)
+                        if recovery is None or recovery.done():
+                            recoveries[device_id] = self.entry.async_create_background_task(
+                                self.hass, coordinator.async_recover(), "Sub-Zero state recovery"
+                            )
                 raise ApiError("Sub-Zero's notification stream ended.")
             except InvalidAuth as error:
                 self.set_error(error)
@@ -267,6 +321,11 @@ class SubZeroAccount:
                 _LOGGER.exception("Sub-Zero's notification stream failed unexpectedly")
                 self.set_error(error)
                 retry_after = 0
+            finally:
+                for recovery in recoveries.values():
+                    recovery.cancel()
+                if recoveries:
+                    await asyncio.gather(*recoveries.values(), return_exceptions=True)
             if time.monotonic() - started >= 120:
                 backoff = RECONNECT_DELAY
             await asyncio.sleep(max(backoff, retry_after) + random.uniform(0, 5))

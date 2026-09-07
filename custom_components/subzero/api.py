@@ -74,6 +74,11 @@ class StateUpdate:
     full: bool
 
 
+@dataclass(frozen=True)
+class ChannelOpened:
+    """The appliance accepted its update channel."""
+
+
 def token_state(tokens: dict, previous: dict | None = None) -> dict:
     previous = previous or {}
     try:
@@ -143,7 +148,15 @@ def _object(value) -> dict:
 
 def _rejected(response: dict) -> bool:
     """Whether an appliance command result carries a non-zero status."""
-    return "status" in response and (type(response["status"]) is not int or response["status"] != 0)
+    for depth in range(3):
+        if "status" in response and (
+            type(response["status"]) is not int or response["status"] != 0
+        ):
+            return True
+        if depth == 2 or response.get("pload") is None:
+            break
+        response = _object(response["pload"])
+    return False
 
 
 def parse_notification(
@@ -263,9 +276,9 @@ class SubZeroClient:
                     raise RateLimited(delay)
                 if response.status in (401, 403) or (token_request and response.status == 400):
                     raise InvalidAuth("Sub-Zero requires a new sign-in.")
-                if appliance_command and response.status in (200, 500):
+                if appliance_command and (200 <= response.status < 300 or response.status == 500):
                     body = (await response.text()).strip()
-                    if response.status == 200 and body in ("", "OK", '"OK"'):
+                    if response.status < 300 and body in ("", "OK", '"OK"'):
                         return {}
                     try:
                         result = json.loads(body)
@@ -277,7 +290,7 @@ class SubZeroClient:
                         and result.get("Message", result.get("message")) == "OK"
                     ):
                         return {}
-                    if response.status == 200:
+                    if response.status < 300:
                         return _object(result)
                 if response.status != 200:
                     raise ApiError(f"Sub-Zero returned HTTP {response.status}.")
@@ -375,6 +388,8 @@ class SubZeroClient:
         if _rejected(data):
             raise ApiError("The appliance rejected the status request.")
         data = _object(data.get("resp", data))
+        if _rejected(data):
+            raise ApiError("The appliance rejected the status request.")
         if not isinstance(data.get("appliance_model"), str):
             raise ApiError("The appliance did not return a status snapshot.")
         self._state_commands[device_id] = command
@@ -397,12 +412,18 @@ class SubZeroClient:
         if _rejected(response):
             raise ApiError("Sub-Zero rejected the setting.")
         response = _object(response.get("resp", response))
+        if _rejected(response):
+            raise ApiError("Sub-Zero rejected the setting.")
+        for _ in range(2):
+            if "status" in response or response.get("pload") is None:
+                break
+            response = _object(response["pload"])
         if response and (type(response.get("status")) is not int or response["status"] != 0):
             raise ApiError("Sub-Zero rejected the setting.")
 
     async def watch(
         self, device_ids: list[str]
-    ) -> AsyncIterator[tuple[str, StateUpdate | ApiError]]:
+    ) -> AsyncIterator[tuple[str, StateUpdate | ApiError | ChannelOpened]]:
         while True:
             try:
                 async with aclosing(self._watch_connection(device_ids)) as updates:
@@ -413,7 +434,7 @@ class SubZeroClient:
 
     async def _watch_connection(
         self, device_ids: list[str]
-    ) -> AsyncIterator[tuple[str, StateUpdate | ApiError]]:
+    ) -> AsyncIterator[tuple[str, StateUpdate | ApiError | ChannelOpened]]:
         info = await self._request(
             "POST", "/signal-r/negotiateUser", params={"userId": self.tokens["user_id"]}
         )
@@ -456,7 +477,7 @@ class SubZeroClient:
                 if _object(handshake) != {}:
                     raise ApiError("Sub-Zero rejected the notification handshake.")
                 self.push_connected = True
-                errors: deque[tuple[str, ApiError]] = deque()
+                channel_events: deque[tuple[str, ApiError | ChannelOpened]] = deque()
                 pending_channels = set(device_ids)
 
                 async def open_channels() -> None:
@@ -472,9 +493,10 @@ class SubZeroClient:
                                 raise
                             except ApiError as error:
                                 if device_id in pending_channels:
-                                    errors.append((device_id, error))
+                                    channel_events.append((device_id, error))
                             else:
                                 _LOGGER.debug("Update channel accepted for appliance %d", index)
+                                channel_events.append((device_id, ChannelOpened()))
                                 pending_channels.discard(device_id)
                         if pending_channels:
                             await asyncio.sleep(backoff + random.uniform(0, 5))
@@ -487,8 +509,8 @@ class SubZeroClient:
                     next_ping = time.monotonic() + PING_INTERVAL
                     last_received = time.monotonic()
                     while True:
-                        while errors:
-                            yield errors.popleft()
+                        while channel_events:
+                            yield channel_events.popleft()
                         while SEPARATOR in pending:
                             frame, pending = pending.split(SEPARATOR, 1)
                             if not frame:
@@ -520,7 +542,7 @@ class SubZeroClient:
                                 self.notification_stats["ignored"] += 1
                                 continue
                             device_id, update = parsed
-                            if update.full:
+                            if not update.properties.keys().isdisjoint(STATE_KEYS):
                                 pending_channels.discard(device_id)
                             yield device_id, update
                         now = time.monotonic()

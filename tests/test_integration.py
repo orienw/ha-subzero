@@ -19,6 +19,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry, async_
 from custom_components.subzero.api import (
     ApiError,
     Appliance,
+    ChannelOpened,
     RateLimited,
     StateUpdate,
     parse_notification,
@@ -454,6 +455,172 @@ async def test_reconnect_waits_then_recovers_from_push_without_polling(
     client.state.assert_awaited_once()
 
 
+@pytest.mark.parametrize("stream_error", [False, True])
+async def test_reopened_channel_refreshes_unavailable_state(
+    hass, loaded, monkeypatch, stream_error
+):
+    entry, client, updates, _, _ = loaded
+    monkeypatch.setattr("custom_components.subzero.coordinator.random.uniform", lambda *_: 0)
+    error = ApiError("Disconnected")
+    await updates.put(error if stream_error else ("test-fridge", error))
+    await hass.async_block_till_done()
+    if stream_error:
+        async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=31))
+        await hass.async_block_till_done()
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "unavailable"
+    client.state.return_value = {
+        "appliance_model": "ANOTHER-MODEL",
+        "ref_door_ajar": True,
+        "ref_set_temp": 39,
+        "ap_ssid": "private-network",
+    }
+    await updates.put(ChannelOpened())
+    await hass.async_block_till_done()
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
+    assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "39"
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    assert "ap_ssid" not in coordinator.data
+    assert coordinator.push_stats["snapshots"] == 0
+    assert coordinator.push_stats["updates"] == 0
+    assert client.state.await_count == 2
+    await updates.put(StateUpdate({"ref_door_ajar": False}, full=False))
+    await updates.put(ChannelOpened())
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(hours=1))
+    await hass.async_block_till_done()
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
+    assert client.state.await_count == 2
+
+
+async def test_failed_status_read_recovers_on_an_existing_push_connection(hass, loaded):
+    entry, client, updates, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    client.state.side_effect = [
+        ApiError("Status timed out"),
+        {"appliance_model": "ANOTHER-MODEL", "ref_door_ajar": True, "ref_set_temp": 39},
+    ]
+    await coordinator.async_refresh()
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "unavailable"
+    await updates.put(StateUpdate({"ref_door_ajar": True}, full=False))
+    await hass.async_block_till_done()
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
+    assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "39"
+    assert client.state.await_count == 3
+    assert client.watched == [["test-fridge"]]
+    assert coordinator.push_stats["snapshots"] == 0
+
+
+async def test_recovery_preserves_incoming_updates_and_other_appliances(hass, oven_loaded):
+    entry, client, updates = oven_loaded
+    reading = asyncio.Event()
+    release = asyncio.Event()
+
+    async def state(device_id):
+        assert device_id == "test-oven"
+        reading.set()
+        await release.wait()
+        return {"appliance_model": "SO3050PMSP", "cav_light_on": False}
+
+    client.state.reset_mock(side_effect=True)
+    client.state.side_effect = state
+    await updates.put(("test-oven", ApiError("Disconnected")))
+    await updates.put(("test-oven", ChannelOpened()))
+    await hass.async_block_till_done()
+    assert reading.is_set()
+    await updates.put(("test-oven", ChannelOpened()))
+    await updates.put(StateUpdate({"ref_door_ajar": True}, full=False))
+    await updates.put(("test-oven", StateUpdate({"cav_light_on": True}, full=False)))
+    await hass.async_block_till_done()
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
+    assert hass.states.get("switch.wall_oven_oven_light").state == "unavailable"
+    client.state.assert_awaited_once_with("test-oven")
+    release.set()
+    await hass.async_block_till_done()
+    assert hass.states.get("switch.wall_oven_oven_light").state == "on"
+    assert hass.states.get("sensor.wall_oven_oven_temperature").state == "unavailable"
+    assert entry.runtime_data.coordinators["test-oven"].push_stats["snapshots"] == 0
+
+
+@pytest.mark.parametrize(
+    ("error", "delay"),
+    [(ApiError("Offline"), 30), (RateLimited(300), 300), (ValueError("Unexpected"), 30)],
+)
+async def test_failed_recovery_retries_with_backoff(hass, loaded, monkeypatch, error, delay):
+    _, client, updates, _, _ = loaded
+    monkeypatch.setattr("custom_components.subzero.coordinator.random.uniform", lambda *_: 0)
+    client.state.reset_mock()
+    client.state.side_effect = [
+        error,
+        {"appliance_model": "ANOTHER-MODEL", "ref_door_ajar": True},
+    ]
+    await updates.put(("test-fridge", ApiError("Disconnected")))
+    await updates.put(ChannelOpened())
+    await hass.async_block_till_done()
+    client.state.assert_awaited_once()
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "unavailable"
+    await updates.put(StateUpdate({"ref_door_ajar": False}, full=False))
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=delay - 1))
+    await hass.async_block_till_done()
+    client.state.assert_awaited_once()
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=delay + 1))
+    await hass.async_block_till_done()
+    assert client.state.await_count == 2
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
+
+
+@pytest.mark.parametrize("finish", ["snapshot", "disconnect", "channel_error", "unload"])
+async def test_recovery_cannot_overwrite_newer_state_or_outlive_connection(hass, loaded, finish):
+    entry, client, updates, _, _ = loaded
+    reading = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def state(device_id):
+        reading.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    client.state.side_effect = state
+    await updates.put(("test-fridge", ApiError("Disconnected")))
+    await updates.put(ChannelOpened())
+    await hass.async_block_till_done()
+    assert reading.is_set()
+    if finish == "unload":
+        await hass.config_entries.async_unload(entry.entry_id)
+    elif finish == "snapshot":
+        await updates.put(
+            StateUpdate({"appliance_model": "ANOTHER-MODEL", "ref_door_ajar": True}, full=True)
+        )
+    else:
+        error = ApiError("Disconnected again")
+        await updates.put(error if finish == "disconnect" else ("test-fridge", error))
+    async with asyncio.timeout(1):
+        await cancelled.wait()
+    await hass.async_block_till_done()
+    assert cancelled.is_set()
+    if finish != "unload":
+        assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == (
+            "on" if finish == "snapshot" else "unavailable"
+        )
+
+
+async def test_recovery_auth_failure_starts_reauthentication(hass, loaded):
+    entry, client, updates, _, _ = loaded
+    client.state.side_effect = InvalidAuth("Expired")
+    await updates.put(("test-fridge", ApiError("Disconnected")))
+    await updates.put(ChannelOpened())
+    await hass.async_block_till_done()
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "unavailable"
+    context = hass.config_entries.flow.async_progress_by_handler(DOMAIN)[0]["context"]
+    assert context["source"] == "reauth"
+    assert context["entry_id"] == entry.entry_id
+    client.state.reset_mock()
+    await updates.put(StateUpdate({"ref_door_ajar": True}, full=False))
+    await updates.put(ChannelOpened())
+    await hass.async_block_till_done()
+    client.state.assert_not_awaited()
+
+
 @pytest.mark.parametrize("rate_limited", [False, True])
 @pytest.mark.parametrize(
     ("lifetimes", "expected"),
@@ -581,7 +748,8 @@ async def test_empty_selection_stops_monitoring_but_keeps_account(hass, loaded):
     assert not dr.async_entries_for_config_entry(dr.async_get(hass), entry.entry_id)
 
 
-async def test_one_offline_appliance_does_not_stop_another(hass, loaded):
+@pytest.mark.parametrize("recover_from_read", [False, True])
+async def test_one_offline_appliance_does_not_stop_another(hass, loaded, recover_from_read):
     entry, client, updates, _, _ = loaded
     good_state = client.state.return_value
 
@@ -606,14 +774,17 @@ async def test_one_offline_appliance_does_not_stop_another(hass, loaded):
     oven = entry.runtime_data.coordinators["test-oven"]
     assert not oven.last_update_success
     assert oven.push_stats["updates"] == 1
-    await updates.put(
-        (
-            "test-oven",
-            StateUpdate({"appliance_model": "OTHER-OVEN", "service_required": False}, full=True),
-        )
-    )
+    recovered_state = {"appliance_model": "OTHER-OVEN", "service_required": False}
+    if recover_from_read:
+        client.state.side_effect = None
+        client.state.return_value = recovered_state
+        await updates.put(("test-oven", ChannelOpened()))
+        async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=36))
+    else:
+        await updates.put(("test-oven", StateUpdate(recovered_state, full=True)))
     await hass.async_block_till_done()
     assert hass.states.get("binary_sensor.wall_oven_service_required").state == "off"
+    assert oven.push_stats["snapshots"] == (0 if recover_from_read else 1)
 
 
 async def test_v1_upgrade_enables_integration_disabled_entities(hass, tokens):
@@ -794,7 +965,8 @@ async def test_oven_push_updates_leave_the_fridge_alone(hass, oven_loaded):
 
 
 async def test_oven_discovery_recovers_after_an_unavailable_snapshot(hass, oven_loaded):
-    entry, _, updates = oven_loaded
+    entry, client, updates = oven_loaded
+    client.state.side_effect = ApiError("Still unavailable")
     registry = er.async_get(hass)
     original = registry.async_get("switch.wall_oven_oven_light")
     await updates.put(("test-oven", ApiError("Temporarily unavailable")))
