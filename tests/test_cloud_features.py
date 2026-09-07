@@ -169,6 +169,12 @@ async def appliances(hass, tokens, request):
     ):
         client = factory.return_value
         client.tokens = token_state(tokens)
+        client.notification_stats = {
+            "received": 0,
+            "ignored": 0,
+            "invalid": 0,
+            "last_received": None,
+        }
         client.appliances = AsyncMock(
             return_value=[
                 Appliance(device_id, device["name"], unit)
@@ -528,6 +534,9 @@ async def test_climate_writes_convert_celsius_to_fahrenheit(hass, appliances):
 
 async def test_diagnostics_omit_private_values(hass, appliances):
     result = await async_get_config_entry_diagnostics(hass, appliances.entry)
+    assert result["notifications"]["received"] == 0
+    appliances.entry.runtime_data.client.notification_stats["received"] = 3
+    assert result["notifications"]["received"] == 0
     encoded = json.dumps(result)
     assert result["push_connected"] is True
     assert "DO30PM" in encoded and "DW2450WS" in encoded
@@ -674,6 +683,21 @@ async def test_optional_entities_report_native_values(appliances):
     assert reporting.native_value == "Cloud push"
     appliances.client.push_connected = False
     assert reporting.native_value == "Disconnected"
+
+
+async def test_diagnostics_count_push_updates(hass, appliances):
+    device = dr.async_get(hass).async_get_device_by_identifier(
+        (DOMAIN, "fridge"), appliances.entry.entry_id
+    )
+    before = await async_get_device_diagnostics(hass, appliances.entry, device)
+    assert before["push"] == {"snapshots": 0, "updates": 0, "last_received": None}
+    await appliances.update("fridge", {"ref_door_ajar": True})
+    await appliances.update("fridge", {"appliance_model": "TEST-MODEL"}, full=True)
+    result = await async_get_device_diagnostics(hass, appliances.entry, device)
+    assert result["push"]["snapshots"] == 1
+    assert result["push"]["updates"] == 1
+    assert dt_util.parse_datetime(result["push"]["last_received"]) <= dt_util.utcnow()
+    assert before["push"] == {"snapshots": 0, "updates": 0, "last_received": None}
 
 
 async def test_device_diagnostics_select_only_the_requested_appliance(hass, appliances):

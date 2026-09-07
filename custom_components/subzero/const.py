@@ -86,6 +86,7 @@ WRITABLE_INTEGER_KEYS = {
     *KITCHEN_TIMERS,
     "delay_start_timer_duration",
 }
+NETWORK_KEYS = {"ipv4_addr", "device_wlan_id"}
 SENSOR_KEYS = {
     *SETPOINT_KEYS,
     "ref_display_temp",
@@ -102,8 +103,7 @@ SENSOR_KEYS = {
     "wash_status",
     "ap_rssi",
     "uptime",
-    "ipv4_addr",
-    "device_wlan_id",
+    *NETWORK_KEYS,
 }
 BINARY_KEYS = {
     "ref_door_ajar",

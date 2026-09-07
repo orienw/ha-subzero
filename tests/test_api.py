@@ -19,18 +19,17 @@ from custom_components.subzero.auth import InvalidAuth
 from .conftest import make_tokens
 
 
-def notification(properties, *, full=False, device="test-fridge", user=None):
+def notification(
+    properties, *, full=False, device="test-fridge", user=None, message_type=None, pload=None
+):
+    if message_type is None:
+        message_type = 1 if full else 2
+    if pload is None:
+        pload = properties if full else {"props": properties}
     envelope = {
         "DeviceId": device,
         "Payload": json.dumps(
-            {
-                "api.async_channel": json.dumps(
-                    {
-                        "type": 1 if full else 2,
-                        "pload": properties if full else {"props": properties},
-                    }
-                )
-            }
+            {"api.async_channel": json.dumps({"type": message_type, "pload": pload})}
         ),
     }
     arguments = [json.dumps(envelope)]
@@ -43,21 +42,155 @@ def notification(properties, *, full=False, device="test-fridge", user=None):
 def test_notifications_keep_falsy_values(legacy):
     properties = {"ref_door_ajar": False, "frz_set_temp": 0}
     event = notification(properties, user="TEST-OWNER" if legacy else None)
-    assert api.parse_notification(event, "test-fridge", "test-owner") == api.StateUpdate(
-        properties, full=False
+    assert api.parse_notification(event, "test-owner", ["test-fridge"]) == (
+        "test-fridge",
+        api.StateUpdate(properties, full=False),
     )
 
 
-def test_notifications_do_not_mix_devices_or_accounts():
-    assert api.parse_notification(notification({}, device="other"), "test-fridge", "owner") is None
-    assert api.parse_notification(notification({}, user="other"), "test-fridge", "owner") is None
+def test_notifications_from_other_accounts_are_ignored(caplog):
+    caplog.set_level(logging.DEBUG, logger="custom_components.subzero.api")
+    event = notification({}, user="other")
+    assert api.parse_notification(event, "owner", ["test-fridge"]) is None
+    assert "another account" in caplog.text
+
+
+def test_notifications_for_unselected_appliances_are_ignored(caplog):
+    caplog.set_level(logging.DEBUG, logger="custom_components.subzero.api")
+    event = notification({}, device="other")
+    assert api.parse_notification(event, "owner", ["test-fridge"]) is None
+    assert "unselected appliance" in caplog.text
 
 
 def test_any_model_snapshot_is_accepted():
     state = {"appliance_model": "ANOTHER-MODEL", "ref_door_ajar": True}
-    assert api.parse_notification(notification(state, full=True), "test-fridge", "owner") == (
-        api.StateUpdate(state, full=True)
+    event = notification(state, full=True)
+    assert api.parse_notification(event, "owner", ["test-fridge"]) == (
+        "test-fridge",
+        api.StateUpdate(state, full=True),
     )
+
+
+def test_property_changes_do_not_turn_sibling_fields_into_a_snapshot():
+    pload = {"appliance_model": "MODEL", "ref_door_ajar": False, "props": {"ref_door_ajar": True}}
+    event = notification({}, message_type=1, pload=pload)
+    assert api.parse_notification(event, "owner", ["test-fridge"]) == (
+        "test-fridge",
+        api.StateUpdate({"ref_door_ajar": True}, full=False),
+    )
+
+
+def test_snapshots_with_a_null_model_still_apply_property_changes():
+    pload = {"appliance_model": None, "props": {"ref_door_ajar": True}}
+    event = notification({}, message_type=1, pload=pload)
+    assert api.parse_notification(event, "owner", ["test-fridge"]) == (
+        "test-fridge",
+        api.StateUpdate({"ref_door_ajar": True}, full=False),
+    )
+
+
+def test_recursion_errors_while_decoding_are_invalid_notifications(monkeypatch):
+    def loads(_):
+        raise RecursionError
+
+    monkeypatch.setattr(api.json, "loads", loads)
+    with pytest.raises(api.ApiError, match="invalid notification"):
+        api._object("{}")
+
+
+@pytest.mark.parametrize("message_type", [1, 2, 9])
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_snapshots_are_read_from_root_or_response_payloads(message_type, wrapped):
+    state = {"appliance_model": "ANOTHER-MODEL", "ref_door_ajar": True}
+    pload = {"status": 0, "resp": state} if wrapped else state
+    event = notification({}, message_type=message_type, pload=pload)
+    assert api.parse_notification(event, "owner", ["test-fridge"]) == (
+        "test-fridge",
+        api.StateUpdate(state, full=True),
+    )
+
+
+def test_a_null_model_does_not_discard_a_door_change():
+    state = {"appliance_model": None, "ref_door_ajar": True}
+    event = notification(state, full=True)
+    assert api.parse_notification(event, "owner", ["test-fridge"]) == (
+        "test-fridge",
+        api.StateUpdate(state, full=False),
+    )
+
+
+@pytest.mark.parametrize("message_type", [1, 2, 6, 9])
+@pytest.mark.parametrize("wrapper", [None, "resp", "props"])
+def test_door_changes_do_not_require_a_model_or_message_type(message_type, wrapper):
+    state = {"ref_door_ajar": True}
+    pload = {wrapper: state} if wrapper else state
+    event = notification({}, message_type=message_type, pload=pload)
+    assert api.parse_notification(event, "owner", ["test-fridge"]) == (
+        "test-fridge",
+        api.StateUpdate(state, full=False),
+    )
+
+
+def test_response_properties_take_precedence_over_other_wrappers():
+    event = notification(
+        {}, pload={"resp": {"ref_door_ajar": True}, "props": {"ref_door_ajar": False}}
+    )
+    assert api.parse_notification(event, "owner", ["test-fridge"])[1].properties == {
+        "ref_door_ajar": True
+    }
+
+
+@pytest.mark.parametrize("pload", [{}, {"props": None}, {"resp": {}}, {"diagnostic_status": "0x0"}])
+def test_empty_or_diagnostic_only_messages_carry_no_entity_state(pload):
+    assert api.parse_notification(notification({}, pload=pload), "owner", ["test-fridge"]) == (
+        "test-fridge",
+        None,
+    )
+
+
+def test_null_wrappers_do_not_hide_root_state():
+    state = {"resp": None, "props": None, "ref_door_ajar": True}
+    assert api.parse_notification(notification({}, pload=state), "owner", ["test-fridge"])[1] == (
+        api.StateUpdate(state, full=False)
+    )
+
+
+def test_notification_logs_show_structure_without_private_payload_values(caplog):
+    caplog.set_level(logging.DEBUG, logger="custom_components.subzero.api")
+    event = notification(
+        {},
+        pload={
+            "resp": {"ref_door_ajar": True, "new_feature": {"private-key": "private-value"}},
+            "private_field": "private-root-value",
+        },
+    )
+    api.parse_notification(event, "owner", ["test-fridge"])
+    assert "payload keys=['private_field', 'resp']" in caplog.text
+    assert "wrapper=resp, state keys=['new_feature', 'ref_door_ajar']" in caplog.text
+    for value in ["private-key", "private-value", "private-root-value", "test-fridge"]:
+        assert value not in caplog.text
+
+
+@pytest.mark.parametrize("message_type", [1, 2, 6, 8])
+def test_property_changes_are_read_from_alert_message_types(message_type):
+    event = notification(
+        {},
+        message_type=message_type,
+        pload={"seq": 87, "notif_type": 201, "props": {"ref_door_ajar": True}},
+    )
+    assert api.parse_notification(event, "owner", ["test-fridge"]) == (
+        "test-fridge",
+        api.StateUpdate({"ref_door_ajar": True}, full=False),
+    )
+
+
+@pytest.mark.parametrize(("message_type", "label"), [(4, "type=4"), ([[[]]], "type=unknown")])
+def test_alerts_without_properties_carry_no_state(caplog, message_type, label):
+    caplog.set_level(logging.DEBUG, logger="custom_components.subzero.api")
+    event = notification({}, message_type=message_type, pload={"seq": 103, "notif_type": 109})
+    assert api.parse_notification(event, "owner", ["test-fridge"]) == ("test-fridge", None)
+    assert label in caplog.text
+    assert "state keys=['notif_type', 'seq']" in caplog.text
 
 
 @pytest.mark.parametrize("value", [None, "bad", "nan", "inf"])
@@ -211,6 +344,19 @@ async def test_invalid_appliance_list_reports_connection_failure(api_server, tok
     async with aiohttp.ClientSession() as session:
         with pytest.raises(api.ApiError, match="invalid appliance list"):
             await api.SubZeroClient(session, "test-key", tokens).appliances()
+
+
+async def test_appliance_list_account_mismatch_is_logged(api_server, tokens, caplog):
+    caplog.set_level(logging.DEBUG, logger="custom_components.subzero.api")
+    api_server["response"] = {
+        "devices": [{"id": "test-fridge", "name": "Kitchen"}],
+        "mySubZeroUniqueUserId": "legacy-owner",
+    }
+    async with aiohttp.ClientSession() as session:
+        appliances = await api.SubZeroClient(session, "test-key", tokens).appliances()
+    assert appliances == [api.Appliance("test-fridge", "Kitchen", None)]
+    assert "different account id" in caplog.text
+    assert "legacy-owner" not in caplog.text
 
 
 async def test_requests_override_shared_home_assistant_headers(hass, api_server, tokens):
@@ -455,6 +601,25 @@ async def control_server(aiohttp_server, monkeypatch, socket_enabled):
     return behavior
 
 
+@pytest.mark.parametrize(
+    "response",
+    [{"status": 1, "status_msg": "An error occurred"}, {"status": 0, "resp": {"status": 1}}],
+)
+async def test_rejected_channel_opening_is_an_error(hass, control_server, tokens, response):
+    control_server["response"] = response
+    client = api.SubZeroClient(async_get_clientsession(hass), "test-key", tokens)
+    with pytest.raises(api.ApiError, match="rejected opening"):
+        await client.open_channel("test-fridge")
+    assert control_server["requests"][0]["pload"] == {"cmd": "open_cloud_async"}
+
+
+@pytest.mark.parametrize("response", ["OK", {}, {"status": 0, "resp": {}}])
+async def test_accepted_channel_opening_returns_quietly(hass, control_server, tokens, response):
+    control_server["response"] = response
+    client = api.SubZeroClient(async_get_clientsession(hass), "test-key", tokens)
+    await client.open_channel("test-fridge")
+
+
 async def test_control_writes_use_the_authenticated_app_envelope(hass, control_server, tokens):
     session = async_get_clientsession(hass)
     original_headers = dict(session.headers)
@@ -631,14 +796,17 @@ def test_notification_expiry_is_independent_of_account_token(monkeypatch):
     assert api.notification_lifetime("opaque-token") == 3000
 
 
+@pytest.mark.parametrize("user_id", ["test-owner", "TEST-OWNER"])
 async def test_live_signalr_socket_is_renewed_before_token_expiry(
-    hass, aiohttp_server, monkeypatch, socket_enabled, tokens
+    hass, aiohttp_server, monkeypatch, socket_enabled, user_id
 ):
     sockets = []
     commands = []
     pings = []
 
     async def negotiate_user(request):
+        assert request.headers["Userid"] == "test-owner"
+        assert request.query["userId"] == "test-owner"
         return web.json_response({"url": origin + "/client/", "accessToken": "short-lived-token"})
 
     async def negotiate_transport(request):
@@ -675,7 +843,7 @@ async def test_live_signalr_socket_is_renewed_before_token_expiry(
     monkeypatch.setattr(api, "SIGNALR_ORIGIN", origin)
     monkeypatch.setattr(api, "PING_INTERVAL", 0.01)
     monkeypatch.setattr(api, "notification_lifetime", lambda _: 0.35)
-    client = api.SubZeroClient(async_get_clientsession(hass), "test-key", tokens)
+    client = api.SubZeroClient(async_get_clientsession(hass), "test-key", make_tokens(user_id))
     stream = client.watch(["test-fridge"])
     try:
         async with asyncio.timeout(5):
@@ -749,10 +917,9 @@ async def notification_stream(hass, aiohttp_server, monkeypatch, socket_enabled,
                 [],
                 {"api.async_channel": None},
                 {"api.async_channel": {"type": 2, "pload": []}},
-                {"api.async_channel": {"type": 2, "pload": {"props": None}}},
+                {"api.async_channel": {"type": 2, "pload": {"props": []}}},
             )
         ),
-        json.dumps(notification({}, full=True)),
     ],
 )
 async def test_malformed_notifications_do_not_interrupt_other_updates(
@@ -782,6 +949,50 @@ async def test_malformed_notifications_do_not_interrupt_other_updates(
     client._request.assert_awaited_once()
     assert "Skipping invalid" in caplog.text
     assert "private-invalid" not in caplog.text
+
+
+async def test_unselected_appliance_payloads_are_not_parsed(notification_stream, caplog):
+    client, stream, frames, _ = notification_stream
+    caplog.set_level(logging.DEBUG, logger="custom_components.subzero.api")
+    envelope = {"DeviceId": "other-fridge", "Payload": "[]"}
+    frames.append(
+        json.dumps(
+            {"type": 1, "target": "ConnectedApplianceMessage", "arguments": [json.dumps(envelope)]}
+        )
+        + api.SEPARATOR
+        + json.dumps(notification({"ref_door_ajar": True}))
+        + api.SEPARATOR
+    )
+    async with asyncio.timeout(5):
+        assert await anext(stream) == (
+            "test-fridge",
+            api.StateUpdate({"ref_door_ajar": True}, full=False),
+        )
+    assert "unselected appliance" in caplog.text
+    assert "Skipping invalid" not in caplog.text
+
+
+async def test_notification_counts_include_dropped_messages_but_not_heartbeats(notification_stream):
+    client, stream, frames, _ = notification_stream
+    frames.append(
+        api.SEPARATOR.join(
+            [
+                '{"type":6}',
+                "invalid-json",
+                json.dumps(notification({}, device="unselected")),
+                json.dumps({"type": 1, "target": "ConnectedApplianceMessage", "arguments": {}}),
+                json.dumps(notification({}, pload={"diagnostic_status": "0x0"})),
+                json.dumps(notification({"ref_door_ajar": True})),
+                "",
+            ]
+        )
+    )
+    async with asyncio.timeout(5):
+        assert (await anext(stream))[1].properties == {"ref_door_ajar": True}
+    assert client.notification_stats["received"] == 4
+    assert client.notification_stats["ignored"] == 2
+    assert client.notification_stats["invalid"] == 2
+    assert client.notification_stats["last_received"] is not None
 
 
 @pytest.mark.parametrize(

@@ -25,6 +25,7 @@ from .const import (
     DOMAIN,
     KITCHEN_TIMERS,
     MAX_RECONNECT_DELAY,
+    NETWORK_KEYS,
     RECONNECT_DELAY,
     STATE_KEYS,
 )
@@ -65,6 +66,11 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self.device_id = device_id
         self.device = dict(device)
         self.unrecognized_keys: set[str] = set()
+        self.push_stats: dict[str, int | str | None] = {
+            "snapshots": 0,
+            "updates": 0,
+            "last_received": None,
+        }
         self._command_lock = asyncio.Lock()
 
     @property
@@ -151,9 +157,21 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
     @callback
     def apply_update(self, update: StateUpdate) -> None:
         self.unrecognized_keys.update(update.properties.keys() - STATE_KEYS)
+        properties = {key: value for key, value in update.properties.items() if key in STATE_KEYS}
+        self.push_stats["snapshots" if update.full else "updates"] += 1
+        self.push_stats["last_received"] = dt_util.utcnow().isoformat()
+        _LOGGER.debug(
+            "%s %s: %s",
+            self.device["name"],
+            "snapshot" if update.full else "update",
+            {
+                key: value
+                for key, value in properties.items()
+                if key not in NETWORK_KEYS and not isinstance(value, dict | list)
+            },
+        )
         if not self.last_update_success and not update.full:
             return
-        properties = {key: value for key, value in update.properties.items() if key in STATE_KEYS}
         updated = properties if update.full else {**self.data, **properties}
         if (
             update.full
@@ -244,10 +262,12 @@ class SubZeroAccount:
                 return
             except ApiError as error:
                 self.set_error(error)
-                if time.monotonic() - started >= 120:
-                    backoff = RECONNECT_DELAY
-                delay = (
-                    max(backoff, error.retry_after) if isinstance(error, RateLimited) else backoff
-                )
-            await asyncio.sleep(delay + random.uniform(0, 5))
+                retry_after = error.retry_after if isinstance(error, RateLimited) else 0
+            except Exception as error:
+                _LOGGER.exception("Sub-Zero's notification stream failed unexpectedly")
+                self.set_error(error)
+                retry_after = 0
+            if time.monotonic() - started >= 120:
+                backoff = RECONNECT_DELAY
+            await asyncio.sleep(max(backoff, retry_after) + random.uniform(0, 5))
             backoff = min(backoff * 2, MAX_RECONNECT_DELAY)

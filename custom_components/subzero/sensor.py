@@ -20,7 +20,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import SubZeroConfigEntry
-from .const import COOK_MODES, OVEN_PREFIXES, WASH_CYCLES, WASH_STATUSES
+from .const import COOK_MODES, NETWORK_KEYS, OVEN_PREFIXES, WASH_CYCLES, WASH_STATUSES
 from .controls import appliance_datetime, is_finite_number
 from .entity import SubZeroEntity, async_setup_entities
 
@@ -242,7 +242,7 @@ class SubZeroSensor(SubZeroEntity, SensorEntity):
             return appliance_datetime(value, self.coordinator.data)
         if key in ENUM_VALUES:
             return ENUM_VALUES[key].get(value) if type(value) is int else None
-        if key in {"ipv4_addr", "device_wlan_id"}:
+        if key in NETWORK_KEYS:
             return value if isinstance(value, str) else None
         if key == "uptime" and isinstance(value, str):
             try:

@@ -1,6 +1,8 @@
 """Load real HA platforms and exercise entity discovery and push lifecycle."""
 
 import asyncio
+import json
+import logging
 from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -14,7 +16,14 @@ from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_system import US_CUSTOMARY_SYSTEM
 from pytest_homeassistant_custom_component.common import MockConfigEntry, async_fire_time_changed
 
-from custom_components.subzero.api import ApiError, Appliance, RateLimited, StateUpdate, token_state
+from custom_components.subzero.api import (
+    ApiError,
+    Appliance,
+    RateLimited,
+    StateUpdate,
+    parse_notification,
+    token_state,
+)
 from custom_components.subzero.auth import InvalidAuth
 from custom_components.subzero.const import DOMAIN
 from custom_components.subzero.coordinator import SubZeroAccount
@@ -56,6 +65,12 @@ async def loaded(hass, tokens, request):
     with patch("custom_components.subzero.SubZeroClient") as factory:
         client = factory.return_value
         client.tokens = token_state(tokens)
+        client.notification_stats = {
+            "received": 0,
+            "ignored": 0,
+            "invalid": 0,
+            "last_received": None,
+        }
         client.watched = []
         client.open_channel = AsyncMock()
         client.appliances = AsyncMock(
@@ -126,6 +141,50 @@ async def test_partial_push_merges_new_properties(hass, loaded):
     await hass.async_block_till_done()
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
     client.state.assert_awaited_once()
+
+
+async def test_debug_log_reports_push_updates_without_network_identifiers(hass, loaded, caplog):
+    _, _, updates, _, _ = loaded
+    caplog.set_level(logging.DEBUG, logger="custom_components.subzero.coordinator")
+    await updates.put(
+        StateUpdate(
+            {
+                "ref_door_ajar": True,
+                "ipv4_addr": "192.0.2.1",
+                "device_wlan_id": "001122334455",
+                "ap_ssid": "private-network",
+                "version": {"fw": "2.27", "nested": [[[]]]},
+            },
+            full=False,
+        )
+    )
+    await hass.async_block_till_done()
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
+    assert "Kitchen update: {'ref_door_ajar': True}" in caplog.text
+    for private in ("192.0.2.1", "001122334455", "private-network"):
+        assert private not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "pload",
+    [
+        {"ref_door_ajar": True},
+        {"resp": {"ref_door_ajar": True}},
+        {"appliance_model": "SIBLING-MODEL", "props": {"ref_door_ajar": True}},
+    ],
+)
+async def test_cloud_payload_shapes_update_doors_without_losing_other_state(hass, loaded, pload):
+    _, _, updates, _, _ = loaded
+    envelope = {
+        "DeviceId": "test-fridge",
+        "Payload": {"api.async_channel": {"type": 2, "pload": pload}},
+    }
+    event = {"type": 1, "target": "ConnectedApplianceMessage", "arguments": [json.dumps(envelope)]}
+    parsed = parse_notification(event, "test-owner", ["test-fridge"])
+    await updates.put(parsed)
+    await hass.async_block_till_done()
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
+    assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "38"
 
 
 async def test_full_snapshot_drops_missing_properties(hass, loaded):
@@ -371,7 +430,8 @@ async def test_stream_failure_marks_entities_unavailable(hass, loaded, error):
 
 
 @pytest.mark.parametrize(
-    ("error", "delay"), [(ApiError("Disconnected"), 30), (RateLimited(300), 300)]
+    ("error", "delay"),
+    [(ApiError("Disconnected"), 30), (RateLimited(300), 300), (RecursionError("nested"), 30)],
 )
 async def test_reconnect_waits_then_recovers_from_push_without_polling(
     hass, loaded, monkeypatch, error, delay
@@ -540,8 +600,12 @@ async def test_one_offline_appliance_does_not_stop_another(hass, loaded):
     assert not entry.runtime_data.coordinators["test-oven"].last_update_success
     await updates.put(("test-oven", ApiError("Channel unavailable")))
     await updates.put(StateUpdate({"ref_door_ajar": True}, full=False))
+    await updates.put(("test-oven", StateUpdate({"cav_light_on": True}, full=False)))
     await hass.async_block_till_done()
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
+    oven = entry.runtime_data.coordinators["test-oven"]
+    assert not oven.last_update_success
+    assert oven.push_stats["updates"] == 1
     await updates.put(
         (
             "test-oven",

@@ -24,6 +24,7 @@ from .auth import CLIENT_ID, SCOPES, TOKEN_URL, InvalidAuth
 from .const import (
     MAX_RECONNECT_DELAY,
     RECONNECT_DELAY,
+    STATE_KEYS,
     WRITABLE_BOOLEAN_KEYS,
     WRITABLE_INTEGER_KEYS,
 )
@@ -95,11 +96,13 @@ def token_state(tokens: dict, previous: dict | None = None) -> dict:
             raise ValueError
     except KeyError, ValueError, IndexError, TypeError:
         raise InvalidAuth("Sub-Zero returned incomplete login tokens.") from None
+    if user_id != user_id.lower():
+        _LOGGER.debug("Normalizing account ID casing for cloud notifications")
     return {
         "access_token": access,
         "refresh_token": refresh,
         "expires_at": expires_at,
-        "user_id": user_id,
+        "user_id": user_id.lower(),
     }
 
 
@@ -120,14 +123,22 @@ def _object(value) -> dict:
     if isinstance(value, str):
         try:
             value = json.loads(value)
-        except ValueError:
+        except ValueError, RecursionError:
             raise ApiError("Sub-Zero sent an invalid notification.") from None
     if not isinstance(value, dict):
         raise ApiError("Sub-Zero sent an invalid notification.")
     return value
 
 
-def parse_notification(event: dict, device_id: str, user_id: str) -> StateUpdate | None:
+def _rejected(response: dict) -> bool:
+    """Whether an appliance command result carries a non-zero status."""
+    return "status" in response and (type(response["status"]) is not int or response["status"] != 0)
+
+
+def parse_notification(
+    event: dict, user_id: str, device_ids: list[str]
+) -> tuple[str, StateUpdate | None] | None:
+    """Read state from response, property-change, or root payloads."""
     if event.get("type") != 1 or event.get("target") != "ConnectedApplianceMessage":
         return None
     arguments = event.get("arguments", [])
@@ -135,28 +146,51 @@ def parse_notification(event: dict, device_id: str, user_id: str) -> StateUpdate
         raise ApiError("Sub-Zero sent invalid notification arguments.")
     if len(arguments) == 2:
         if not isinstance(arguments[0], str) or arguments[0].lower() != user_id.lower():
+            _LOGGER.debug("Ignoring a notification addressed to another account")
             return None
         envelope = _object(arguments[1])
     elif len(arguments) == 1:
         envelope = _object(arguments[0])
     else:
         return None
-    if envelope.get("DeviceId") != device_id:
+    device_id = envelope.get("DeviceId")
+    if not isinstance(device_id, str) or not device_id:
+        raise ApiError("Sub-Zero sent a notification without an appliance.")
+    if device_id not in device_ids:
+        _LOGGER.debug("Ignoring a notification for an unselected appliance")
         return None
     payload = _object(envelope.get("Payload"))
     if "api.async_channel" not in payload:
         return None
     message = _object(payload["api.async_channel"])
     if message.get("device_id", device_id) != device_id:
+        _LOGGER.debug("Ignoring a notification with conflicting appliance IDs")
         return None
     properties = _object(message.get("pload"))
-    if message.get("type") == 1:
-        if not properties.get("appliance_model"):
-            raise ApiError("Sub-Zero sent an incomplete appliance snapshot.")
-        return StateUpdate(properties, full=True)
-    if message.get("type") == 2:
-        return StateUpdate(_object(properties.get("props")), full=False)
-    return None
+    message_type = message.get("type")
+    _LOGGER.debug(
+        "Appliance %d notification: type=%s, payload keys=%s",
+        device_ids.index(device_id) + 1,
+        message_type if isinstance(message_type, int) else "unknown",
+        sorted(properties),
+    )
+    wrapper = "root"
+    for key in ("resp", "props"):
+        if properties.get(key) is not None:
+            properties = _object(properties[key])
+            wrapper = key
+            break
+    _LOGGER.debug(
+        "Appliance %d notification: wrapper=%s, state keys=%s",
+        device_ids.index(device_id) + 1,
+        wrapper,
+        sorted(properties),
+    )
+    if not properties or (wrapper == "root" and properties.keys().isdisjoint(STATE_KEYS)):
+        return device_id, None
+    model = properties.get("appliance_model")
+    full = wrapper != "props" and isinstance(model, str) and bool(model)
+    return device_id, StateUpdate(properties, full=full)
 
 
 class SubZeroClient:
@@ -177,6 +211,12 @@ class SubZeroClient:
         self._retry_at = 0.0
         self._state_commands: dict[str, str] = {}
         self.push_connected = False
+        self.notification_stats: dict[str, int | str | None] = {
+            "received": 0,
+            "ignored": 0,
+            "invalid": 0,
+            "last_received": None,
+        }
 
     async def _json(
         self,
@@ -276,6 +316,9 @@ class SubZeroClient:
         data = await self._request("GET", "/consumerapp/user/devices")
         if not isinstance(data.get("devices"), list):
             raise ApiError("Sub-Zero did not return the appliance list.")
+        account_id = data.get("mySubZeroUniqueUserId")
+        if isinstance(account_id, str) and account_id.lower() != self.tokens["user_id"].lower():
+            _LOGGER.debug("The appliance list names a different account id than the sign-in")
         appliances = []
         for device in data["devices"]:
             if (
@@ -314,7 +357,7 @@ class SubZeroClient:
         if not data and command == "get":
             command = "get_async"
             data = await self._command(device_id, command)
-        if "status" in data and (type(data["status"]) is not int or data["status"] != 0):
+        if _rejected(data):
             raise ApiError("The appliance rejected the status request.")
         data = _object(data.get("resp", data))
         if not isinstance(data.get("appliance_model"), str):
@@ -323,7 +366,9 @@ class SubZeroClient:
         return data
 
     async def open_channel(self, device_id: str) -> None:
-        await self._command(device_id, "open_cloud_async")
+        response = await self._command(device_id, "open_cloud_async")
+        if _rejected(response) or _rejected(_object(response.get("resp", {}))):
+            raise ApiError("The appliance rejected opening its update channel.")
 
     async def set_property(self, device_id: str, key: str, value: bool | int) -> None:
         if not (
@@ -334,9 +379,7 @@ class SubZeroClient:
         ):
             raise ValueError("Unsupported setting or value type")
         response = await self._command(device_id, "set", {key: value})
-        if "status" in response and (
-            type(response["status"]) is not int or response["status"] != 0
-        ):
+        if _rejected(response):
             raise ApiError("Sub-Zero rejected the setting.")
         response = _object(response.get("resp", response))
         if response and (type(response.get("status")) is not int or response["status"] != 0):
@@ -404,9 +447,10 @@ class SubZeroClient:
                 async def open_channels() -> None:
                     backoff = RECONNECT_DELAY
                     while pending_channels:
-                        for device_id in device_ids:
+                        for index, device_id in enumerate(device_ids, 1):
                             if device_id not in pending_channels:
                                 continue
+                            _LOGGER.debug("Opening update channel for appliance %d", index)
                             try:
                                 await self.open_channel(device_id)
                             except RateLimited:
@@ -415,6 +459,7 @@ class SubZeroClient:
                                 if device_id in pending_channels:
                                     errors.append((device_id, error))
                             else:
+                                _LOGGER.debug("Update channel accepted for appliance %d", index)
                                 pending_channels.discard(device_id)
                         if pending_channels:
                             await asyncio.sleep(backoff + random.uniform(0, 5))
@@ -436,25 +481,33 @@ class SubZeroClient:
                             try:
                                 event = _object(frame)
                             except ApiError as error:
+                                self.notification_stats["invalid"] += 1
                                 _LOGGER.debug("Skipping invalid notification frame: %s", error)
                                 continue
                             if event.get("type") == 7:
                                 raise ApiError("Sub-Zero closed the notification connection.")
-                            for device_id in device_ids:
-                                try:
-                                    update = parse_notification(
-                                        event, device_id, self.tokens["user_id"]
-                                    )
-                                except ApiError as error:
-                                    _LOGGER.debug(
-                                        "Skipping invalid appliance notification: %s", error
-                                    )
-                                    break
-                                if update:
-                                    if update.full:
-                                        pending_channels.discard(device_id)
-                                    yield device_id, update
-                                    break
+                            if (
+                                event.get("type") != 1
+                                or event.get("target") != "ConnectedApplianceMessage"
+                            ):
+                                continue
+                            self.notification_stats["received"] += 1
+                            self.notification_stats["last_received"] = datetime.now(UTC).isoformat()
+                            try:
+                                parsed = parse_notification(
+                                    event, self.tokens["user_id"], device_ids
+                                )
+                            except ApiError as error:
+                                self.notification_stats["invalid"] += 1
+                                _LOGGER.debug("Skipping invalid appliance notification: %s", error)
+                                continue
+                            if parsed is None or parsed[1] is None:
+                                self.notification_stats["ignored"] += 1
+                                continue
+                            device_id, update = parsed
+                            if update.full:
+                                pending_channels.discard(device_id)
+                            yield device_id, update
                         now = time.monotonic()
                         if now >= renew_at:
                             return

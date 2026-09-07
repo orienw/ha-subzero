@@ -5,7 +5,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceEntry
 
 from . import SubZeroConfigEntry
-from .const import DOMAIN
+from .const import DOMAIN, NETWORK_KEYS
 from .coordinator import SubZeroCoordinator
 
 
@@ -13,8 +13,9 @@ def appliance_diagnostics(coordinator: SubZeroCoordinator) -> dict:
     return {
         "available": coordinator.last_update_success,
         "temperature_unit": coordinator.device.get("temperature_unit"),
+        "push": dict(coordinator.push_stats),
         "unrecognized_state_keys": sorted(coordinator.unrecognized_keys),
-        "state": async_redact_data(coordinator.data, {"ipv4_addr", "device_wlan_id"}),
+        "state": async_redact_data(coordinator.data, NETWORK_KEYS),
     }
 
 
@@ -24,6 +25,7 @@ async def async_get_config_entry_diagnostics(
     return {
         "connection": "cloud_push",
         "push_connected": entry.runtime_data.client.push_connected,
+        "notifications": dict(entry.runtime_data.client.notification_stats),
         "appliances": [
             appliance_diagnostics(coordinator)
             for coordinator in entry.runtime_data.coordinators.values()
