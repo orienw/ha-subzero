@@ -49,8 +49,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: SubZeroConfigEntry) -> b
         update_device(coordinator)
         entry.async_on_unload(coordinator.async_add_listener(partial(update_device, coordinator)))
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    if account.coordinators:
-        entry.async_create_background_task(hass, account.listen(), "Sub-Zero notifications")
     identifiers = {(DOMAIN, device_id) for device_id in account.coordinators}
     for device in dr.async_entries_for_config_entry(registry, entry.entry_id):
         if not device.identifiers.intersection(identifiers):

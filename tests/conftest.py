@@ -25,3 +25,8 @@ def make_tokens(user_id="test-owner", *, expires_in=3600, refresh_token="test-re
 @pytest.fixture
 def tokens():
     return make_tokens()
+
+
+@pytest.fixture(autouse=True)
+def fast_initial_state_timeout(monkeypatch):
+    monkeypatch.setattr("custom_components.subzero.coordinator.INITIAL_STATE_TIMEOUT", 0)

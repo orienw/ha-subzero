@@ -32,6 +32,7 @@ from .const import (
 from .controls import control_matches, is_dishwasher, is_oven, validate_control_properties
 
 _LOGGER = logging.getLogger(__name__)
+INITIAL_STATE_TIMEOUT = 16
 
 
 def selected_devices(entry: ConfigEntry) -> dict[str, dict]:
@@ -62,6 +63,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             name=DOMAIN,
         )
         self.client = client
+        self.data = {}
         self.entry = entry
         self.device_id = device_id
         self.device = dict(device)
@@ -72,7 +74,10 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             "last_received": None,
         }
         self._command_lock = asyncio.Lock()
-        self._recovery_updates: dict | None = None
+        self._state_lock = asyncio.Lock()
+        self._read_updates: dict | None = None
+        self._read_error: Exception | None = None
+        self._channel_error: ApiError | None = None
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -144,22 +149,41 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             remove_listener()
 
     async def _async_update_data(self) -> dict:
-        try:
-            data = await self.client.state(self.device_id)
-        except InvalidAuth as error:
-            raise ConfigEntryAuthFailed(str(error)) from error
-        except RateLimited as error:
-            raise UpdateFailed(str(error), retry_after=error.retry_after) from error
-        except ApiError as error:
-            raise UpdateFailed(str(error)) from error
-        self.unrecognized_keys.update(data.keys() - STATE_KEYS)
-        return {key: value for key, value in data.items() if key in STATE_KEYS}
+        async with self._state_lock:
+            self._read_updates = {}
+            self._read_error = None
+            try:
+                try:
+                    data = await self.client.state(self.device_id)
+                except ApiError:
+                    model = self._read_updates.get("appliance_model")
+                    if not isinstance(model, str) or not model:
+                        raise
+                    data = self.data
+                if error := self._read_error or self._channel_error:
+                    raise error
+                self.unrecognized_keys.update(data.keys() - STATE_KEYS)
+                model = self._read_updates.get("appliance_model")
+                if isinstance(model, str) and model and model != data.get("appliance_model"):
+                    data = {}
+                return {
+                    **{key: value for key, value in data.items() if key in STATE_KEYS},
+                    **self._read_updates,
+                }
+            except InvalidAuth as error:
+                raise ConfigEntryAuthFailed(str(error)) from error
+            except RateLimited as error:
+                raise UpdateFailed(str(error), retry_after=error.retry_after) from error
+            except ApiError as error:
+                raise UpdateFailed(str(error)) from error
+            finally:
+                self._read_updates = None
+                self._read_error = None
 
     async def async_recover(self) -> None:
         """Restore unavailable state while the appliance is reporting again."""
         backoff = RECONNECT_DELAY
         while not self.last_update_success:
-            self._recovery_updates = {}
             _LOGGER.debug("Refreshing %s to recover appliance state", self.device["name"])
             try:
                 data = await self._async_update_data()
@@ -176,10 +200,8 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 retry_after = (error.retry_after or 0) if isinstance(error, UpdateFailed) else 0
             else:
                 if not self.last_update_success:
-                    self.async_set_updated_data({**data, **self._recovery_updates})
+                    self.async_set_updated_data(data)
                 return
-            finally:
-                self._recovery_updates = None
             await asyncio.sleep(max(backoff, retry_after) + random.uniform(0, 5))
             backoff = min(backoff * 2, MAX_RECONNECT_DELAY)
 
@@ -187,6 +209,15 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
     def apply_update(self, update: StateUpdate) -> None:
         self.unrecognized_keys.update(update.properties.keys() - STATE_KEYS)
         properties = {key: value for key, value in update.properties.items() if key in STATE_KEYS}
+        if properties:
+            self._read_error = None
+            self._channel_error = None
+            if self._read_updates is not None:
+                if update.full and properties["appliance_model"] != self.data.get(
+                    "appliance_model"
+                ):
+                    self._read_updates.clear()
+                self._read_updates.update(properties)
         self.push_stats["snapshots" if update.full else "updates"] += 1
         self.push_stats["last_received"] = dt_util.utcnow().isoformat()
         _LOGGER.debug(
@@ -200,8 +231,6 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             },
         )
         if not self.last_update_success and not update.full:
-            if self._recovery_updates is not None:
-                self._recovery_updates.update(properties)
             return
         replace = update.full and (
             not self.last_update_success
@@ -228,6 +257,8 @@ class SubZeroAccount:
             device_id: SubZeroCoordinator(hass, entry, client, device_id, device)
             for device_id, device in selected_devices(entry).items()
         }
+        self._initial_states = {device_id: asyncio.Event() for device_id in self.coordinators}
+        self._recoveries: dict[str, asyncio.Task] = {}
 
     async def async_setup(self) -> None:
         if not self.coordinators:
@@ -259,15 +290,35 @@ class SubZeroAccount:
                     self.hass.config_entries.async_update_entry(
                         self.entry, data={**self.entry.data, "devices": devices}
                     )
-        errors = []
-        for coordinator in self.coordinators.values():
+        self.entry.async_create_background_task(self.hass, self.listen(), "Sub-Zero notifications")
+        try:
             try:
-                await coordinator.async_config_entry_first_refresh()
-            except ConfigEntryNotReady as error:
-                coordinator.data = {}
-                errors.append(error)
-        if errors and len(errors) == len(self.coordinators):
-            raise errors[0]
+                async with asyncio.timeout(INITIAL_STATE_TIMEOUT):
+                    await asyncio.gather(*(ready.wait() for ready in self._initial_states.values()))
+            except TimeoutError:
+                pass
+            errors = []
+            for coordinator in self.coordinators.values():
+                if coordinator.last_update_success and coordinator.data.get("appliance_model"):
+                    continue
+                if isinstance(coordinator.last_exception, InvalidAuth):
+                    raise ConfigEntryAuthFailed(str(coordinator.last_exception))
+                try:
+                    await coordinator.async_config_entry_first_refresh()
+                except ConfigEntryNotReady as error:
+                    coordinator.data = {}
+                    errors.append(error)
+            if errors and len(errors) == len(self.coordinators):
+                raise errors[0]
+        finally:
+            self._initial_states.clear()
+        for coordinator in self.coordinators.values():
+            if (
+                not coordinator.last_update_success
+                and coordinator._channel_error is None
+                and self.client.push_connected
+            ):
+                self._start_recovery(coordinator)
         if metadata_error is not None:
             _LOGGER.warning(
                 "Could not refresh appliance units; using cached units where available: %s",
@@ -277,30 +328,49 @@ class SubZeroAccount:
     @callback
     def set_error(self, error: Exception) -> None:
         for coordinator in self.coordinators.values():
+            coordinator._read_error = error
             coordinator.async_set_update_error(error)
+        for ready in self._initial_states.values():
+            ready.set()
+
+    @callback
+    def _start_recovery(self, coordinator: SubZeroCoordinator) -> None:
+        recovery = self._recoveries.get(coordinator.device_id)
+        if recovery is None or recovery.done():
+            self._recoveries[coordinator.device_id] = self.entry.async_create_background_task(
+                self.hass, coordinator.async_recover(), "Sub-Zero state recovery"
+            )
 
     async def listen(self) -> None:
         backoff = RECONNECT_DELAY
         while True:
             started = time.monotonic()
-            recoveries: dict[str, asyncio.Task] = {}
+            recoveries = self._recoveries
+            canceled: set[asyncio.Task] = set()
             try:
                 async for device_id, update in self.client.watch(list(self.coordinators)):
                     coordinator = self.coordinators[device_id]
-                    recovery = None
                     if isinstance(update, ApiError) or (
                         isinstance(update, StateUpdate) and update.full
                     ):
                         if recovery := recoveries.pop(device_id, None):
+                            canceled.add(recovery)
+                            recovery.add_done_callback(canceled.discard)
                             recovery.cancel()
+                        if ready := self._initial_states.get(device_id):
+                            ready.set()
                     if isinstance(update, ApiError):
+                        coordinator._read_error = update
+                        coordinator._channel_error = update
                         coordinator.async_set_update_error(update)
-                    elif not isinstance(update, ChannelOpened):
+                    elif isinstance(update, ChannelOpened):
+                        coordinator._read_error = None
+                        coordinator._channel_error = None
+                    else:
                         coordinator.apply_update(update)
-                    if recovery:
-                        await asyncio.gather(recovery, return_exceptions=True)
                     if (
                         not coordinator.last_update_success
+                        and device_id not in self._initial_states
                         and not isinstance(coordinator.last_exception, ConfigEntryAuthFailed)
                         and (
                             isinstance(update, ChannelOpened)
@@ -308,11 +378,7 @@ class SubZeroAccount:
                             and not update.properties.keys().isdisjoint(STATE_KEYS)
                         )
                     ):
-                        recovery = recoveries.get(device_id)
-                        if recovery is None or recovery.done():
-                            recoveries[device_id] = self.entry.async_create_background_task(
-                                self.hass, coordinator.async_recover(), "Sub-Zero state recovery"
-                            )
+                        self._start_recovery(coordinator)
                 raise ApiError("Sub-Zero's notification stream ended.")
             except InvalidAuth as error:
                 self.set_error(error)
@@ -326,10 +392,12 @@ class SubZeroAccount:
                 self.set_error(error)
                 retry_after = 0
             finally:
-                for recovery in recoveries.values():
+                pending = {*recoveries.values(), *canceled}
+                for recovery in pending:
                     recovery.cancel()
-                if recoveries:
-                    await asyncio.gather(*recoveries.values(), return_exceptions=True)
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
+                recoveries.clear()
             if time.monotonic() - started >= 120:
                 backoff = RECONNECT_DELAY
             await asyncio.sleep(max(backoff, retry_after) + random.uniform(0, 5))
