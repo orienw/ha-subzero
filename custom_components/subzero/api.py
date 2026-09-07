@@ -112,6 +112,7 @@ def token_state(tokens: dict, previous: dict | None = None) -> dict:
         "refresh_token": refresh,
         "expires_at": expires_at,
         "user_id": user_id.lower(),
+        "api_user_id": user_id,
     }
     if identity is not None:
         state["id_token"] = identity
@@ -135,7 +136,13 @@ def _object(value) -> dict:
     layers = 0
     while isinstance(value, str):
         try:
-            value = json.loads(value)
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError:
+                decoded = json.loads(f'"{value}"')
+                if decoded == value:
+                    raise ValueError
+                value = decoded
         except ValueError, RecursionError:
             raise ApiError("Sub-Zero sent an invalid notification.") from None
         layers += 1
@@ -280,8 +287,8 @@ class SubZeroClient:
                     if response.status < 300 and body in ("", "OK", '"OK"'):
                         return {}
                     try:
-                        result = json.loads(body)
-                    except ValueError:
+                        result = _object(body)
+                    except ApiError:
                         result = None
                     if (
                         response.status == 500
@@ -322,13 +329,15 @@ class SubZeroClient:
             if self.on_tokens:
                 await self.on_tokens(dict(updated))
 
-    async def _request(self, method: str, path: str, **kwargs) -> dict:
+    async def _request(
+        self, method: str, path: str, *, user_id: str | None = None, **kwargs
+    ) -> dict:
         await self.refresh()
         token = self._api_token
         headers = {
             "Authorization": "Bearer " + token,
             "Ocp-Apim-Subscription-Key": self.subscription_key,
-            "Userid": self.tokens["user_id"],
+            "Userid": user_id or self.tokens["api_user_id"],
             "Accept": "application/json",
         }
         try:
@@ -336,7 +345,7 @@ class SubZeroClient:
         except InvalidAuth:
             await self.refresh(rejected_token=token)
         headers["Authorization"] = "Bearer " + self._api_token
-        headers["Userid"] = self.tokens["user_id"]
+        headers["Userid"] = user_id or self.tokens["api_user_id"]
         return await self._json(method, API_BASE + path, headers=headers, **kwargs)
 
     async def appliances(self) -> list[Appliance]:
@@ -435,7 +444,7 @@ class SubZeroClient:
         self, device_ids: list[str]
     ) -> AsyncIterator[tuple[str, StateUpdate | ApiError | ChannelOpened]]:
         info = await self._request(
-            "POST", "/signal-r/negotiateUser", params={"userId": self.tokens["user_id"]}
+            "POST", "/signal-r/negotiateUser", user_id=self.tokens["user_id"]
         )
         try:
             endpoint = URL(info["url"])

@@ -441,7 +441,7 @@ async def test_single_signalr_connection_routes_multiple_appliances(
         assert request.headers.getall("User-Agent") == ["Dart/3.11 (dart:io)"]
         assert request.headers["Accept-Encoding"] == "gzip"
         assert request.headers["Ocp-Apim-Subscription-Key"] == "test-key"
-        assert request.query["userId"] == "test-owner"
+        assert not request.query
         return web.json_response(
             {
                 "url": origin + "/client/?hub=connectedappliances",
@@ -906,7 +906,7 @@ async def test_live_signalr_socket_is_renewed_before_token_expiry(
 
     async def negotiate_user(request):
         assert request.headers["Userid"] == "test-owner"
-        assert request.query["userId"] == "test-owner"
+        assert not request.query
         return web.json_response({"url": origin + "/client/", "accessToken": "short-lived-token"})
 
     async def negotiate_transport(request):
@@ -925,6 +925,7 @@ async def test_live_signalr_socket_is_renewed_before_token_expiry(
         return socket
 
     async def command(request):
+        assert request.headers["Userid"] == user_id
         command = (await request.json())["pload"]["cmd"]
         commands.append(command)
         await sockets[-1].send_str(
@@ -1066,12 +1067,12 @@ async def test_partial_push_confirms_channel_despite_a_late_open_error(notificat
         "[]",
         json.dumps({"type": 1, "target": "ConnectedApplianceMessage", "arguments": {}}),
         json.dumps({"type": 1, "target": "ConnectedApplianceMessage", "arguments": [None]}),
-        *(
-            json.dumps({"type": 1, "target": "ConnectedApplianceMessage", "arguments": [argument]})
-            for argument in (
-                json.dumps(json.dumps([])),
-                json.dumps(notification({"ref_door_ajar": True})["arguments"][0])[1:-1],
-            )
+        json.dumps(
+            {
+                "type": 1,
+                "target": "ConnectedApplianceMessage",
+                "arguments": [json.dumps(json.dumps([]))],
+            }
         ),
         *(
             json.dumps(
@@ -1120,9 +1121,9 @@ async def test_malformed_notifications_do_not_interrupt_other_updates(
     assert "private-invalid" not in caplog.text
 
 
-@pytest.mark.parametrize("layers", [2, 3])
+@pytest.mark.parametrize(("layers", "quoted"), [(2, True), (3, True), (2, False)])
 async def test_nested_json_notifications_preserve_escaped_values(
-    notification_stream, caplog, layers
+    notification_stream, caplog, layers, quoted
 ):
     client, stream, frames, sockets = notification_stream
     caplog.set_level(logging.DEBUG, logger="custom_components.subzero.api")
@@ -1130,6 +1131,8 @@ async def test_nested_json_notifications_preserve_escaped_values(
     event = notification(properties)
     for _ in range(layers - 1):
         event["arguments"][0] = json.dumps(event["arguments"][0])
+    if not quoted:
+        event["arguments"][0] = event["arguments"][0][1:-1]
     frames.append(
         json.dumps(event)
         + api.SEPARATOR
@@ -1150,6 +1153,22 @@ async def test_nested_json_notifications_preserve_escaped_values(
     assert f"Decoded {layers} JSON string layers" in caplog.text
     for private in ("Private", "fridge", "雪"):
         assert private not in caplog.text
+
+
+@pytest.mark.parametrize("quoted", [False, True])
+async def test_escaped_status_responses_preserve_values(control_server, tokens, quoted):
+    state = {"appliance_model": 'Model "A" \\ 雪', "ref_door_ajar": True}
+    body = json.dumps(json.dumps({"status": 0, "resp": state}))
+    control_server["response"] = body if quoted else body[1:-1]
+    async with aiohttp.ClientSession() as session:
+        client = api.SubZeroClient(session, "test-key", tokens)
+        assert await client.state("test-fridge") == state
+
+
+@pytest.mark.parametrize("body", ["{bad}", '{"broken":}', r'{"broken":"\q"}', '"unfinished'])
+def test_invalid_json_is_still_rejected(body):
+    with pytest.raises(api.ApiError, match="invalid notification"):
+        api._object(body)
 
 
 async def test_unselected_appliance_payloads_are_not_parsed(notification_stream, caplog):
