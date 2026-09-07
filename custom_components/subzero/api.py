@@ -120,13 +120,17 @@ def retry_delay(value: str | None) -> float:
 
 
 def _object(value) -> dict:
-    if isinstance(value, str):
+    layers = 0
+    while isinstance(value, str):
         try:
             value = json.loads(value)
         except ValueError, RecursionError:
             raise ApiError("Sub-Zero sent an invalid notification.") from None
+        layers += 1
     if not isinstance(value, dict):
         raise ApiError("Sub-Zero sent an invalid notification.")
+    if layers > 1:
+        _LOGGER.debug("Decoded %d JSON string layers", layers)
     return value
 
 

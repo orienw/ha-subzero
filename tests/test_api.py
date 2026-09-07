@@ -905,6 +905,13 @@ async def notification_stream(hass, aiohttp_server, monkeypatch, socket_enabled,
         json.dumps({"type": 1, "target": "ConnectedApplianceMessage", "arguments": {}}),
         json.dumps({"type": 1, "target": "ConnectedApplianceMessage", "arguments": [None]}),
         *(
+            json.dumps({"type": 1, "target": "ConnectedApplianceMessage", "arguments": [argument]})
+            for argument in (
+                json.dumps(json.dumps([])),
+                json.dumps(notification({"ref_door_ajar": True})["arguments"][0])[1:-1],
+            )
+        ),
+        *(
             json.dumps(
                 {
                     "type": 1,
@@ -949,6 +956,38 @@ async def test_malformed_notifications_do_not_interrupt_other_updates(
     client._request.assert_awaited_once()
     assert "Skipping invalid" in caplog.text
     assert "private-invalid" not in caplog.text
+
+
+@pytest.mark.parametrize("layers", [2, 3])
+async def test_nested_json_notifications_preserve_escaped_values(
+    notification_stream, caplog, layers
+):
+    client, stream, frames, sockets = notification_stream
+    caplog.set_level(logging.DEBUG, logger="custom_components.subzero.api")
+    properties = {"ref_door_ajar": True, "appliance_model": 'Private "fridge" \\ 雪'}
+    event = notification(properties)
+    for _ in range(layers - 1):
+        event["arguments"][0] = json.dumps(event["arguments"][0])
+    frames.append(
+        json.dumps(event)
+        + api.SEPARATOR
+        + json.dumps(notification({"ref_door_ajar": False}))
+        + api.SEPARATOR
+    )
+    async with asyncio.timeout(5):
+        assert await anext(stream) == ("test-fridge", api.StateUpdate(properties, full=False))
+        assert await anext(stream) == (
+            "test-fridge",
+            api.StateUpdate({"ref_door_ajar": False}, full=False),
+        )
+    assert client.push_connected
+    assert len(sockets) == 1 and not sockets[0].closed
+    assert client.notification_stats["received"] == 2
+    assert client.notification_stats["invalid"] == 0
+    assert client.notification_stats["ignored"] == 0
+    assert f"Decoded {layers} JSON string layers" in caplog.text
+    for private in ("Private", "fridge", "雪"):
+        assert private not in caplog.text
 
 
 async def test_unselected_appliance_payloads_are_not_parsed(notification_stream, caplog):

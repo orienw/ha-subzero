@@ -15,7 +15,13 @@ from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_system import METRIC_SYSTEM, US_CUSTOMARY_SYSTEM
 from pytest_homeassistant_custom_component.common import MockConfigEntry, async_capture_events
 
-from custom_components.subzero.api import ApiError, Appliance, StateUpdate, token_state
+from custom_components.subzero.api import (
+    ApiError,
+    Appliance,
+    StateUpdate,
+    parse_notification,
+    token_state,
+)
 from custom_components.subzero.const import DOMAIN
 from custom_components.subzero.diagnostics import (
     async_get_config_entry_diagnostics,
@@ -594,6 +600,28 @@ async def test_stream_error_only_affects_its_appliance(hass, appliances):
     assert hass.states.get("climate.oven_oven").state == "unavailable"
     assert hass.states.get("switch.oven_lower_oven_light").state == "unavailable"
     assert hass.states.get("switch.dishwasher_heated_dry").state == "off"
+
+
+async def test_nested_json_notifications_update_the_door_entity(hass, appliances):
+    for opened in (False, True, False):
+        envelope = {
+            "DeviceId": "fridge",
+            "Payload": {
+                "api.async_channel": {"type": 2, "pload": {"props": {"ref_door_ajar": opened}}}
+            },
+        }
+        event = {
+            "type": 1,
+            "target": "ConnectedApplianceMessage",
+            "arguments": [json.dumps(json.dumps(envelope))],
+        }
+        await appliances.updates.put(parse_notification(event, "test-owner", ["fridge"]))
+        await hass.async_block_till_done()
+        assert hass.states.get("binary_sensor.fridge_refrigerator_door").state == (
+            "on" if opened else "off"
+        )
+    assert appliances.client.state.await_count == 3
+    appliances.client.set_property.assert_not_called()
 
 
 async def test_switch_states_update_without_duplicate_binary_sensors(hass, appliances):
