@@ -149,9 +149,8 @@ def _object(value) -> dict:
 def _rejected(response: dict) -> bool:
     """Whether an appliance command result carries a non-zero status."""
     for depth in range(3):
-        if "status" in response and (
-            type(response["status"]) is not int or response["status"] != 0
-        ):
+        status = response.get("status")
+        if status is not None and (type(status) is not int or status != 0):
             return True
         if depth == 2 or response.get("pload") is None:
             break
@@ -418,7 +417,7 @@ class SubZeroClient:
             if "status" in response or response.get("pload") is None:
                 break
             response = _object(response["pload"])
-        if response and (type(response.get("status")) is not int or response["status"] != 0):
+        if response and "status" not in response:
             raise ApiError("Sub-Zero rejected the setting.")
 
     async def watch(

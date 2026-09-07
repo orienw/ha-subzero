@@ -775,7 +775,9 @@ async def test_cloud_controls_use_the_existing_direct_method(control_server, tok
         (200, '"OK"'),
         (200, ""),
         (200, {"status": 0}),
+        (200, {"status": None}),
         (200, {"resp": {"status": 0}}),
+        (200, {"resp": {"status": None}}),
         (200, {"status": 0, "resp": {}}),
         (201, {"status": 0}),
         (202, "OK"),
@@ -840,11 +842,11 @@ async def test_channel_open_accepts_successful_http_statuses(control_server, tok
 
 @pytest.mark.parametrize("command", ["state", "open_channel", "set_property"])
 @pytest.mark.parametrize("layers", [1, 2])
-@pytest.mark.parametrize("rejected", [False, True])
+@pytest.mark.parametrize("status", [0, None, 1])
 async def test_commands_handle_nested_appliance_responses(
-    control_server, tokens, command, layers, rejected
+    control_server, tokens, command, layers, status
 ):
-    response = {"status": 1 if rejected else 0}
+    response = {"status": status}
     for _ in range(layers):
         response = {"pload": response}
     if command == "state":
@@ -855,7 +857,7 @@ async def test_commands_handle_nested_appliance_responses(
         args = (
             ("test-fridge", "ice_maker_on", True) if command == "set_property" else ("test-fridge",)
         )
-        if rejected:
+        if status == 1:
             with pytest.raises(api.ApiError, match="rejected"):
                 await getattr(client, command)(*args)
         else:
