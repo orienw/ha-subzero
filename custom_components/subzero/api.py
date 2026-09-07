@@ -80,7 +80,11 @@ def token_state(tokens: dict, previous: dict | None = None) -> dict:
         access = tokens["access_token"]
         if not isinstance(access, str) or not access:
             raise ValueError
-        claims = json.loads(base64.urlsafe_b64decode(access.split(".")[1] + "=="))
+        identity = tokens.get("id_token")
+        if identity is not None and (not isinstance(identity, str) or not identity):
+            raise ValueError
+        bearer = identity or access
+        claims = json.loads(base64.urlsafe_b64decode(bearer.split(".")[1] + "=="))
         if not isinstance(claims, dict):
             raise ValueError
         user_id = claims.get("mergedId") or claims["sub"]
@@ -98,12 +102,15 @@ def token_state(tokens: dict, previous: dict | None = None) -> dict:
         raise InvalidAuth("Sub-Zero returned incomplete login tokens.") from None
     if user_id != user_id.lower():
         _LOGGER.debug("Normalizing account ID casing for cloud notifications")
-    return {
+    state = {
         "access_token": access,
         "refresh_token": refresh,
         "expires_at": expires_at,
         "user_id": user_id.lower(),
     }
+    if identity is not None:
+        state["id_token"] = identity
+    return state
 
 
 def retry_delay(value: str | None) -> float:
@@ -210,6 +217,9 @@ class SubZeroClient:
         self.session = session
         self.subscription_key = subscription_key
         self.tokens = token_state(tokens)
+        if "id_token" not in self.tokens:
+            # Refresh existing logins once to obtain an ID token.
+            self.tokens["expires_at"] = 0
         self.on_tokens = on_tokens
         self._refresh_lock = asyncio.Lock()
         self._retry_at = 0.0
@@ -221,6 +231,10 @@ class SubZeroClient:
             "invalid": 0,
             "last_received": None,
         }
+
+    @property
+    def _api_token(self) -> str:
+        return self.tokens.get("id_token", self.tokens["access_token"])
 
     async def _json(
         self,
@@ -276,10 +290,7 @@ class SubZeroClient:
 
     async def refresh(self, *, rejected_token: str | None = None) -> None:
         async with self._refresh_lock:
-            if (
-                self.tokens["expires_at"] > time.time() + 120
-                and self.tokens["access_token"] != rejected_token
-            ):
+            if self.tokens["expires_at"] > time.time() + 300 and self._api_token != rejected_token:
                 return
             data = await self._json(
                 "POST",
@@ -301,9 +312,9 @@ class SubZeroClient:
 
     async def _request(self, method: str, path: str, **kwargs) -> dict:
         await self.refresh()
-        access_token = self.tokens["access_token"]
+        token = self._api_token
         headers = {
-            "Authorization": "Bearer " + access_token,
+            "Authorization": "Bearer " + token,
             "Ocp-Apim-Subscription-Key": self.subscription_key,
             "Userid": self.tokens["user_id"],
             "Accept": "application/json",
@@ -311,8 +322,8 @@ class SubZeroClient:
         try:
             return await self._json(method, API_BASE + path, headers=headers, **kwargs)
         except InvalidAuth:
-            await self.refresh(rejected_token=access_token)
-        headers["Authorization"] = "Bearer " + self.tokens["access_token"]
+            await self.refresh(rejected_token=token)
+        headers["Authorization"] = "Bearer " + self._api_token
         headers["Userid"] = self.tokens["user_id"]
         return await self._json(method, API_BASE + path, headers=headers, **kwargs)
 

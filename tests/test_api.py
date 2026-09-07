@@ -218,9 +218,10 @@ async def api_server(aiohttp_server, monkeypatch, socket_enabled):
         behavior["refreshes"] += 1
         data = await request.post()
         assert data["grant_type"] == "refresh_token"
-        return web.json_response(
-            make_tokens(behavior["user_id"], refresh_token="rotated-refresh", expires_in=7200)
-        )
+        renewed = make_tokens(behavior["user_id"], refresh_token="rotated-refresh", expires_in=7200)
+        if behavior.get("omit_id_token"):
+            renewed.pop("id_token")
+        return web.json_response(renewed)
 
     async def devices(request):
         assert request.headers.getall("User-Agent") == ["Dart/3.11 (dart:io)"]
@@ -269,6 +270,47 @@ async def test_concurrent_refreshes_rotate_the_token_once(api_server):
     assert client.tokens["refresh_token"] == "rotated-refresh"
 
 
+async def test_api_uses_id_token_and_its_account_claims(api_server, tokens):
+    tokens["access_token"] = make_tokens("different-access-identity")["access_token"]
+    async with aiohttp.ClientSession() as session:
+        client = api.SubZeroClient(session, "test-key", tokens)
+        assert await client.appliances()
+    assert api_server["refreshes"] == 0
+    assert api_server["requests"] == ["Bearer " + tokens["id_token"]]
+    assert client.tokens["id_token"] == tokens["id_token"]
+
+
+@pytest.mark.parametrize("omit_id_token", [False, True])
+async def test_saved_access_only_login_refreshes_once(api_server, tokens, omit_id_token):
+    tokens.pop("id_token")
+    api_server["omit_id_token"] = omit_id_token
+    save = AsyncMock()
+    async with aiohttp.ClientSession() as session:
+        client = api.SubZeroClient(session, "test-key", api.token_state(tokens), save)
+        await asyncio.gather(client.appliances(), client.appliances())
+        await client.appliances()
+    assert api_server["refreshes"] == 1
+    save.assert_awaited_once_with(client.tokens)
+    bearer = client.tokens["access_token" if omit_id_token else "id_token"]
+    assert api_server["requests"] == ["Bearer " + bearer] * 3
+    assert bearer != tokens["access_token"]
+
+
+async def test_id_token_expiry_triggers_refresh_with_valid_access_token(api_server, tokens):
+    tokens["id_token"] = make_tokens(expires_in=240)["id_token"]
+    async with aiohttp.ClientSession() as session:
+        client = api.SubZeroClient(session, "test-key", tokens)
+        assert await client.appliances()
+    assert api_server["refreshes"] == 1
+    assert api_server["requests"] == ["Bearer " + client.tokens["id_token"]]
+
+
+@pytest.mark.parametrize("identity", ["", 123, {}, "not-a-token"])
+def test_invalid_id_tokens_report_authentication_failure(tokens, identity):
+    with pytest.raises(InvalidAuth):
+        api.token_state({**tokens, "id_token": identity})
+
+
 async def test_refresh_rejects_changed_account(api_server):
     api_server["user_id"] = "another-owner"
     save = AsyncMock()
@@ -310,7 +352,7 @@ async def test_stale_unauthorized_reply_reuses_refreshed_token(api_server, token
             if url == api.API_BASE + "/consumerapp/user/devices":
                 access = kwargs["headers"]["Authorization"]
                 calls.append(access)
-                if access == "Bearer " + tokens["access_token"]:
+                if access == "Bearer " + tokens["id_token"]:
                     if len(calls) == 1:
                         first_started.set()
                         await release_first.wait()
@@ -332,6 +374,7 @@ async def test_stale_unauthorized_reply_reuses_refreshed_token(api_server, token
 
 @pytest.mark.parametrize("access", [None, 123, {}, "not-a-token"])
 def test_invalid_access_tokens_report_authentication_failure(tokens, access):
+    tokens.pop("id_token")
     with pytest.raises(InvalidAuth):
         api.token_state({**tokens, "access_token": access})
 
@@ -574,7 +617,7 @@ async def test_stream_surfaces_channel_errors_without_leaking_tasks(tokens, erro
 
 
 @pytest.fixture
-async def control_server(aiohttp_server, monkeypatch, socket_enabled):
+async def control_server(aiohttp_server, monkeypatch, socket_enabled, tokens):
     behavior = {"requests": [], "status": 200, "response": {}}
 
     async def command(request):
@@ -583,6 +626,7 @@ async def control_server(aiohttp_server, monkeypatch, socket_enabled):
         assert request.match_info["device_id"] == "test-fridge"
         assert request.headers["Userid"] == "test-owner"
         assert request.headers["Ocp-Apim-Subscription-Key"] == "test-key"
+        assert request.headers["Authorization"] == "Bearer " + tokens["id_token"]
         body = await request.json()
         behavior["requests"].append(body)
         status, response = (

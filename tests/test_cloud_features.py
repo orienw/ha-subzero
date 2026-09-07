@@ -554,6 +554,8 @@ async def test_diagnostics_omit_private_values(hass, appliances):
         "private-registration",
         "test-owner",
         "test-refresh",
+        appliances.entry.data["tokens"]["id_token"],
+        appliances.entry.data["tokens"]["access_token"],
         "Dishwasher",
     ):
         assert private not in encoded
