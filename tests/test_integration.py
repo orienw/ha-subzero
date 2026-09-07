@@ -171,6 +171,8 @@ async def test_debug_log_reports_push_updates_without_network_identifiers(hass, 
     [
         {"ref_door_ajar": True},
         {"resp": {"ref_door_ajar": True}},
+        {"appliance_model": "ANOTHER-MODEL", "ref_door_ajar": True},
+        {"resp": {"appliance_model": "ANOTHER-MODEL", "ref_door_ajar": True}},
         {"appliance_model": "SIBLING-MODEL", "props": {"ref_door_ajar": True}},
     ],
 )
@@ -188,11 +190,10 @@ async def test_cloud_payload_shapes_update_doors_without_losing_other_state(hass
     assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "38"
 
 
-async def test_full_snapshot_drops_missing_properties(hass, loaded):
-    _, _, updates, _, _ = loaded
-    await updates.put(
-        StateUpdate({"appliance_model": "ANOTHER-MODEL", "ref_door_ajar": False}, full=True)
-    )
+async def test_status_read_drops_missing_properties(hass, loaded):
+    entry, client, _, _, _ = loaded
+    client.state.return_value = {"appliance_model": "ANOTHER-MODEL", "ref_door_ajar": False}
+    await entry.runtime_data.coordinators["test-fridge"].async_refresh()
     await hass.async_block_till_done()
     assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "unavailable"
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"

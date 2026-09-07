@@ -203,7 +203,11 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             if self._recovery_updates is not None:
                 self._recovery_updates.update(properties)
             return
-        updated = properties if update.full else {**self.data, **properties}
+        replace = update.full and (
+            not self.last_update_success
+            or properties.get("appliance_model") != self.data.get("appliance_model")
+        )
+        updated = properties if replace else {**self.data, **properties}
         if (
             update.full
             or updated != self.data
