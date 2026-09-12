@@ -1,4 +1,4 @@
-"""Fridge and wine setpoints, accent lighting, and oven kitchen timers."""
+"""Fridge and wine setpoints, and oven kitchen timers."""
 
 from homeassistant.components.number import (
     NumberDeviceClass,
@@ -6,7 +6,7 @@ from homeassistant.components.number import (
     NumberEntityDescription,
     NumberMode,
 )
-from homeassistant.const import PERCENTAGE, UnitOfTemperature, UnitOfTime
+from homeassistant.const import UnitOfTemperature, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -32,17 +32,6 @@ DESCRIPTIONS = (
             ("wine_set_temp", "Wine setpoint"),
             ("wine2_set_temp", "Wine setpoint 2"),
         )
-    ),
-    NumberEntityDescription(
-        key="accent_light_level",
-        name="Accent light",
-        mode=NumberMode.SLIDER,
-        icon="mdi:lightbulb-outline",
-        native_min_value=0,
-        native_max_value=100,
-        native_step=1,
-        native_unit_of_measurement=PERCENTAGE,
-        entity_registry_enabled_default=False,
     ),
     *(
         NumberEntityDescription(
@@ -115,8 +104,6 @@ class SubZeroNumber(SubZeroEntity, NumberEntity):
             return type(data.get(f"{KITCHEN_TIMERS[key]}_active")) is bool
         if self.native_value is None:
             return False
-        if key == "accent_light_level":
-            return True
         if temperature_range(key, data) is None:
             return False
         if key == "crisp_set_temp":

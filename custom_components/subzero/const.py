@@ -13,6 +13,8 @@ FRIDGE_ENUM_OPTIONS = {
     "crisp_temp_mode": {"Automatic": 1, "Manual": 0},
     "humidity_control": {"Normal": 1, "Enhanced": 2},
     "night_mode": {"Disabled": 0, "Enabled": 1},
+    # The appliance only accepts these four levels, not an arbitrary percentage.
+    "accent_light_level": {"Off": 0, "Low": 110, "Medium": 120, "High": 130},
 }
 
 OVEN_PREFIXES = ("cav", "cav2")
@@ -83,7 +85,6 @@ WRITABLE_INTEGER_KEYS = {
     *SETPOINT_KEYS,
     *WINE_SETPOINT_KEYS,
     *FRIDGE_ENUM_OPTIONS,
-    "accent_light_level",
     *(f"{prefix}_{suffix}" for prefix in OVEN_PREFIXES for suffix in ("set_temp", "cook_mode")),
     *KITCHEN_TIMERS,
     "delay_start_timer_duration",
