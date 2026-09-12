@@ -27,8 +27,8 @@ from custom_components.subzero.diagnostics import (
     async_get_config_entry_diagnostics,
     async_get_device_diagnostics,
 )
-from custom_components.subzero.number import DESCRIPTIONS as NUMBER_DESCRIPTIONS
-from custom_components.subzero.number import SubZeroNumber
+from custom_components.subzero.select import DESCRIPTIONS as SELECT_DESCRIPTIONS
+from custom_components.subzero.select import SubZeroSelect
 from custom_components.subzero.sensor import DESCRIPTIONS as SENSOR_DESCRIPTIONS
 from custom_components.subzero.sensor import SubZeroSensor
 
@@ -218,9 +218,9 @@ async def test_cloud_feature_discovery_does_not_send_controls(hass, appliances):
     assert hass.states.get("sensor.dishwasher_wash_cycle_end").state == "unknown"
     assert hass.states.get("button.dishwasher_start_wash_cycle").state == "unavailable"
     assert hass.states.get("number.oven_kitchen_timer_duration").state == "0"
+    assert hass.states.get("select.fridge_accent_light").state == "Off"
     registry = er.async_get(hass)
     for entity_id in (
-        "number.fridge_accent_light",
         "sensor.fridge_ip_address",
         "sensor.fridge_mac_address",
         "sensor.fridge_uptime",
@@ -699,12 +699,12 @@ async def test_minor_upgrade_removes_only_retired_entities(hass, appliances):
 
 async def test_optional_entities_report_native_values(appliances):
     coordinator = appliances.entry.runtime_data.coordinators["fridge"]
-    light = SubZeroNumber(
-        coordinator, next(d for d in NUMBER_DESCRIPTIONS if d.key == "accent_light_level")
+    light = SubZeroSelect(
+        coordinator, next(d for d in SELECT_DESCRIPTIONS if d.key == "accent_light_level")
     )
-    await light.async_set_native_value(65)
-    appliances.client.set_property.assert_awaited_once_with("fridge", "accent_light_level", 65)
-    assert light.native_value == 65
+    await light.async_select_option("Medium")
+    appliances.client.set_property.assert_awaited_once_with("fridge", "accent_light_level", 120)
+    assert light.current_option == "Medium"
     uptime = SubZeroSensor(coordinator, next(d for d in SENSOR_DESCRIPTIONS if d.key == "uptime"))
     assert uptime.native_value == 435 * 3600 + 53 * 60 + 58
     reporting = SubZeroSensor(
