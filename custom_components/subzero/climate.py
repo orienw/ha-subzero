@@ -16,6 +16,8 @@ DESCRIPTIONS = tuple(
     for key, name in (
         ("ref_set_temp", "Refrigerator"),
         ("frz_set_temp", "Freezer"),
+        ("wine_set_temp", "Wine"),
+        ("wine2_set_temp", "Wine 2"),
         ("cav_set_temp", "Oven"),
         ("cav2_set_temp", "Lower oven"),
     )

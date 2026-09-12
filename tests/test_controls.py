@@ -13,7 +13,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.subzero.api import ApiError, Appliance, StateUpdate, token_state
 from custom_components.subzero.auth import InvalidAuth
 from custom_components.subzero.const import DOMAIN
-from custom_components.subzero.controls import temperature_range
+from custom_components.subzero.controls import is_wine, supports_control, temperature_range
 
 pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
 
@@ -573,3 +573,20 @@ async def test_options_follow_reported_capabilities(hass, controls):
 )
 def test_refrigerator_ranges_follow_known_product_families(model, maximum):
     assert temperature_range("ref_set_temp", {"appliance_model": model}) == (34, maximum)
+
+
+@pytest.mark.parametrize("key", ["wine_set_temp", "wine2_set_temp"])
+def test_wine_setpoints_report_the_factory_range(key):
+    assert temperature_range(key, {key: 55}) == (40, 65)
+
+
+def test_wine_storage_is_recognized_without_a_fridge_setpoint():
+    data = {"wine_set_temp": 55, "wine2_set_temp": 45, "accent_light_level": 20}
+    assert is_wine(data)
+    assert supports_control(data, "wine_set_temp")
+    assert supports_control(data, "wine2_set_temp")
+    assert supports_control(data, "accent_light_level")
+
+
+def test_wine_setpoints_are_not_reported_without_wine_keys():
+    assert not supports_control({"ref_set_temp": 38}, "wine_set_temp")

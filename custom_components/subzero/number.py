@@ -1,4 +1,4 @@
-"""Fridge setpoints, accent lighting, and oven kitchen timers."""
+"""Fridge and wine setpoints, accent lighting, and oven kitchen timers."""
 
 from homeassistant.components.number import (
     NumberDeviceClass,
@@ -29,6 +29,8 @@ DESCRIPTIONS = (
             ("ref_set_temp", "Refrigerator setpoint"),
             ("frz_set_temp", "Freezer setpoint"),
             ("crisp_set_temp", "Crisper setpoint"),
+            ("wine_set_temp", "Wine setpoint"),
+            ("wine2_set_temp", "Wine setpoint 2"),
         )
     ),
     NumberEntityDescription(

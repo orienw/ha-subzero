@@ -15,6 +15,7 @@ from .const import (
     MANUAL_COOK_MODES,
     OVEN_PREFIXES,
     SETPOINT_KEYS,
+    WINE_SETPOINT_KEYS,
     WRITABLE_BOOLEAN_KEYS,
     WRITABLE_INTEGER_KEYS,
 )
@@ -26,6 +27,10 @@ def is_finite_number(value) -> bool:
 
 def is_fridge(data: dict) -> bool:
     return bool(SETPOINT_KEYS.intersection(data))
+
+
+def is_wine(data: dict) -> bool:
+    return bool(WINE_SETPOINT_KEYS.intersection(data))
 
 
 def is_oven(data: dict) -> bool:
@@ -46,7 +51,9 @@ def supports_control(data: dict, key: str) -> bool:
         return key in WRITABLE_BOOLEAN_KEYS | WRITABLE_INTEGER_KEYS
     if key in {*DISHWASHER_SWITCHES, "wash_cycle_on", "delay_start_timer_duration"}:
         return is_dishwasher(data)
-    return is_fridge(data) and key in {
+    if key in WINE_SETPOINT_KEYS:
+        return is_wine(data)
+    return (is_fridge(data) or is_wine(data)) and key in {
         *SETPOINT_KEYS,
         *FRIDGE_ENUM_OPTIONS,
         *FRIDGE_MODE_KEYS,
@@ -143,6 +150,8 @@ def temperature_range(key: str, data: dict) -> tuple[int, int] | None:
         model = data.get("appliance_model", "")
         legacy = isinstance(model, str) and model.startswith(("BI", "IT", "IC", "ID"))
         return 34, (45 if legacy else 42)
+    if key in WINE_SETPOINT_KEYS:
+        return 40, 65
     return None
 
 
