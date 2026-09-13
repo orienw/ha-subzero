@@ -6,12 +6,15 @@ RECONNECT_DELAY = 30
 MAX_RECONNECT_DELAY = 900
 
 SETPOINT_KEYS = {"ref_set_temp", "frz_set_temp", "crisp_set_temp"}
+WINE_SETPOINT_KEYS = {"wine_set_temp", "wine2_set_temp"}
 FRIDGE_MODE_KEYS = ("sabbath_on", "high_use_on", "short_vacation_on", "long_vacation_on")
 ICE_KEYS = ("ice_maker_on", "max_ice_on", "night_ice_on")
 FRIDGE_ENUM_OPTIONS = {
     "crisp_temp_mode": {"Automatic": 1, "Manual": 0},
     "humidity_control": {"Normal": 1, "Enhanced": 2},
     "night_mode": {"Disabled": 0, "Enabled": 1},
+    # The appliance only accepts these four levels, not an arbitrary percentage.
+    "accent_light_level": {"Off": 0, "Low": 110, "Medium": 120, "High": 130},
 }
 
 OVEN_PREFIXES = ("cav", "cav2")
@@ -80,8 +83,8 @@ WRITABLE_BOOLEAN_KEYS = {
 }
 WRITABLE_INTEGER_KEYS = {
     *SETPOINT_KEYS,
+    *WINE_SETPOINT_KEYS,
     *FRIDGE_ENUM_OPTIONS,
-    "accent_light_level",
     *(f"{prefix}_{suffix}" for prefix in OVEN_PREFIXES for suffix in ("set_temp", "cook_mode")),
     *KITCHEN_TIMERS,
     "delay_start_timer_duration",
@@ -89,6 +92,7 @@ WRITABLE_INTEGER_KEYS = {
 NETWORK_KEYS = {"ipv4_addr", "device_wlan_id"}
 SENSOR_KEYS = {
     *SETPOINT_KEYS,
+    *WINE_SETPOINT_KEYS,
     "ref_display_temp",
     "frz_display_temp",
     "air_filter_pct_remaining",
@@ -108,6 +112,8 @@ SENSOR_KEYS = {
 BINARY_KEYS = {
     "ref_door_ajar",
     "frz_door_ajar",
+    "wine_door_ajar",
+    "wine_temp_alert_on",
     "service_required",
     "unit_on",
     *ICE_KEYS,

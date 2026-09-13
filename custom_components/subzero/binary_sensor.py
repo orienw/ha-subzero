@@ -20,6 +20,14 @@ DESCRIPTIONS = (
         key="frz_door_ajar", name="Freezer door", device_class=BinarySensorDeviceClass.DOOR
     ),
     BinarySensorEntityDescription(
+        key="wine_door_ajar", name="Wine storage door", device_class=BinarySensorDeviceClass.DOOR
+    ),
+    BinarySensorEntityDescription(
+        key="wine_temp_alert_on",
+        name="Wine temperature alert",
+        device_class=BinarySensorDeviceClass.PROBLEM,
+    ),
+    BinarySensorEntityDescription(
         key="service_required",
         name="Service required",
         device_class=BinarySensorDeviceClass.PROBLEM,

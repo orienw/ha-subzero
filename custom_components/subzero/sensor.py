@@ -53,6 +53,18 @@ DESCRIPTIONS = (
         native_unit_of_measurement=UnitOfTemperature.FAHRENHEIT,
     ),
     SensorEntityDescription(
+        key="wine_set_temp",
+        name="Wine setpoint",
+        device_class=SensorDeviceClass.TEMPERATURE,
+        native_unit_of_measurement=UnitOfTemperature.FAHRENHEIT,
+    ),
+    SensorEntityDescription(
+        key="wine2_set_temp",
+        name="Wine setpoint 2",
+        device_class=SensorDeviceClass.TEMPERATURE,
+        native_unit_of_measurement=UnitOfTemperature.FAHRENHEIT,
+    ),
+    SensorEntityDescription(
         key="cav_temp",
         name="Oven temperature",
         device_class=SensorDeviceClass.TEMPERATURE,

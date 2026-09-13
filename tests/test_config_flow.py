@@ -48,7 +48,7 @@ async def test_setup_creates_entry_with_selected_appliances(hass, tokens, select
     assert "password" not in result["data"]
     assert result["result"].unique_id == "test-owner"
     assert result["result"].version == 2
-    assert result["result"].minor_version == 2
+    assert result["result"].minor_version == 3
 
 
 @pytest.mark.parametrize(

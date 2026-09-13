@@ -1,4 +1,4 @@
-"""Fridge modes, oven cooking modes, and dishwasher delay start."""
+"""Fridge modes, accent lighting, oven cooking modes, and dishwasher delay start."""
 
 from homeassistant.components.select import SelectEntity, SelectEntityDescription
 from homeassistant.core import HomeAssistant
@@ -25,6 +25,9 @@ DESCRIPTIONS = (
     ),
     SelectEntityDescription(key="humidity_control", name="Humidity control", icon="mdi:water"),
     SelectEntityDescription(key="night_mode", name="Night mode", icon="mdi:weather-night"),
+    SelectEntityDescription(
+        key="accent_light_level", name="Accent light", icon="mdi:lightbulb-outline"
+    ),
     SelectEntityDescription(key="cav_cook_mode", name="Cooking mode", icon="mdi:stove"),
     SelectEntityDescription(key="cav2_cook_mode", name="Lower oven cooking mode", icon="mdi:stove"),
     SelectEntityDescription(
