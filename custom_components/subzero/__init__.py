@@ -108,4 +108,13 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             ):
                 registry.async_remove(entity.entity_id)
         hass.config_entries.async_update_entry(entry, minor_version=2)
+    if entry.minor_version < 3:
+        removed_number_ids = {
+            f"{device_id}_accent_light_level" for device_id in selected_devices(entry)
+        }
+        registry = er.async_get(hass)
+        for entity in er.async_entries_for_config_entry(registry, entry.entry_id):
+            if entity.domain == "number" and entity.unique_id in removed_number_ids:
+                registry.async_remove(entity.entity_id)
+        hass.config_entries.async_update_entry(entry, minor_version=3)
     return True

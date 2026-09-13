@@ -685,7 +685,7 @@ async def test_minor_upgrade_removes_only_retired_entities(hass, appliances):
     hass.config_entries.async_update_entry(entry, minor_version=1)
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
-    assert entry.minor_version == 2
+    assert entry.minor_version == 3
     for entity in retired:
         assert registry.async_get(entity.entity_id) is None
         assert hass.states.get(entity.entity_id) is None
@@ -695,6 +695,48 @@ async def test_minor_upgrade_removes_only_retired_entities(hass, appliances):
         assert current.disabled_by is switch.disabled_by
     assert registry.async_get(mode.entity_id).id == mode.id
     assert hass.states.get(mode.entity_id).state == "off"
+
+
+@pytest.mark.parametrize("minor_version", [1, 2])
+@pytest.mark.parametrize(
+    "disabled_by",
+    [None, er.RegistryEntryDisabler.INTEGRATION, er.RegistryEntryDisabler.USER],
+)
+async def test_upgrade_retires_only_accent_light_number(
+    hass, appliances, minor_version, disabled_by
+):
+    entry = appliances.entry
+    registry = er.async_get(hass)
+    light = registry.async_get("select.fridge_accent_light")
+    setpoint = registry.async_get("number.fridge_refrigerator_setpoint")
+    await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    light = registry.async_update_entity(
+        light.entity_id,
+        new_entity_id="select.custom_accent_light",
+        disabled_by=er.RegistryEntryDisabler.USER,
+    )
+    retired = registry.async_get_or_create(
+        "number",
+        DOMAIN,
+        light.unique_id,
+        config_entry=entry,
+        device_id=light.device_id,
+        suggested_object_id="custom_accent_light",
+        disabled_by=disabled_by,
+    )
+    hass.config_entries.async_update_entry(entry, minor_version=minor_version)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert registry.async_get(retired.entity_id) is None
+    assert hass.states.get(retired.entity_id) is None
+    assert entry.minor_version == 3
+    current = registry.async_get(light.entity_id)
+    assert current.id == light.id
+    assert current.disabled_by is er.RegistryEntryDisabler.USER
+    assert registry.async_get(setpoint.entity_id).id == setpoint.id
+    assert hass.states.get(setpoint.entity_id).state == "38"
+    appliances.client.set_property.assert_not_called()
 
 
 async def test_optional_entities_report_native_values(appliances):
