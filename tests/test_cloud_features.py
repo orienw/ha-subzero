@@ -726,8 +726,12 @@ async def test_upgrade_retires_only_accent_light_number(
         disabled_by=disabled_by,
     )
     hass.config_entries.async_update_entry(entry, minor_version=minor_version)
+    events = async_capture_events(hass, er.EVENT_ENTITY_REGISTRY_UPDATED)
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
+    assert [event.data["entity_id"] for event in events if event.data["action"] == "remove"] == [
+        retired.entity_id
+    ]
     assert registry.async_get(retired.entity_id) is None
     assert hass.states.get(retired.entity_id) is None
     assert entry.minor_version == 3
