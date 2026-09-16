@@ -154,6 +154,8 @@ DESCRIPTIONS = (
         for key, name in (
             ("ref_display_temp", "Refrigerator display temperature"),
             ("frz_display_temp", "Freezer display temperature"),
+            ("wine_display_temp", "Wine display temperature"),
+            ("wine2_display_temp", "Wine display temperature 2"),
         )
     ),
     SensorEntityDescription(

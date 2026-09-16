@@ -95,6 +95,8 @@ SENSOR_KEYS = {
     *WINE_SETPOINT_KEYS,
     "ref_display_temp",
     "frz_display_temp",
+    "wine_display_temp",
+    "wine2_display_temp",
     "air_filter_pct_remaining",
     "water_filter_pct_remaining",
     "water_filter_gal_remaining",

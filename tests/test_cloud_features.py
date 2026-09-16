@@ -233,6 +233,29 @@ async def test_cloud_feature_discovery_does_not_send_controls(hass, appliances):
     appliances.client.set_property.assert_not_called()
 
 
+async def test_wine_display_temperatures_survive_snapshots_and_updates(hass, appliances):
+    await appliances.update(
+        "fridge",
+        {
+            "appliance_model": "TEST-WINE",
+            "wine_set_temp": 55,
+            "wine2_set_temp": 45,
+            "wine_display_temp": 54,
+            "wine2_display_temp": 44,
+        },
+        full=True,
+    )
+    assert hass.states.get("climate.fridge_wine").attributes["current_temperature"] == 54
+    assert hass.states.get("climate.fridge_wine_2").attributes["current_temperature"] == 44
+    assert hass.states.get("sensor.fridge_wine_display_temperature").state == "54"
+    assert hass.states.get("sensor.fridge_wine_display_temperature_2").state == "44"
+
+    await appliances.update("fridge", {"wine_display_temp": 55, "wine2_display_temp": 45})
+    assert hass.states.get("climate.fridge_wine").attributes["current_temperature"] == 55
+    assert hass.states.get("climate.fridge_wine_2").attributes["current_temperature"] == 45
+    appliances.client.set_property.assert_not_awaited()
+
+
 @pytest.mark.parametrize(
     ("entity_id", "device", "key"),
     [
