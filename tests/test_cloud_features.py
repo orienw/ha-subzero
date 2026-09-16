@@ -790,6 +790,46 @@ async def test_upgrade_retires_only_accent_light_number(
     appliances.client.set_property.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("type_id", "high"),
+    [(None, 130), ("17.11.2.3", 130), ("17.1.1.1", 70), ("17.5.1.1", 70), ("7.1.1", 70)],
+)
+async def test_accent_light_uses_reported_series(hass, appliances, type_id, high):
+    await appliances.update("fridge", {"appliance_type": type_id})
+    entity_id = "select.fridge_accent_light"
+    assert hass.states.get(entity_id).attributes["options"] == [
+        "Off",
+        "On",
+        "Low",
+        "Medium",
+        "High",
+    ]
+    for option, value in (("High", high), ("On", 100)):
+        await hass.services.async_call(
+            "select", "select_option", {"entity_id": entity_id, "option": option}, blocking=True
+        )
+        appliances.client.set_property.assert_awaited_with("fridge", "accent_light_level", value)
+        assert hass.states.get(entity_id).state == option
+
+
+async def test_accent_light_accepts_both_reported_encodings(hass, appliances):
+    await appliances.update("fridge", {"appliance_type": "17.1.1.1", "accent_light_level": 30})
+    assert hass.states.get("select.fridge_accent_light").state == "Low"
+
+    async def write(device_id, key, value):
+        assert (device_id, key, value) == ("fridge", "accent_light_level", 50)
+        await appliances.updates.put(("fridge", StateUpdate({key: 120}, full=False)))
+
+    appliances.client.set_property.side_effect = write
+    await hass.services.async_call(
+        "select",
+        "select_option",
+        {"entity_id": "select.fridge_accent_light", "option": "Medium"},
+        blocking=True,
+    )
+    assert hass.states.get("select.fridge_accent_light").state == "Medium"
+
+
 async def test_optional_entities_report_native_values(appliances):
     coordinator = appliances.entry.runtime_data.coordinators["fridge"]
     light = SubZeroSelect(

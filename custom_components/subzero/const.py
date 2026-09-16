@@ -13,8 +13,13 @@ FRIDGE_ENUM_OPTIONS = {
     "crisp_temp_mode": {"Automatic": 1, "Manual": 0},
     "humidity_control": {"Normal": 1, "Enhanced": 2},
     "night_mode": {"Disabled": 0, "Enabled": 1},
-    # The appliance only accepts these four levels, not an arbitrary percentage.
-    "accent_light_level": {"Off": 0, "Low": 110, "Medium": 120, "High": 130},
+    "accent_light_level": {"Off": 0, "On": 100, "Low": 110, "Medium": 120, "High": 130},
+}
+LEGACY_ACCENT_LIGHT_OPTIONS = {"Off": 0, "On": 100, "Low": 30, "Medium": 50, "High": 70}
+ACCENT_LIGHT_LABELS = {
+    value: name
+    for options in (FRIDGE_ENUM_OPTIONS["accent_light_level"], LEGACY_ACCENT_LIGHT_OPTIONS)
+    for name, value in options.items()
 }
 
 OVEN_PREFIXES = ("cav", "cav2")

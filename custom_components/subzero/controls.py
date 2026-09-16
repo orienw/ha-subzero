@@ -6,12 +6,14 @@ from datetime import datetime
 from homeassistant.exceptions import ServiceValidationError
 
 from .const import (
+    ACCENT_LIGHT_LABELS,
     COOK_MODES,
     DISHWASHER_SWITCHES,
     FRIDGE_ENUM_OPTIONS,
     FRIDGE_MODE_KEYS,
     ICE_KEYS,
     KITCHEN_TIMERS,
+    LEGACY_ACCENT_LIGHT_OPTIONS,
     MANUAL_COOK_MODES,
     OVEN_PREFIXES,
     SETPOINT_KEYS,
@@ -39,6 +41,13 @@ def appliance_type(data: dict) -> tuple[int, int, int, int] | None:
 
 def is_fridge(data: dict) -> bool:
     return bool(SETPOINT_KEYS.intersection(data))
+
+
+def accent_light_options(data: dict) -> dict[str, int]:
+    parts = appliance_type(data)
+    if parts is not None and parts[1] in {1, 5, 7}:
+        return LEGACY_ACCENT_LIGHT_OPTIONS
+    return FRIDGE_ENUM_OPTIONS["accent_light_level"]
 
 
 def is_wine(data: dict) -> bool:
@@ -103,6 +112,12 @@ def timer_minutes(data: dict, key: str) -> float | None:
 
 
 def control_matches(data: dict, key: str, value: bool | int, requested_at: datetime) -> bool:
+    if key == "accent_light_level":
+        return (
+            type(data.get(key)) is int
+            and value in ACCENT_LIGHT_LABELS
+            and ACCENT_LIGHT_LABELS.get(data[key]) == ACCENT_LIGHT_LABELS[value]
+        )
     if key not in KITCHEN_TIMERS:
         if key.endswith("_unit_on") and value is False:
             ready = key.replace("unit_on", "remote_ready")
@@ -182,10 +197,12 @@ def validate_control_properties(data: dict, temperature_unit: str | None, proper
             if type(value) is not bool or type(data[key]) is not bool:
                 raise ServiceValidationError("The setting requires an on/off value.")
         elif key in FRIDGE_ENUM_OPTIONS:
-            values = FRIDGE_ENUM_OPTIONS[key].values()
+            accent = key == "accent_light_level"
+            values = (accent_light_options(data) if accent else FRIDGE_ENUM_OPTIONS[key]).values()
             if type(value) is not int or value not in values:
                 raise ServiceValidationError("Select a supported appliance option.")
-            if type(data[key]) is not int or data[key] not in values:
+            known_values = ACCENT_LIGHT_LABELS if accent else values
+            if type(data[key]) is not int or data[key] not in known_values:
                 raise ServiceValidationError("The current appliance setting is unknown.")
         elif key in KITCHEN_TIMERS:
             prefix = KITCHEN_TIMERS[key]

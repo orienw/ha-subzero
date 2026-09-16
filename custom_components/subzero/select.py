@@ -6,8 +6,15 @@ from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import SubZeroConfigEntry
-from .const import COOK_MODES, FRIDGE_ENUM_OPTIONS, FRIDGE_MODE_KEYS, ICE_KEYS, MANUAL_COOK_MODES
-from .controls import is_fridge, supports_control
+from .const import (
+    ACCENT_LIGHT_LABELS,
+    COOK_MODES,
+    FRIDGE_ENUM_OPTIONS,
+    FRIDGE_MODE_KEYS,
+    ICE_KEYS,
+    MANUAL_COOK_MODES,
+)
+from .controls import accent_light_options, is_fridge, supports_control
 from .entity import SubZeroEntity, async_setup_entities
 
 MODES = {
@@ -94,7 +101,10 @@ class SubZeroSelect(SubZeroEntity, SelectEntity):
             return False
         if self.entity_description.key in ENUM_OPTIONS:
             key = self.entity_description.key
-            return type(data[key]) is int and data[key] in ENUM_OPTIONS[key].values()
+            values = (
+                ACCENT_LIGHT_LABELS if key == "accent_light_level" else ENUM_OPTIONS[key].values()
+            )
+            return type(data[key]) is int and data[key] in values
         return all(type(data[key]) is bool for key in keys)
 
     @property
@@ -102,6 +112,8 @@ class SubZeroSelect(SubZeroEntity, SelectEntity):
         if not self.available:
             return None
         data = self.coordinator.data
+        if self.entity_description.key == "accent_light_level":
+            return ACCENT_LIGHT_LABELS[data["accent_light_level"]]
         if self.entity_description.key in ENUM_OPTIONS:
             key = self.entity_description.key
             return next(name for name, value in ENUM_OPTIONS[key].items() if data[key] == value)
@@ -120,6 +132,8 @@ class SubZeroSelect(SubZeroEntity, SelectEntity):
         key = self.entity_description.key
         if key.endswith("_cook_mode") and option == "Off":
             properties = {key.replace("cook_mode", "unit_on"): False}
+        elif key == "accent_light_level":
+            properties = {key: accent_light_options(data)[option]}
         elif key in ENUM_OPTIONS:
             properties = {key: ENUM_OPTIONS[key][option]}
         elif key == "ice_maker_mode":
