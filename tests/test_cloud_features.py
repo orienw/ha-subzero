@@ -620,6 +620,17 @@ async def test_invalid_targets_make_climate_unavailable(hass, appliances, value)
     appliances.client.set_property.assert_not_awaited()
 
 
+@pytest.mark.parametrize("value", [True, None, 1])
+async def test_freezer_climate_respects_max_ice_interlock(hass, appliances, value):
+    await appliances.update("fridge", {"max_ice_on": value})
+    assert hass.states.get("climate.fridge_freezer").state == "unavailable"
+    assert hass.states.get("number.fridge_freezer_setpoint").state == "unavailable"
+    assert hass.states.get("climate.fridge_refrigerator").state == "cool"
+    await appliances.update("fridge", {"max_ice_on": False})
+    assert hass.states.get("climate.fridge_freezer").state == "cool"
+    assert hass.states.get("number.fridge_freezer_setpoint").state == "0"
+
+
 async def test_full_snapshot_marks_missing_controls_unavailable(hass, appliances):
     await appliances.update(
         "oven", {"appliance_model": "SINGLE-OVEN", "cav_light_on": False}, full=True

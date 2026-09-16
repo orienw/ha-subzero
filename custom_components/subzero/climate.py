@@ -72,6 +72,7 @@ class SubZeroClimate(SubZeroEntity, ClimateEntity):
             super().available
             and is_finite_number(data.get(key))
             and supports_control(data, key)
+            and (key != "frz_set_temp" or "max_ice_on" not in data or data["max_ice_on"] is False)
             and (not self._oven or type(data.get(f"{self._prefix}_unit_on")) is bool)
         )
 
