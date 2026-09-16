@@ -65,12 +65,14 @@ WASH_CYCLES = {
 }
 WASH_STATUSES = {
     0: "Idle",
-    1: "Ready",
+    1: "Start pending",
     2: "Running",
-    3: "Paused",
-    4: "Canceled",
+    3: "Restart pending",
+    4: "Cancel pending",
     5: "Drying",
     6: "Complete",
+    7: "Delayed",
+    8: "Error",
 }
 
 WRITABLE_BOOLEAN_KEYS = {

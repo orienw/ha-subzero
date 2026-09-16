@@ -504,6 +504,18 @@ async def test_dishwasher_delay_start_then_completion_updates(hass, appliances):
     assert hass.states.get("binary_sensor.dishwasher_rinse_aid_low").state == "on"
 
 
+async def test_dishwasher_pending_delayed_and_error_states(hass, appliances):
+    for code, label in (
+        (1, "Start pending"),
+        (3, "Restart pending"),
+        (4, "Cancel pending"),
+        (7, "Delayed"),
+        (8, "Error"),
+    ):
+        await appliances.update("dishwasher", {"wash_status": code})
+        assert hass.states.get("sensor.dishwasher_wash_status").state == label
+
+
 async def test_unknown_enum_values_do_not_become_known_modes(hass, appliances):
     await appliances.update(
         "dishwasher", {"wash_cycle": True, "wash_status": 900, "delay_start_timer_duration": 13}
