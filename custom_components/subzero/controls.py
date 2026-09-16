@@ -216,8 +216,8 @@ def validate_control_properties(data: dict, temperature_unit: str | None, proper
                 raise ServiceValidationError("The current appliance setting is unknown.")
         elif key in KITCHEN_TIMERS:
             prefix = KITCHEN_TIMERS[key]
-            if type(value) is not int or not 0 <= value <= 660:
-                raise ServiceValidationError("Enter a timer duration from 0 to 660 minutes.")
+            if type(value) is not int or not 0 <= value <= 719:
+                raise ServiceValidationError("Enter a timer duration from 0 to 719 minutes.")
             if type(data.get(f"{prefix}_active")) is not bool:
                 raise ServiceValidationError("The timer state is unknown.")
         elif key == "delay_start_timer_duration":

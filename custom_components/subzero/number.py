@@ -40,7 +40,7 @@ DESCRIPTIONS = (
             icon="mdi:timer-outline",
             mode=NumberMode.BOX,
             native_min_value=0,
-            native_max_value=660,
+            native_max_value=719,
             native_step=1,
             native_unit_of_measurement=UnitOfTime.MINUTES,
         )

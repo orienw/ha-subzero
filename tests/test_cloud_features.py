@@ -494,7 +494,8 @@ async def test_off_ack_without_canceling_remote_ready_is_not_success(hass, appli
 async def test_timer_duration_is_confirmed_from_timer_state(hass, appliances, key, entity_id, push):
     appliances.behavior["push"] = push
     reads = appliances.client.state.await_count
-    for minutes in (15, 15, 0):
+    assert hass.states.get(entity_id).attributes["max"] == 719
+    for minutes in (15, 15, 719, 0):
         await hass.services.async_call(
             "number", "set_value", {"entity_id": entity_id, "value": minutes}, blocking=True
         )
@@ -503,9 +504,10 @@ async def test_timer_duration_is_confirmed_from_timer_state(hass, appliances, ke
     assert appliances.client.set_property.await_args_list == [
         call("oven", key, 15),
         call("oven", key, 15),
+        call("oven", key, 719),
         call("oven", key, 0),
     ]
-    assert appliances.client.state.await_count == reads + (0 if push else 3)
+    assert appliances.client.state.await_count == reads + (0 if push else 4)
 
 
 @pytest.mark.parametrize("previous_minutes", [16, 45])
@@ -538,7 +540,7 @@ async def test_timer_ack_without_correct_end_time_is_not_success(
     ("device", "key", "value"),
     [
         ("oven", "kitchen_timer_duration", -1),
-        ("oven", "kitchen_timer2_duration", 661),
+        ("oven", "kitchen_timer2_duration", 720),
         ("oven", "kitchen_timer_duration", True),
         ("fridge", "accent_light_level", 101),
         ("fridge", "accent_light_level", -1),
