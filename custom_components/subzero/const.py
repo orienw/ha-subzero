@@ -32,7 +32,6 @@ COOK_MODES = {
     "Dehydrate": 10,
     "Self clean": 11,
     "Warm": 12,
-    "Eco": 13,
 }
 # Wolf requires these modes to be started at the appliance.
 MANUAL_COOK_MODES = {3, 7, 9, 11}

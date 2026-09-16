@@ -360,6 +360,7 @@ async def test_lower_oven_controls_leave_the_upper_oven_alone(hass, appliances):
             "mode changes",
         ),
         ({"cav_remote_ready": True}, "cav_cook_mode", 11, "control panel"),
+        ({"cav_remote_ready": True}, "cav_cook_mode", 13, "supported cooking mode"),
         ({"cav_remote_ready": True, "cav_cook_mode": 3}, "cav_unit_on", True, "control panel"),
         (
             {"cav_remote_ready": True, "cav_cook_mode": 999},
@@ -376,6 +377,17 @@ async def test_oven_interlocks_apply_below_the_entity_layer(
     with pytest.raises(ServiceValidationError, match=message):
         await appliances.entry.runtime_data.coordinators["oven"].async_set_properties({key: value})
     appliances.client.set_property.assert_not_called()
+
+
+async def test_unsupported_cooking_mode_still_allows_turning_off(hass, appliances):
+    assert "Eco" not in hass.states.get("select.oven_cooking_mode").attributes["options"]
+    await appliances.update("oven", {"cav_cook_mode": 13, "cav_unit_on": True})
+    assert hass.states.get("sensor.oven_cooking_mode").state == "unknown"
+    assert hass.states.get("select.oven_cooking_mode").state == "unavailable"
+    await hass.services.async_call(
+        "climate", "turn_off", {"entity_id": "climate.oven_oven"}, blocking=True
+    )
+    appliances.client.set_property.assert_awaited_once_with("oven", "cav_unit_on", False)
 
 
 async def test_queued_start_rechecks_remote_ready(appliances):
