@@ -53,7 +53,7 @@ Installing, restarting, or reconnecting the integration never changes appliance 
 
 The **Ice maker** control shows the selected mode. In [**Night ice**](https://www.subzero-wolf.com/assistance/answers/sub-zero/common/sub-zero-night-ice-mode), the separate **Ice maker enabled** status may be Off while the schedule pauses ice production.
 
-Select **Manual** crisper temperature mode to adjust its setpoint. In Automatic mode, the setpoint control is unavailable and the sensor continues to show the configured value. The manual range stays within 2°F of the refrigerator setpoint, between 34°F and 42°F. See [Sub-Zero's crisper temperature guide](https://www.subzero-wolf.com/assistance/answers/sub-zero/next-classic/sub-zero-classic-series-cl-refrigerator-drawer-temperature-contr).
+Select **Manual** crisper temperature mode to adjust its setpoint. In Automatic mode, the setpoint control is unavailable and the sensor continues to show the configured value. The manual range stays within 2°F of the refrigerator setpoint and within that appliance's refrigerator limits. Refrigerator limits follow the reported appliance type, with model-based defaults when the type is unavailable. See [Sub-Zero's crisper temperature guide](https://www.subzero-wolf.com/assistance/answers/sub-zero/next-classic/sub-zero-classic-series-cl-refrigerator-drawer-temperature-contr).
 
 Turn off **Max ice** before adjusting the freezer setpoint. Refrigerator and freezer zones also provide climate entities for thermostat cards, with the same temperature limits and Max ice interlock as the number controls.
 

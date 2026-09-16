@@ -25,6 +25,18 @@ def is_finite_number(value) -> bool:
     return type(value) in (int, float) and math.isfinite(value)
 
 
+def appliance_type(data: dict) -> tuple[int, int, int, int] | None:
+    value = data.get("appliance_type")
+    if not isinstance(value, str):
+        return None
+    parts = value.split(".")
+    if len(parts) == 3:
+        parts.insert(0, "0")
+    if len(parts) != 4 or not all(part.isascii() and part.isdecimal() for part in parts):
+        return None
+    return tuple(int(part) for part in parts)
+
+
 def is_fridge(data: dict) -> bool:
     return bool(SETPOINT_KEYS.intersection(data))
 
@@ -143,9 +155,15 @@ def temperature_range(key: str, data: dict) -> tuple[int, int] | None:
         refrigerator = data.get("ref_set_temp")
         if not is_finite_number(refrigerator):
             return None
-        lower, upper = max(34, refrigerator - 2), min(42, refrigerator + 2)
+        maximum = temperature_range("ref_set_temp", data)[1]
+        lower, upper = max(34, refrigerator - 2), min(maximum, refrigerator + 2)
         return (math.ceil(lower), math.floor(upper)) if lower <= upper else None
     if key == "ref_set_temp":
+        if (parts := appliance_type(data)) is not None:
+            _, series, middle, _ = parts
+            if series == 13 and middle in {3, 6}:
+                return 34, 55
+            return 34, (45 if series in {1, 2, 22} or series == 5 and middle == 2 else 42)
         model = data.get("appliance_model", "")
         legacy = isinstance(model, str) and model.startswith(("BI", "IT", "IC", "ID"))
         return 34, (45 if legacy else 42)

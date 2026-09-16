@@ -575,6 +575,36 @@ def test_refrigerator_ranges_follow_known_product_families(model, maximum):
     assert temperature_range("ref_set_temp", {"appliance_model": model}) == (34, maximum)
 
 
+@pytest.mark.parametrize(
+    ("type_id", "maximum"),
+    [
+        ("17.1.1.1", 45),
+        ("17.2.1.1", 45),
+        ("17.22.1.1", 45),
+        ("17.5.2.1", 45),
+        ("17.5.1.1", 42),
+        ("17.13.3.1", 55),
+        ("17.13.6.1", 55),
+        ("17.13.2.1", 42),
+        ("17.11.2.3", 42),
+        ("22.1.1", 45),
+        ("17.44.1.1", 42),
+    ],
+)
+def test_refrigerator_type_overrides_model_prefix(type_id, maximum):
+    data = {"appliance_type": type_id, "appliance_model": "BI-36U"}
+    assert temperature_range("ref_set_temp", data) == (34, maximum)
+    data["ref_set_temp"] = maximum
+    assert temperature_range("crisp_set_temp", data) == (maximum - 2, maximum)
+
+
+@pytest.mark.parametrize("type_id", [None, 13, "", "1.2", "1.x.2.3", "1.2.3.4.5", "1.-2.3.4"])
+def test_unusable_appliance_type_keeps_model_fallback(type_id):
+    assert temperature_range(
+        "ref_set_temp", {"appliance_type": type_id, "appliance_model": "BI-36U"}
+    ) == (34, 45)
+
+
 @pytest.mark.parametrize("key", ["wine_set_temp", "wine2_set_temp"])
 def test_wine_setpoints_report_the_factory_range(key):
     assert temperature_range(key, {key: 55}) == (40, 65)
