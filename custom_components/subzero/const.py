@@ -40,6 +40,29 @@ COOK_MODES = {
 }
 # Wolf requires these modes to be started at the appliance.
 MANUAL_COOK_MODES = {3, 7, 9, 11}
+OVEN_TEMPERATURE_RANGES = {
+    3: {
+        **dict.fromkeys((1, 2, 4, 5, 6), (170, 550)),
+        8: (120, 550),
+        9: (85, 110),
+        10: (110, 160),
+    },
+    4: {
+        **dict.fromkeys((1, 2, 4, 5, 6), (200, 550)),
+        9: (85, 110),
+        10: (110, 170),
+        12: (140, 200),
+    },
+    **{
+        series: {
+            **dict.fromkeys((1, 2, 4, 6, 8), (200, 550)),
+            9: (85, 110),
+            10: (110, 170),
+            12: (140, 200),
+        }
+        for series in (8, 15)
+    },
+}
 KITCHEN_TIMERS = {
     "kitchen_timer_duration": "kitchen_timer",
     "kitchen_timer2_duration": "kitchen_timer2",

@@ -45,7 +45,6 @@ async def async_setup_entry(
 
 class SubZeroClimate(SubZeroEntity, ClimateEntity):
     _attr_temperature_unit = UnitOfTemperature.FAHRENHEIT
-    _attr_supported_features = ClimateEntityFeature.TARGET_TEMPERATURE
     _attr_target_temperature_step = 1
 
     def __init__(self, coordinator, description):
@@ -54,10 +53,16 @@ class SubZeroClimate(SubZeroEntity, ClimateEntity):
         self._oven = self._prefix in {"cav", "cav2"}
         self._attr_hvac_modes = [HVACMode.OFF, HVACMode.HEAT] if self._oven else [HVACMode.COOL]
         if self._oven:
-            self._attr_supported_features |= (
-                ClimateEntityFeature.TURN_ON | ClimateEntityFeature.TURN_OFF
-            )
             self._attr_target_temperature_step = 5
+
+    @property
+    def supported_features(self) -> ClimateEntityFeature:
+        features = ClimateEntityFeature(0)
+        if self._oven:
+            features |= ClimateEntityFeature.TURN_ON | ClimateEntityFeature.TURN_OFF
+        if temperature_range(self.entity_description.key, self.coordinator.data) is not None:
+            features |= ClimateEntityFeature.TARGET_TEMPERATURE
+        return features
 
     @property
     def available(self) -> bool:
@@ -94,11 +99,15 @@ class SubZeroClimate(SubZeroEntity, ClimateEntity):
 
     @property
     def min_temp(self) -> float:
-        return temperature_range(self.entity_description.key, self.coordinator.data)[0]
+        return (temperature_range(self.entity_description.key, self.coordinator.data) or (85, 550))[
+            0
+        ]
 
     @property
     def max_temp(self) -> float:
-        return temperature_range(self.entity_description.key, self.coordinator.data)[1]
+        return (temperature_range(self.entity_description.key, self.coordinator.data) or (85, 550))[
+            1
+        ]
 
     async def async_set_temperature(self, **kwargs) -> None:
         value = kwargs.get(ATTR_TEMPERATURE)

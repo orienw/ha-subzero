@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, call, patch
 
 import pytest
+from homeassistant.components.climate import ClimateEntityFeature
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
@@ -354,6 +355,12 @@ async def test_lower_oven_controls_leave_the_upper_oven_alone(hass, appliances):
         ({"cav_remote_ready": True}, "cav_set_temp", 551, "range"),
         ({"cav_remote_ready": True}, "cav_set_temp", 84, "range"),
         (
+            {"cav_remote_ready": True, "cav_cook_mode": 12, "cav_set_temp": 350},
+            "cav_unit_on",
+            True,
+            "range",
+        ),
+        (
             {"cav_remote_ready": True, "cav_mode_change_enabled": False},
             "cav_cook_mode",
             2,
@@ -384,6 +391,60 @@ async def test_unsupported_cooking_mode_still_allows_turning_off(hass, appliance
     await appliances.update("oven", {"cav_cook_mode": 13, "cav_unit_on": True})
     assert hass.states.get("sensor.oven_cooking_mode").state == "unknown"
     assert hass.states.get("select.oven_cooking_mode").state == "unavailable"
+    await hass.services.async_call(
+        "climate", "turn_off", {"entity_id": "climate.oven_oven"}, blocking=True
+    )
+    appliances.client.set_property.assert_awaited_once_with("oven", "cav_unit_on", False)
+
+
+@pytest.mark.parametrize(
+    ("type_id", "mode", "bounds"),
+    [
+        ("1.3.1.1", 1, (170, 550)),
+        ("1.3.1.1", 8, (120, 550)),
+        ("1.3.1.1", 10, (110, 160)),
+        ("1.4.1.1", 1, (200, 550)),
+        ("1.4.1.1", 9, (85, 110)),
+        ("1.4.1.1", 12, (140, 200)),
+        ("1.8.1.1", 8, (200, 550)),
+        ("1.15.1.1", 10, (110, 170)),
+    ],
+)
+async def test_oven_temperature_limits_follow_series_and_mode(
+    hass, appliances, type_id, mode, bounds
+):
+    await appliances.update(
+        "oven", {"appliance_type": type_id, "cav_cook_mode": mode, "cav_unit_on": True}
+    )
+    state = hass.states.get("climate.oven_oven")
+    assert (state.attributes["min_temp"], state.attributes["max_temp"]) == bounds
+    for value in bounds:
+        await hass.services.async_call(
+            "climate",
+            "set_temperature",
+            {"entity_id": "climate.oven_oven", "temperature": value},
+            blocking=True,
+        )
+        appliances.client.set_property.assert_awaited_with("oven", "cav_set_temp", value)
+    coordinator = appliances.entry.runtime_data.coordinators["oven"]
+    for value in (bounds[0] - 1, bounds[1] + 1):
+        with pytest.raises(ServiceValidationError, match="range"):
+            await coordinator.async_set_properties({"cav_set_temp": value})
+    assert appliances.client.set_property.await_count == 2
+
+
+@pytest.mark.parametrize(("series", "mode"), [(3, 12), (4, 8), (8, 5), (15, 5), (4, 3), (4, 0)])
+async def test_nonadjustable_oven_modes_keep_power_controls(hass, appliances, series, mode):
+    await appliances.update(
+        "oven", {"appliance_type": f"1.{series}.1.1", "cav_cook_mode": mode, "cav_unit_on": True}
+    )
+    features = hass.states.get("climate.oven_oven").attributes["supported_features"]
+    assert not features & ClimateEntityFeature.TARGET_TEMPERATURE
+    assert features & ClimateEntityFeature.TURN_OFF
+    with pytest.raises(ServiceValidationError, match="range"):
+        await appliances.entry.runtime_data.coordinators["oven"].async_set_properties(
+            {"cav_set_temp": 350}
+        )
     await hass.services.async_call(
         "climate", "turn_off", {"entity_id": "climate.oven_oven"}, blocking=True
     )

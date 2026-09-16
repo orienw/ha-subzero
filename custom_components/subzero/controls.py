@@ -16,6 +16,7 @@ from .const import (
     LEGACY_ACCENT_LIGHT_OPTIONS,
     MANUAL_COOK_MODES,
     OVEN_PREFIXES,
+    OVEN_TEMPERATURE_RANGES,
     SETPOINT_KEYS,
     WINE_SETPOINT_KEYS,
     WRITABLE_BOOLEAN_KEYS,
@@ -159,10 +160,19 @@ def validate_remote_start(data: dict, key: str) -> None:
     temperature = data.get(f"{prefix}_set_temp")
     if not is_finite_number(temperature) or temperature <= 0:
         raise ServiceValidationError("Set the oven temperature before starting it.")
+    bounds = temperature_range(f"{prefix}_set_temp", data)
+    if bounds is not None and not bounds[0] <= temperature <= bounds[1]:
+        raise ServiceValidationError("Set a temperature within the cooking mode's range.")
 
 
 def temperature_range(key: str, data: dict) -> tuple[int, int] | None:
     if key in {f"{prefix}_set_temp" for prefix in OVEN_PREFIXES}:
+        mode = data.get(key.replace("set_temp", "cook_mode"))
+        if type(mode) is not int or mode not in COOK_MODES.values() or mode in {0, 3, 7, 11}:
+            return None
+        parts = appliance_type(data)
+        if parts is not None and parts[1] in OVEN_TEMPERATURE_RANGES:
+            return OVEN_TEMPERATURE_RANGES[parts[1]].get(mode)
         return 85, 550
     if key == "frz_set_temp":
         return -5, 5
