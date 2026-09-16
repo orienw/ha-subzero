@@ -70,7 +70,7 @@ class SubZeroClimate(SubZeroEntity, ClimateEntity):
         key = self.entity_description.key
         return (
             super().available
-            and data.get(key) is not None
+            and is_finite_number(data.get(key))
             and supports_control(data, key)
             and (not self._oven or type(data.get(f"{self._prefix}_unit_on")) is bool)
         )

@@ -609,6 +609,17 @@ async def test_naive_timestamps_need_the_appliance_clock_offset(hass, appliances
     assert hass.states.get("sensor.fridge_max_ice_start").state == "unknown"
 
 
+@pytest.mark.parametrize("value", [None, True, "38", float("nan"), float("inf")])
+async def test_invalid_targets_make_climate_unavailable(hass, appliances, value):
+    await appliances.update("fridge", {"ref_set_temp": value})
+    await appliances.update("oven", {"cav_set_temp": value})
+    assert hass.states.get("climate.fridge_refrigerator").state == "unavailable"
+    assert hass.states.get("climate.oven_oven").state == "unavailable"
+    await appliances.update("fridge", {"ref_set_temp": 38})
+    assert hass.states.get("climate.fridge_refrigerator").state == "cool"
+    appliances.client.set_property.assert_not_awaited()
+
+
 async def test_full_snapshot_marks_missing_controls_unavailable(hass, appliances):
     await appliances.update(
         "oven", {"appliance_model": "SINGLE-OVEN", "cav_light_on": False}, full=True
