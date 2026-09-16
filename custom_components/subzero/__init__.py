@@ -5,12 +5,14 @@ from functools import partial
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import SubZeroClient
 from .app_config import SUBSCRIPTION_KEY
+from .auth import InvalidAuth
 from .const import DISHWASHER_SWITCHES, DOMAIN
 from .coordinator import SubZeroAccount, SubZeroCoordinator, selected_devices
 
@@ -30,9 +32,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: SubZeroConfigEntry) -> b
     async def save_tokens(tokens: dict) -> None:
         hass.config_entries.async_update_entry(entry, data={**entry.data, "tokens": tokens})
 
-    client = SubZeroClient(
-        async_get_clientsession(hass), SUBSCRIPTION_KEY, entry.data["tokens"], save_tokens
-    )
+    try:
+        client = SubZeroClient(
+            async_get_clientsession(hass), SUBSCRIPTION_KEY, entry.data["tokens"], save_tokens
+        )
+    except InvalidAuth as err:
+        raise ConfigEntryAuthFailed(str(err)) from err
     account = SubZeroAccount(hass, entry, client)
     await account.async_setup()
     entry.runtime_data = account

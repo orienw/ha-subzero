@@ -841,6 +841,26 @@ async def test_expired_login_starts_reauthentication(hass, loaded):
     assert flows[0]["context"]["entry_id"] == entry.entry_id
 
 
+async def test_invalid_stored_tokens_start_reauthentication(hass):
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        version=2,
+        minor_version=3,
+        data={
+            "tokens": {"access_token": None, "refresh_token": "test-refresh"},
+            "devices": {"test-fridge": {"name": "Kitchen", "temperature_unit": "F"}},
+        },
+    )
+    entry.add_to_hass(hass)
+    assert not await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.SETUP_ERROR
+    flows = hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+    assert len(flows) == 1
+    assert flows[0]["context"]["source"] == "reauth"
+    assert flows[0]["context"]["entry_id"] == entry.entry_id
+
+
 async def test_configure_adds_appliances_with_the_saved_login(hass, loaded):
     entry, client, updates, _, _ = loaded
     registry = er.async_get(hass)
