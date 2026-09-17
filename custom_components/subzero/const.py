@@ -15,6 +15,8 @@ FRIDGE_ENUM_OPTIONS = {
     "night_mode": {"Disabled": 0, "Enabled": 1},
     "accent_light_level": {"Off": 0, "On": 100, "Low": 110, "Medium": 120, "High": 130},
 }
+# The app shows every humidity state but only lets Normal and Enhanced be selected.
+HUMIDITY_LABELS = {0: "Disabled", 1: "Normal", 2: "Enhanced", 3: "Low"}
 LEGACY_ACCENT_LIGHT_OPTIONS = {"Off": 0, "On": 100, "Low": 30, "Medium": 50, "High": 70}
 ACCENT_LIGHT_LABELS = {
     value: name

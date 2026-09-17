@@ -7,7 +7,6 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import SubZeroConfigEntry
 from .const import (
-    ACCENT_LIGHT_LABELS,
     COOK_MODES,
     DISHWASHER_MODES,
     FRIDGE_ENUM_OPTIONS,
@@ -16,7 +15,13 @@ from .const import (
     MANUAL_COOK_MODES,
     WASH_CYCLES,
 )
-from .controls import accent_light_options, is_fridge, supports_control, wash_settings_enabled
+from .controls import (
+    accent_light_options,
+    enum_labels,
+    is_fridge,
+    supports_control,
+    wash_settings_enabled,
+)
 from .entity import SubZeroEntity, async_setup_entities
 
 MODES = {
@@ -97,7 +102,9 @@ class SubZeroSelect(SubZeroEntity, SelectEntity):
                 for name, value in COOK_MODES.items()
                 if value not in MANUAL_COOK_MODES or value == data.get(key)
             ]
-        return list(ENUM_OPTIONS[key])
+        names = list(ENUM_OPTIONS[key])
+        reported = enum_labels(key).get(data.get(key)) if key in FRIDGE_ENUM_OPTIONS else None
+        return names if reported is None or reported in names else [*names, reported]
 
     @property
     def available(self) -> bool:
@@ -111,9 +118,7 @@ class SubZeroSelect(SubZeroEntity, SelectEntity):
             return type(data[key]) is int and data[key] in values and wash_settings_enabled(data)
         if self.entity_description.key in ENUM_OPTIONS:
             key = self.entity_description.key
-            values = (
-                ACCENT_LIGHT_LABELS if key == "accent_light_level" else ENUM_OPTIONS[key].values()
-            )
+            values = enum_labels(key) if key in FRIDGE_ENUM_OPTIONS else ENUM_OPTIONS[key].values()
             return type(data[key]) is int and data[key] in values
         return all(type(data[key]) is bool for key in keys)
 
@@ -122,10 +127,10 @@ class SubZeroSelect(SubZeroEntity, SelectEntity):
         if not self.available:
             return None
         data = self.coordinator.data
-        if self.entity_description.key == "accent_light_level":
-            return ACCENT_LIGHT_LABELS[data["accent_light_level"]]
-        if self.entity_description.key in ENUM_OPTIONS:
-            key = self.entity_description.key
+        key = self.entity_description.key
+        if key in FRIDGE_ENUM_OPTIONS:
+            return enum_labels(key)[data[key]]
+        if key in ENUM_OPTIONS:
             return next(
                 (name for name, value in ENUM_OPTIONS[key].items() if data[key] == value), None
             )
@@ -142,6 +147,8 @@ class SubZeroSelect(SubZeroEntity, SelectEntity):
             raise ServiceValidationError("The appliance does not support that option.")
         data = self.coordinator.data
         key = self.entity_description.key
+        if key in FRIDGE_ENUM_OPTIONS and option not in ENUM_OPTIONS[key]:
+            raise ServiceValidationError("This setting can only be chosen at the appliance.")
         if key.endswith("_cook_mode") and option == "Off":
             properties = {key.replace("cook_mode", "unit_on"): False}
         elif key == "accent_light_level":

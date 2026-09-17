@@ -337,7 +337,7 @@ async def test_enum_selects_write_integer_codes(hass, controls, key, option, val
 
 @pytest.mark.parametrize(
     ("key", "value"),
-    [("humidity_control", 3), ("night_mode", 2), ("night_mode", True)],
+    [("night_mode", 2), ("night_mode", True)],
 )
 @pytest.mark.parametrize("source", ["push", "refresh"])
 async def test_unknown_mode_values_are_not_treated_as_enabled(hass, controls, key, value, source):
@@ -352,6 +352,37 @@ async def test_unknown_mode_values_are_not_treated_as_enabled(hass, controls, ke
     with pytest.raises(ServiceValidationError, match="unknown"):
         await coordinator.async_set_properties({key: 1})
     controls.client.set_property.assert_not_called()
+
+
+@pytest.mark.parametrize(("value", "label"), [(0, "Disabled"), (3, "Low")])
+async def test_humidity_states_the_app_cannot_select_are_still_reported(
+    hass, controls, value, label
+):
+    await controls.updates.put(
+        ("test-fridge", StateUpdate({"humidity_control": value}, full=False))
+    )
+    await hass.async_block_till_done()
+    humidity = hass.states.get("select.kitchen_humidity_control")
+    assert humidity.state == label
+    assert humidity.attributes["options"] == ["Normal", "Enhanced", label]
+    with pytest.raises(ServiceValidationError, match="at the appliance"):
+        await hass.services.async_call(
+            "select",
+            "select_option",
+            {"entity_id": "select.kitchen_humidity_control", "option": label},
+            blocking=True,
+        )
+    controls.client.set_property.assert_not_awaited()
+    await hass.services.async_call(
+        "select",
+        "select_option",
+        {"entity_id": "select.kitchen_humidity_control", "option": "Normal"},
+        blocking=True,
+    )
+    controls.client.set_property.assert_awaited_once_with("test-fridge", "humidity_control", 1)
+    humidity = hass.states.get("select.kitchen_humidity_control")
+    assert humidity.state == "Normal"
+    assert humidity.attributes["options"] == ["Normal", "Enhanced"]
 
 
 async def test_failed_mode_change_preserves_partial_state(hass, controls):

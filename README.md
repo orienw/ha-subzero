@@ -44,7 +44,7 @@ Installing, restarting, or reconnecting the integration never changes appliance 
 | --- | --- |
 | Temperature setpoints | Refrigerator, refrigerator drawer, freezer, crisper |
 | Crisper temperature mode | Automatic, Manual |
-| Humidity control | Normal, Enhanced |
+| Humidity control | Normal, Enhanced; Disabled and Low are shown when the appliance reports them |
 | Ice maker | Off, On, Max ice, Night ice |
 | Mode | Normal, Sabbath, High use, Short vacation, Long vacation |
 | Night mode | Disabled, Enabled |

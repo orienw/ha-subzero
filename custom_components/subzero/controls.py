@@ -12,6 +12,7 @@ from .const import (
     DISHWASHER_SWITCHES,
     FRIDGE_ENUM_OPTIONS,
     FRIDGE_MODE_KEYS,
+    HUMIDITY_LABELS,
     ICE_KEYS,
     KITCHEN_TIMERS,
     LEGACY_ACCENT_LIGHT_OPTIONS,
@@ -51,6 +52,14 @@ def accent_light_options(data: dict) -> dict[str, int]:
     if parts is not None and parts[1] in {1, 5, 7}:
         return LEGACY_ACCENT_LIGHT_OPTIONS
     return FRIDGE_ENUM_OPTIONS["accent_light_level"]
+
+
+def enum_labels(key: str) -> dict[int, str]:
+    if key == "accent_light_level":
+        return ACCENT_LIGHT_LABELS
+    if key == "humidity_control":
+        return HUMIDITY_LABELS
+    return {value: name for name, value in FRIDGE_ENUM_OPTIONS[key].items()}
 
 
 def is_wine(data: dict) -> bool:
@@ -237,8 +246,7 @@ def validate_control_properties(data: dict, temperature_unit: str | None, proper
             values = (accent_light_options(data) if accent else FRIDGE_ENUM_OPTIONS[key]).values()
             if type(value) is not int or value not in values:
                 raise ServiceValidationError("Select a supported appliance option.")
-            known_values = ACCENT_LIGHT_LABELS if accent else values
-            if type(data[key]) is not int or data[key] not in known_values:
+            if type(data[key]) is not int or data[key] not in enum_labels(key):
                 raise ServiceValidationError("The current appliance setting is unknown.")
         elif key in {"wash_cycle", "mode"}:
             values = WASH_CYCLES if key == "wash_cycle" else DISHWASHER_MODES.values()
