@@ -160,8 +160,8 @@ class SubZeroSelect(SubZeroEntity, SelectEntity):
             properties = {
                 k: False for k in control_keys(key, data) if k not in ("ice_maker_on", selected)
             }
-            if option != "Night ice":
-                properties["ice_maker_on"] = option != "Off"
+            if option in ("On", "Off"):
+                properties["ice_maker_on"] = option == "On"
             if selected is not None:
                 properties[selected] = True
         else:

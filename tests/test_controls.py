@@ -209,7 +209,7 @@ async def test_night_ice_from_off_leaves_ice_maker_power_alone(hass, controls):
     [
         ("Off", [("night_ice_on", False)]),
         ("On", [("night_ice_on", False), ("ice_maker_on", True)]),
-        ("Max ice", [("night_ice_on", False), ("ice_maker_on", True), ("max_ice_on", True)]),
+        ("Max ice", [("night_ice_on", False), ("max_ice_on", True)]),
     ],
 )
 async def test_leaving_night_ice_while_power_is_off(hass, controls, option, writes):
