@@ -23,6 +23,7 @@ from custom_components.subzero.api import (
     parse_notification,
     token_state,
 )
+from custom_components.subzero.auth import InvalidAuth
 from custom_components.subzero.const import DOMAIN
 from custom_components.subzero.diagnostics import (
     async_get_config_entry_diagnostics,
@@ -191,6 +192,7 @@ async def appliances(hass, tokens, request):
         client.push_connected = True
         client.state = AsyncMock(side_effect=lambda device_id: dict(states[device_id]))
         client.set_property = AsyncMock(side_effect=write)
+        client.reset_air_filter = AsyncMock()
         client.watch = watch
         assert await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
@@ -232,6 +234,47 @@ async def test_cloud_feature_discovery_does_not_send_controls(hass, appliances):
     )
     assert device.manufacturer == "Cove"
     appliances.client.set_property.assert_not_called()
+
+
+async def test_air_filter_reset_keeps_reported_life_until_it_changes(hass, appliances):
+    entity_id = "button.fridge_reset_air_filter"
+    assert hass.states.get(entity_id) is None
+    await appliances.update("fridge", {"air_filter_pct_remaining": 10})
+    reads = appliances.client.state.await_count
+    await hass.services.async_call("button", "press", {"entity_id": entity_id}, blocking=True)
+    appliances.client.reset_air_filter.assert_awaited_once_with("fridge")
+    appliances.client.set_property.assert_not_awaited()
+    assert appliances.client.state.await_count == reads + 1
+    assert hass.states.get("sensor.fridge_air_filter_remaining").state == "10"
+    await appliances.update("fridge", {"air_filter_pct_remaining": 100})
+    assert hass.states.get("sensor.fridge_air_filter_remaining").state == "100"
+    await appliances.update("fridge", {"appliance_model": "TEST-FRIDGE"}, full=True)
+    assert hass.states.get(entity_id).state == "unavailable"
+
+
+@pytest.mark.parametrize("error", [ApiError("Reset rejected"), InvalidAuth("Sign in again")])
+async def test_air_filter_reset_reports_errors(hass, appliances, error):
+    await appliances.update("fridge", {"air_filter_pct_remaining": 10})
+    appliances.client.reset_air_filter.side_effect = error
+    with pytest.raises(HomeAssistantError):
+        await hass.services.async_call(
+            "button", "press", {"entity_id": "button.fridge_reset_air_filter"}, blocking=True
+        )
+    assert hass.states.get("sensor.fridge_air_filter_remaining").state == "10"
+    if isinstance(error, InvalidAuth):
+        flows = hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+        assert flows[0]["context"]["source"] == "reauth"
+
+
+async def test_queued_air_filter_reset_rechecks_capability(appliances):
+    await appliances.update("fridge", {"air_filter_pct_remaining": 10})
+    coordinator = appliances.entry.runtime_data.coordinators["fridge"]
+    async with coordinator._command_lock:
+        task = asyncio.create_task(coordinator.async_reset_air_filter())
+        await appliances.update("fridge", {"appliance_model": "TEST-FRIDGE"}, full=True)
+    with pytest.raises(ServiceValidationError, match="does not report an air filter"):
+        await task
+    appliances.client.reset_air_filter.assert_not_awaited()
 
 
 async def test_internal_dispenser_follows_reported_capability(hass, appliances):

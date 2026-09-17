@@ -165,6 +165,20 @@ def _rejected(response: dict) -> bool:
     return False
 
 
+def _check_control_response(response: dict, message: str) -> None:
+    if _rejected(response):
+        raise ApiError(message)
+    response = _object(response.get("resp", response))
+    if _rejected(response):
+        raise ApiError(message)
+    for _ in range(2):
+        if "status" in response or response.get("pload") is None:
+            break
+        response = _object(response["pload"])
+    if response and "status" not in response:
+        raise ApiError(message)
+
+
 def parse_notification(
     event: dict, user_id: str, device_ids: list[str]
 ) -> tuple[str, StateUpdate | None] | None:
@@ -374,7 +388,7 @@ class SubZeroClient:
         return appliances
 
     async def _command(self, device_id: str, command: str, params: dict | None = None) -> dict:
-        if command not in {"get", "get_async", "open_cloud_async", "set"}:
+        if command not in {"get", "get_async", "open_cloud_async", "set", "reset_air_filter"}:
             raise ValueError("Unsupported appliance command")
         payload = {"cmd": command}
         if params is not None:
@@ -417,17 +431,11 @@ class SubZeroClient:
         ):
             raise ValueError("Unsupported setting or value type")
         response = await self._command(device_id, "set", {key: value})
-        if _rejected(response):
-            raise ApiError("Sub-Zero rejected the setting.")
-        response = _object(response.get("resp", response))
-        if _rejected(response):
-            raise ApiError("Sub-Zero rejected the setting.")
-        for _ in range(2):
-            if "status" in response or response.get("pload") is None:
-                break
-            response = _object(response["pload"])
-        if response and "status" not in response:
-            raise ApiError("Sub-Zero rejected the setting.")
+        _check_control_response(response, "Sub-Zero rejected the setting.")
+
+    async def reset_air_filter(self, device_id: str) -> None:
+        response = await self._command(device_id, "reset_air_filter")
+        _check_control_response(response, "Sub-Zero rejected the air filter reset.")
 
     async def watch(
         self, device_ids: list[str]

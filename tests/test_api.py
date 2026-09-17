@@ -842,7 +842,7 @@ async def test_channel_open_accepts_successful_http_statuses(control_server, tok
     assert len(control_server["requests"]) == 1
 
 
-@pytest.mark.parametrize("command", ["state", "open_channel", "set_property"])
+@pytest.mark.parametrize("command", ["state", "open_channel", "set_property", "reset_air_filter"])
 @pytest.mark.parametrize("layers", [1, 2])
 @pytest.mark.parametrize("status", [0, None, 1])
 async def test_commands_handle_nested_appliance_responses(
@@ -866,6 +866,23 @@ async def test_commands_handle_nested_appliance_responses(
             result = await getattr(client, command)(*args)
             if command == "state":
                 assert result == {"appliance_model": "ANY-MODEL", "ref_door_ajar": True}
+
+
+@pytest.mark.parametrize(("status", "body"), [(200, "OK"), (200, {}), (202, ""), (204, "")])
+async def test_air_filter_reset_uses_a_command_without_params(control_server, tokens, status, body):
+    control_server.update(status=status, response=body)
+    async with aiohttp.ClientSession() as session:
+        await api.SubZeroClient(session, "test-key", tokens).reset_air_filter("test-fridge")
+    assert control_server["requests"][0]["pload"] == {"cmd": "reset_air_filter"}
+    assert set(control_server["requests"][0]) == {"req_id", "pload"}
+
+
+@pytest.mark.parametrize("response", [{"error": "failed"}, {"resp": {"status": 1}}])
+async def test_air_filter_reset_rejects_error_responses(control_server, tokens, response):
+    control_server["response"] = response
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(api.ApiError, match="rejected the air filter reset"):
+            await api.SubZeroClient(session, "test-key", tokens).reset_air_filter("test-fridge")
 
 
 @pytest.mark.parametrize(("status", "ack"), [(200, "OK"), (500, {"Message": "OK"})])

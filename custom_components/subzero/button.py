@@ -1,13 +1,14 @@
-"""Remote starts using the appliance's physical Remote Ready interlock."""
+"""Remote starts and air-filter maintenance."""
 
 from homeassistant.components.button import ButtonEntity, ButtonEntityDescription
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.entity import EntityDescription
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import SubZeroConfigEntry
-from .controls import supports_control, validate_remote_start
+from .controls import supports_air_filter_reset, supports_control, validate_remote_start
 from .coordinator import SubZeroCoordinator
 from .entity import SubZeroEntity, async_setup_entities
 
@@ -34,6 +35,20 @@ async def async_setup_entry(
         return supports_control(coordinator.data, unit_key) and ready_key in coordinator.data
 
     async_setup_entities(entry, async_add_entities, DESCRIPTIONS, SubZeroStartButton, supported)
+    async_setup_entities(
+        entry,
+        async_add_entities,
+        (
+            ButtonEntityDescription(
+                key="reset_air_filter",
+                name="Reset air filter",
+                icon="mdi:air-filter",
+                entity_category=EntityCategory.CONFIG,
+            ),
+        ),
+        SubZeroAirFilterResetButton,
+        lambda coordinator, description: supports_air_filter_reset(coordinator.data),
+    )
 
 
 class SubZeroStartButton(SubZeroEntity, ButtonEntity):
@@ -53,3 +68,14 @@ class SubZeroStartButton(SubZeroEntity, ButtonEntity):
         await self.coordinator.async_set_properties(
             {self.entity_description.key.removeprefix("remote_start_"): True}
         )
+
+
+class SubZeroAirFilterResetButton(SubZeroEntity, ButtonEntity):
+    @property
+    def available(self) -> bool:
+        return self.coordinator.last_update_success and supports_air_filter_reset(
+            self.coordinator.data
+        )
+
+    async def async_press(self) -> None:
+        await self.coordinator.async_reset_air_filter()

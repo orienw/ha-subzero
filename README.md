@@ -50,6 +50,7 @@ Installing, restarting, or reconnecting the integration never changes appliance 
 | Night mode | Disabled, Enabled |
 | Air purification | On, Off |
 | Internal water dispenser | On, Off, on models that report it |
+| Reset air filter | Send a reset request after replacing the filter, on models that report air-filter life |
 | Accent light | Off, On, Low, Medium, High, on models that report accent lighting |
 
 The **Ice maker** control shows the selected mode. In [**Night ice**](https://www.subzero-wolf.com/assistance/answers/sub-zero/common/sub-zero-night-ice-mode), the separate **Ice maker enabled** status may be Off while the schedule pauses ice production.
@@ -57,6 +58,8 @@ The **Ice maker** control shows the selected mode. In [**Night ice**](https://ww
 Select **Manual** crisper temperature mode to adjust its setpoint. In Automatic mode, the setpoint control is unavailable and the sensor continues to show the configured value. The manual range stays within 2°F of the refrigerator setpoint and within that appliance's refrigerator limits. Refrigerator limits follow the reported appliance type, with model-based defaults when the type is unavailable. See [Sub-Zero's crisper temperature guide](https://www.subzero-wolf.com/assistance/answers/sub-zero/next-classic/sub-zero-classic-series-cl-refrigerator-drawer-temperature-contr).
 
 Turn off **Max ice** before adjusting the freezer setpoint. Refrigerator and freezer zones also provide climate entities for thermostat cards, with the same temperature limits and Max ice interlock as the number controls.
+
+The **Reset air filter** button sends the reset request and refreshes the appliance state. The filter-life sensor continues to show the value reported by the appliance.
 
 [Humidity control](https://www.subzero-wolf.com/assistance/answers/sub-zero/next-classic/next-classic-humidity-control) affects the refrigerator zone. [Night mode](https://www.subzero-wolf.com/assistance/answers/sub-zero/next-classic/next-classic-night-mode) dims the interior lights when the room is dark; **Night ice** is a separate ice-maker setting.
 

@@ -63,6 +63,10 @@ def is_dishwasher(data: dict) -> bool:
     return bool({"wash_cycle", "wash_status", "wash_cycle_on"}.intersection(data))
 
 
+def supports_air_filter_reset(data: dict) -> bool:
+    return (is_fridge(data) or is_wine(data)) and "air_filter_pct_remaining" in data
+
+
 def supports_control(data: dict, key: str) -> bool:
     if key in KITCHEN_TIMERS:
         prefix = KITCHEN_TIMERS[key]

@@ -29,7 +29,13 @@ from .const import (
     RECONNECT_DELAY,
     STATE_KEYS,
 )
-from .controls import control_matches, is_dishwasher, is_oven, validate_control_properties
+from .controls import (
+    control_matches,
+    is_dishwasher,
+    is_oven,
+    supports_air_filter_reset,
+    validate_control_properties,
+)
 
 _LOGGER = logging.getLogger(__name__)
 INITIAL_STATE_TIMEOUT = 16
@@ -122,6 +128,23 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 raise HomeAssistantError("Sign in to Sub-Zero again to change settings.") from error
             except ApiError as error:
                 raise HomeAssistantError(str(error)) from error
+
+    async def async_reset_air_filter(self) -> None:
+        async with self._command_lock:
+            if not self.last_update_success:
+                raise ServiceValidationError("The appliance is unavailable.")
+            if not supports_air_filter_reset(self.data):
+                raise ServiceValidationError("The appliance does not report an air filter.")
+            try:
+                await self.client.reset_air_filter(self.device_id)
+            except InvalidAuth as error:
+                self.entry.async_start_reauth(self.hass)
+                raise HomeAssistantError(
+                    "Sign in to Sub-Zero again to reset the air filter."
+                ) from error
+            except ApiError as error:
+                raise HomeAssistantError(str(error)) from error
+            await self.async_refresh()
 
     async def _async_set_property(
         self, key: str, value: bool | int, requested_at: datetime
