@@ -16,6 +16,7 @@ from .const import (
     ICE_KEYS,
     KITCHEN_TIMERS,
     LEGACY_ACCENT_LIGHT_OPTIONS,
+    LEGACY_START_SERIES,
     MANUAL_COOK_MODES,
     OVEN_PREFIXES,
     OVEN_TEMPERATURE_RANGES,
@@ -196,6 +197,29 @@ def validate_remote_start(data: dict, key: str) -> None:
     bounds = temperature_range(f"{prefix}_set_temp", data)
     if bounds is not None and not bounds[0] <= temperature <= bounds[1]:
         raise ServiceValidationError("Set a temperature within the cooking mode's range.")
+
+
+def start_properties(data: dict, key: str, temperature: int | None = None) -> dict:
+    """The app's remote-start writes, in its order, from the configured settings."""
+    if key == "wash_cycle_on":
+        properties = {}
+        if data.get("wash_cycle") in WASH_CYCLES and data["wash_cycle"] != 0:
+            properties["wash_cycle"] = data["wash_cycle"]
+        if type(data.get("delay_start_timer_duration")) is int:
+            properties["delay_start_timer_duration"] = data["delay_start_timer_duration"]
+        return {**properties, key: True}
+    prefix = key.removesuffix("_unit_on")
+    parts = appliance_type(data)
+    if parts is not None and parts[1] in LEGACY_START_SERIES:
+        properties = {} if temperature is None else {f"{prefix}_set_temp": temperature}
+        return {**properties, key: True}
+    if temperature is None:
+        temperature = data.get(f"{prefix}_set_temp")
+    return {
+        f"{prefix}_cook_mode": data.get(f"{prefix}_cook_mode"),
+        key: True,
+        f"{prefix}_set_temp": temperature,
+    }
 
 
 def temperature_range(key: str, data: dict) -> tuple[int, int] | None:

@@ -98,8 +98,12 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             sw_version=version.get("fw") if isinstance(version, dict) else None,
         )
 
-    async def async_set_properties(self, properties: dict) -> None:
-        """Serialize writes and confirm their result from appliance state."""
+    async def async_set_properties(self, properties: dict, *, force: bool = False) -> None:
+        """Serialize writes and confirm their result from appliance state.
+
+        Forced writes go out even when the appliance already reports the value,
+        which is how the app starts ovens and dishwashers.
+        """
         properties = dict(properties)
         async with self._command_lock:
             if not self.last_update_success:
@@ -114,8 +118,10 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                         self.data, self.device.get("temperature_unit"), {key: value}
                     )
                     requested_at[key] = dt_util.utcnow()
-                    if (key in KITCHEN_TIMERS and value > 0) or not control_matches(
-                        self.data, key, value, requested_at[key]
+                    if (
+                        force
+                        or (key in KITCHEN_TIMERS and value > 0)
+                        or not control_matches(self.data, key, value, requested_at[key])
                     ):
                         await self._async_set_property(key, value, requested_at[key])
                 if not self.last_update_success or any(
@@ -161,6 +167,10 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         remove_listener = self.async_add_listener(confirm)
         try:
             await self.client.set_property(self.device_id, key, value)
+            if key not in KITCHEN_TIMERS:
+                # A value the appliance already reports needs no further echo,
+                # which is how the app treats repeated writes.
+                confirm()
             try:
                 await asyncio.wait_for(confirmed.wait(), CONTROL_CONFIRM_TIMEOUT)
             except TimeoutError:

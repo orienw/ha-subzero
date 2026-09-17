@@ -8,7 +8,12 @@ from homeassistant.helpers.entity import EntityDescription
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import SubZeroConfigEntry
-from .controls import supports_air_filter_reset, supports_control, validate_remote_start
+from .controls import (
+    start_properties,
+    supports_air_filter_reset,
+    supports_control,
+    validate_remote_start,
+)
 from .coordinator import SubZeroCoordinator
 from .entity import SubZeroEntity, async_setup_entities
 
@@ -76,8 +81,9 @@ class SubZeroStartButton(SubZeroEntity, ButtonEntity):
         return supports_control(data, key)
 
     async def async_press(self) -> None:
+        key = self.entity_description.key.removeprefix("remote_start_")
         await self.coordinator.async_set_properties(
-            {self.entity_description.key.removeprefix("remote_start_"): True}
+            start_properties(self.coordinator.data, key), force=True
         )
 
 

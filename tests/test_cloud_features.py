@@ -388,10 +388,52 @@ async def test_remote_start_consumes_remote_ready(hass, appliances, device, key,
     await appliances.update(device, {ready: True})
     assert hass.states.get(entity_id).state != "unavailable"
     await hass.services.async_call("button", "press", {"entity_id": entity_id}, blocking=True)
-    appliances.client.set_property.assert_awaited_once_with(device, key, True)
+    expected = [call(device, key, True)]
+    if device == "dishwasher":
+        expected = [
+            call(device, "wash_cycle", 2),
+            call(device, "delay_start_timer_duration", 0),
+            call(device, "wash_cycle_on", True),
+        ]
+    assert appliances.client.set_property.await_args_list == expected
     assert coordinator.data[key] is True
     assert coordinator.data[ready] is False
     assert hass.states.get(entity_id).state == "unavailable"
+
+
+async def test_newer_oven_series_start_with_the_app_write_sequence(hass, appliances):
+    await appliances.update("oven", {"appliance_type": "17.15.1.3", "cav_remote_ready": True})
+    await hass.services.async_call(
+        "button", "press", {"entity_id": "button.oven_start_oven"}, blocking=True
+    )
+    assert appliances.client.set_property.await_args_list == [
+        call("oven", "cav_cook_mode", 1),
+        call("oven", "cav_unit_on", True),
+        call("oven", "cav_set_temp", 350),
+    ]
+    assert appliances.states["oven"]["cav_unit_on"] is True
+    appliances.client.set_property.reset_mock()
+    await appliances.update("oven", {"cav2_remote_ready": True})
+    await hass.services.async_call(
+        "climate",
+        "set_temperature",
+        {"entity_id": "climate.oven_lower_oven", "temperature": 400, "hvac_mode": "heat"},
+        blocking=True,
+    )
+    assert appliances.client.set_property.await_args_list == [
+        call("oven", "cav2_cook_mode", 1),
+        call("oven", "cav2_unit_on", True),
+        call("oven", "cav2_set_temp", 400),
+    ]
+    assert hass.states.get("climate.oven_lower_oven").state == "heat"
+    appliances.client.set_property.reset_mock()
+    await hass.services.async_call(
+        "climate",
+        "set_temperature",
+        {"entity_id": "climate.oven_lower_oven", "temperature": 425, "hvac_mode": "heat"},
+        blocking=True,
+    )
+    appliances.client.set_property.assert_awaited_once_with("oven", "cav2_set_temp", 425)
 
 
 @pytest.mark.parametrize(

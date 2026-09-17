@@ -124,6 +124,9 @@ GOURMET_RECIPES = {
 }
 # Wolf requires these modes to be started at the appliance.
 MANUAL_COOK_MODES = {3, 7, 9, 11}
+# E series and M series start with a power write alone; the app sends the
+# cooking mode, power, and setpoint to every other series.
+LEGACY_START_SERIES = {3, 4}
 OVEN_TEMPERATURE_RANGES = {
     3: {
         **dict.fromkeys((1, 2, 4, 5, 6), (170, 550)),
