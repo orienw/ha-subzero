@@ -10,6 +10,7 @@ from .const import (
     COOK_MODES,
     DISHWASHER_MODES,
     DISHWASHER_SWITCHES,
+    DOOR_AJAR_TIMEOUTS,
     FRIDGE_ENUM_OPTIONS,
     FRIDGE_MODE_KEYS,
     HUMIDITY_LABELS,
@@ -108,6 +109,7 @@ def supports_control(data: dict, key: str) -> bool:
         *ICE_KEYS,
         "air_filter_on",
         "internal_dispenser_enabled",
+        "door_ajar_timeout",
     }
 
 
@@ -290,6 +292,11 @@ def validate_control_properties(data: dict, temperature_unit: str | None, proper
             if type(value) is not int or not 0 <= value <= 12:
                 raise ServiceValidationError("The setting is outside the appliance's range.")
             if type(data[key]) is not int:
+                raise ServiceValidationError("The current appliance setting is unknown.")
+        elif key == "door_ajar_timeout":
+            if type(value) is not int or value not in DOOR_AJAR_TIMEOUTS.values():
+                raise ServiceValidationError("Select a supported door open delay.")
+            if type(data[key]) is not int or data[key] not in DOOR_AJAR_TIMEOUTS.values():
                 raise ServiceValidationError("The current appliance setting is unknown.")
         elif key.endswith("_cook_mode"):
             if type(value) is not int or value not in COOK_MODES.values():

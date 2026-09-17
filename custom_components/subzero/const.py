@@ -17,6 +17,7 @@ FRIDGE_ENUM_OPTIONS = {
 }
 # The app shows every humidity state but only lets Normal and Enhanced be selected.
 HUMIDITY_LABELS = {0: "Disabled", 1: "Normal", 2: "Enhanced", 3: "Low"}
+DOOR_AJAR_TIMEOUTS = {"Off": 0, "1 minute": 1, "2 minutes": 2, "5 minutes": 5, "10 minutes": 10}
 LEGACY_ACCENT_LIGHT_OPTIONS = {"Off": 0, "On": 100, "Low": 30, "Medium": 50, "High": 70}
 ACCENT_LIGHT_LABELS = {
     value: name
@@ -212,6 +213,7 @@ WRITABLE_INTEGER_KEYS = {
     "wash_cycle",
     "mode",
     "delay_start_timer_duration",
+    "door_ajar_timeout",
 }
 NETWORK_KEYS = {"ipv4_addr", "device_wlan_id"}
 SENSOR_KEYS = {

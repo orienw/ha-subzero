@@ -354,6 +354,37 @@ async def test_unknown_mode_values_are_not_treated_as_enabled(hass, controls, ke
     controls.client.set_property.assert_not_called()
 
 
+async def test_door_open_delay_select(hass, controls):
+    await controls.updates.put(("test-fridge", StateUpdate({"door_ajar_timeout": 5}, full=False)))
+    await hass.async_block_till_done()
+    delay = hass.states.get("select.kitchen_door_open_delay")
+    assert delay.state == "5 minutes"
+    assert delay.attributes["options"] == [
+        "Off",
+        "1 minute",
+        "2 minutes",
+        "5 minutes",
+        "10 minutes",
+    ]
+    await hass.services.async_call(
+        "select",
+        "select_option",
+        {"entity_id": "select.kitchen_door_open_delay", "option": "Off"},
+        blocking=True,
+    )
+    controls.client.set_property.assert_awaited_once_with("test-fridge", "door_ajar_timeout", 0)
+    assert hass.states.get("select.kitchen_door_open_delay").state == "Off"
+    await controls.updates.put(("test-fridge", StateUpdate({"door_ajar_timeout": 3}, full=False)))
+    await hass.async_block_till_done()
+    assert hass.states.get("select.kitchen_door_open_delay").state == "unavailable"
+    coordinator = controls.entry.runtime_data.coordinators["test-fridge"]
+    with pytest.raises(ServiceValidationError, match="unknown"):
+        await coordinator.async_set_properties({"door_ajar_timeout": 5})
+    controls.client.set_property.assert_awaited_once_with("test-fridge", "door_ajar_timeout", 0)
+    assert hass.states.get("select.oven_door_open_delay") is None
+    assert hass.states.get("select.dishwasher_door_open_delay") is None
+
+
 @pytest.mark.parametrize(("value", "label"), [(0, "Disabled"), (3, "Low")])
 async def test_humidity_states_the_app_cannot_select_are_still_reported(
     hass, controls, value, label

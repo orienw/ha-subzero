@@ -52,6 +52,7 @@ Installing, restarting, or reconnecting the integration never changes appliance 
 | Internal water dispenser | On, Off, on models that report it |
 | Reset air filter | Send a reset request after replacing the filter, on models that report air-filter life |
 | Accent light | Off, On, Low, Medium, High, on models that report accent lighting |
+| Door open delay | Off, 1, 2, 5, or 10 minutes before an open door triggers a notification, on models that report it |
 
 The **Ice maker** control shows the selected mode. In [**Night ice**](https://www.subzero-wolf.com/assistance/answers/sub-zero/common/sub-zero-night-ice-mode), the separate **Ice maker enabled** status may be Off while the schedule pauses ice production.
 

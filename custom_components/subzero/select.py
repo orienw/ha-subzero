@@ -1,6 +1,7 @@
 """Fridge modes, accent lighting, oven cooking modes, and dishwasher delay start."""
 
 from homeassistant.components.select import SelectEntity, SelectEntityDescription
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -9,6 +10,7 @@ from . import SubZeroConfigEntry
 from .const import (
     COOK_MODES,
     DISHWASHER_MODES,
+    DOOR_AJAR_TIMEOUTS,
     FRIDGE_ENUM_OPTIONS,
     FRIDGE_MODE_KEYS,
     ICE_KEYS,
@@ -42,6 +44,12 @@ DESCRIPTIONS = (
     SelectEntityDescription(
         key="accent_light_level", name="Accent light", icon="mdi:lightbulb-outline"
     ),
+    SelectEntityDescription(
+        key="door_ajar_timeout",
+        name="Door open delay",
+        icon="mdi:door-open",
+        entity_category=EntityCategory.CONFIG,
+    ),
     SelectEntityDescription(key="cav_cook_mode", name="Cooking mode", icon="mdi:stove"),
     SelectEntityDescription(key="cav2_cook_mode", name="Lower oven cooking mode", icon="mdi:stove"),
     SelectEntityDescription(key="wash_cycle", name="Wash cycle", icon="mdi:dishwasher"),
@@ -56,6 +64,7 @@ ENUM_OPTIONS = {
     "cav2_cook_mode": COOK_MODES,
     "wash_cycle": {name: value for value, name in WASH_CYCLES.items() if value != 0},
     "mode": DISHWASHER_MODES,
+    "door_ajar_timeout": DOOR_AJAR_TIMEOUTS,
     "delay_start_timer_duration": {
         "Off": 0,
         **{f"{hours} hour{'s' if hours != 1 else ''}": hours for hours in range(1, 13)},
