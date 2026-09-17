@@ -81,6 +81,7 @@ def supports_control(data: dict, key: str) -> bool:
         *FRIDGE_MODE_KEYS,
         *ICE_KEYS,
         "air_filter_on",
+        "internal_dispenser_enabled",
     }
 
 

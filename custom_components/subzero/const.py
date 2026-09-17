@@ -106,6 +106,7 @@ WRITABLE_BOOLEAN_KEYS = {
     *FRIDGE_MODE_KEYS,
     *ICE_KEYS,
     "air_filter_on",
+    "internal_dispenser_enabled",
     *(f"{prefix}_{suffix}" for prefix in OVEN_PREFIXES for suffix in ("unit_on", "light_on")),
     *DISHWASHER_SWITCHES,
     "wash_cycle_on",
@@ -150,6 +151,7 @@ BINARY_KEYS = {
     *ICE_KEYS,
     *FRIDGE_MODE_KEYS,
     "air_filter_on",
+    "internal_dispenser_enabled",
     *(
         f"{prefix}_{suffix}"
         for prefix in OVEN_PREFIXES

@@ -49,6 +49,7 @@ Installing, restarting, or reconnecting the integration never changes appliance 
 | Mode | Normal, Sabbath, High use, Short vacation, Long vacation |
 | Night mode | Disabled, Enabled |
 | Air purification | On, Off |
+| Internal water dispenser | On, Off, on models that report it |
 | Accent light | Off, On, Low, Medium, High, on models that report accent lighting |
 
 The **Ice maker** control shows the selected mode. In [**Night ice**](https://www.subzero-wolf.com/assistance/answers/sub-zero/common/sub-zero-night-ice-mode), the separate **Ice maker enabled** status may be Off while the schedule pauses ice production.

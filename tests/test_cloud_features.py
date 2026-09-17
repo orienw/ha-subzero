@@ -234,6 +234,22 @@ async def test_cloud_feature_discovery_does_not_send_controls(hass, appliances):
     appliances.client.set_property.assert_not_called()
 
 
+async def test_internal_dispenser_follows_reported_capability(hass, appliances):
+    entity_id = "switch.fridge_internal_water_dispenser"
+    assert hass.states.get(entity_id) is None
+    await appliances.update("fridge", {"internal_dispenser_enabled": False})
+    assert hass.states.get(entity_id).state == "off"
+    for service, value in (("turn_on", True), ("turn_off", False)):
+        await hass.services.async_call("switch", service, {"entity_id": entity_id}, blocking=True)
+        appliances.client.set_property.assert_awaited_with(
+            "fridge", "internal_dispenser_enabled", value
+        )
+    await appliances.update("fridge", {"internal_dispenser_enabled": None})
+    assert hass.states.get(entity_id).state == "unavailable"
+    await appliances.update("oven", {"internal_dispenser_enabled": False})
+    assert hass.states.get("switch.oven_internal_water_dispenser") is None
+
+
 async def test_wine_display_temperatures_survive_snapshots_and_updates(hass, appliances):
     await appliances.update(
         "fridge",

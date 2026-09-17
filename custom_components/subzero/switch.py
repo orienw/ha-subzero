@@ -11,6 +11,9 @@ from .entity import SubZeroEntity, async_setup_entities
 
 DESCRIPTIONS = (
     SwitchEntityDescription(key="air_filter_on", name="Air purification", icon="mdi:air-filter"),
+    SwitchEntityDescription(
+        key="internal_dispenser_enabled", name="Internal water dispenser", icon="mdi:water"
+    ),
     SwitchEntityDescription(key="cav_light_on", name="Oven light", icon="mdi:lightbulb"),
     SwitchEntityDescription(key="cav2_light_on", name="Lower oven light", icon="mdi:lightbulb"),
     *(SwitchEntityDescription(key=key, name=name) for key, name in DISHWASHER_SWITCHES.items()),
