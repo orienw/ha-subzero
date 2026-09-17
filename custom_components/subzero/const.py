@@ -115,7 +115,11 @@ WRITABLE_INTEGER_KEYS = {
     *SETPOINT_KEYS,
     *WINE_SETPOINT_KEYS,
     *FRIDGE_ENUM_OPTIONS,
-    *(f"{prefix}_{suffix}" for prefix in OVEN_PREFIXES for suffix in ("set_temp", "cook_mode")),
+    *(
+        f"{prefix}_{suffix}"
+        for prefix in OVEN_PREFIXES
+        for suffix in ("set_temp", "cook_mode", "probe_set_temp")
+    ),
     *KITCHEN_TIMERS,
     "delay_start_timer_duration",
 }

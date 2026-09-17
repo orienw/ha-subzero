@@ -394,6 +394,43 @@ async def test_remote_start_consumes_remote_ready(hass, appliances, device, key,
     assert hass.states.get(entity_id).state == "unavailable"
 
 
+@pytest.mark.parametrize(
+    ("prefix", "entity_id"),
+    [
+        ("cav", "number.oven_probe_target_temperature"),
+        ("cav2", "number.oven_lower_oven_probe_target_temperature"),
+    ],
+)
+async def test_probe_target_requires_connected_probe_and_ready_cavity(
+    hass, appliances, prefix, entity_id
+):
+    assert hass.states.get(entity_id).state == "unavailable"
+    key = f"{prefix}_probe_set_temp"
+    coordinator = appliances.entry.runtime_data.coordinators["oven"]
+    await appliances.update("oven", {f"{prefix}_probe_on": True})
+    with pytest.raises(ServiceValidationError, match="running or in Remote Ready"):
+        await coordinator.async_set_properties({key: 150})
+    await appliances.update("oven", {f"{prefix}_unit_on": True})
+    assert hass.states.get(entity_id).state == "unknown"
+    assert hass.states.get(entity_id).attributes["min"] == 120
+    assert hass.states.get(entity_id).attributes["max"] == 210
+    assert hass.states.get(entity_id).attributes["step"] == 5
+    for value in (120, 210):
+        await hass.services.async_call(
+            "number", "set_value", {"entity_id": entity_id, "value": value}, blocking=True
+        )
+        appliances.client.set_property.assert_awaited_with("oven", key, value)
+        assert hass.states.get(entity_id).state == str(value)
+    for value in (119, 211):
+        with pytest.raises(ServiceValidationError, match="range"):
+            await coordinator.async_set_properties({key: value})
+    await appliances.update("oven", {f"{prefix}_probe_on": False})
+    assert hass.states.get(entity_id).state == "unavailable"
+    with pytest.raises(ServiceValidationError, match="Connect the probe"):
+        await coordinator.async_set_properties({key: 150})
+    assert appliances.client.set_property.await_count == 2
+
+
 async def test_lower_oven_controls_leave_the_upper_oven_alone(hass, appliances):
     await appliances.update("oven", {"cav2_remote_ready": True})
     await hass.services.async_call(
@@ -746,6 +783,7 @@ async def test_full_snapshot_marks_missing_controls_unavailable(hass, appliances
 async def test_non_fahrenheit_units_omit_temperature_entities(hass, appliances):
     assert hass.states.get("climate.oven_oven") is None
     assert hass.states.get("climate.fridge_refrigerator") is None
+    assert hass.states.get("number.oven_probe_target_temperature") is None
     assert hass.states.get("select.oven_cooking_mode").state == "Bake"
     assert hass.states.get("number.oven_kitchen_timer_duration").state == "0"
     assert hass.states.get("switch.dishwasher_heated_dry").state == "off"

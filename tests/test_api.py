@@ -744,6 +744,8 @@ async def test_failed_control_request_is_not_automatically_retried(control_serve
     [
         ("cav_set_temp", 350),
         ("cav2_set_temp", 375),
+        ("cav_probe_set_temp", 150),
+        ("cav2_probe_set_temp", 165),
         ("cav_cook_mode", 1),
         ("cav2_cook_mode", 2),
         ("cav_unit_on", True),

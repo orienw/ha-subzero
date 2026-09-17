@@ -171,6 +171,8 @@ def validate_remote_start(data: dict, key: str) -> None:
 
 
 def temperature_range(key: str, data: dict) -> tuple[int, int] | None:
+    if key in {f"{prefix}_probe_set_temp" for prefix in OVEN_PREFIXES}:
+        return 120, 210
     if key in {f"{prefix}_set_temp" for prefix in OVEN_PREFIXES}:
         mode = data.get(key.replace("set_temp", "cook_mode"))
         if type(mode) is not int or mode not in COOK_MODES.values() or mode in {0, 3, 7, 11}:
@@ -257,6 +259,9 @@ def validate_control_properties(data: dict, temperature_unit: str | None, proper
                     raise ServiceValidationError(
                         "Select Manual crisper temperature before setting it."
                     )
+            if key.endswith("_probe_set_temp"):
+                if data.get(key.replace("probe_set_temp", "probe_on")) is not True:
+                    raise ServiceValidationError("Connect the probe before setting its target.")
         if key.endswith("_unit_on") or key == "wash_cycle_on":
             if value is True and data[key] is not True:
                 validate_remote_start(data, key)

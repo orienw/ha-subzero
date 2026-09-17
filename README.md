@@ -99,6 +99,7 @@ Controls include:
 - A climate entity for each cavity, with temperature control and on/off actions. Temperature changes require the oven to be running or in Remote Ready. Known oven series use limits for the selected cooking mode, such as 85–110°F for Proof and 140–200°F for Warm. Modes without an adjustable temperature keep their on/off controls. Unrecognized series retain the 85–550°F fallback range.
 - A cooking-mode selector and an interior-light switch for each cavity. Selecting Off turns that cavity off.
 - A Start oven button for each cavity, available only when the oven reports Remote Ready and a supported cooking mode and temperature are configured.
+- A probe target control for each reported probe, from 120–210°F. Connect the probe and have the cavity running or in Remote Ready to adjust it.
 - Two kitchen-timer duration controls, from 0 to 719 minutes. Setting a duration starts or restarts that timer; 0 cancels it. The number shows the configured duration when reported start/end times permit it. End-time sensors can drive countdown dashboards.
 
 Enable **Remote Ready at the oven before each remote start**. Opening a door cancels it. Broil, Convection broil, Proof, Self clean, and Gourmet must be started at the appliance. Those restrictions also apply to automations. See [Wolf's Remote Ready guide](https://www.subzero-wolf.com/assistance/answers/wolf/m-series-oven/sub-zero-group-owners-app---set-up-remote-access).

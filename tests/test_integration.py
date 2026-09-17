@@ -1076,7 +1076,7 @@ async def test_oven_entities_follow_the_reported_snapshot(hass, oven_loaded):
     entities = er.async_entries_for_device(
         er.async_get(hass), device.id, include_disabled_entities=True
     )
-    assert len(entities) == 23
+    assert len(entities) == 24
     assert {entity.unique_id for entity in entities if entity.disabled_by is not None} == {
         "test-oven_live_reporting_mode",
     }
@@ -1087,6 +1087,7 @@ async def test_oven_entities_follow_the_reported_snapshot(hass, oven_loaded):
     assert hass.states.get("sensor.wall_oven_oven_setpoint").state == "unknown"
     assert hass.states.get("sensor.wall_oven_probe_temperature").state == "unknown"
     assert hass.states.get("sensor.wall_oven_probe_setpoint").state == "unknown"
+    assert hass.states.get("number.wall_oven_probe_target_temperature").state == "unavailable"
     assert hass.states.get("sensor.wall_oven_refrigerator_setpoint") is None
     data = entry.runtime_data.coordinators["test-oven"].data
     assert "ap_ssid" not in data

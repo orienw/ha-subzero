@@ -1,4 +1,4 @@
-"""Fridge and wine setpoints, and oven kitchen timers."""
+"""Refrigeration and probe setpoints, and oven kitchen timers."""
 
 from homeassistant.components.number import (
     NumberDeviceClass,
@@ -32,6 +32,19 @@ DESCRIPTIONS = (
             ("crisp_set_temp", "Crisper setpoint"),
             ("wine_set_temp", "Wine setpoint"),
             ("wine2_set_temp", "Wine setpoint 2"),
+        )
+    ),
+    *(
+        NumberEntityDescription(
+            key=key,
+            name=name,
+            device_class=NumberDeviceClass.TEMPERATURE,
+            native_unit_of_measurement=UnitOfTemperature.FAHRENHEIT,
+            native_step=5,
+        )
+        for key, name in (
+            ("cav_probe_set_temp", "Probe target temperature"),
+            ("cav2_probe_set_temp", "Lower oven probe target temperature"),
         )
     ),
     *(
@@ -77,6 +90,8 @@ class SubZeroNumber(SubZeroEntity, NumberEntity):
         if self.entity_description.key in KITCHEN_TIMERS:
             return timer_minutes(self.coordinator.data, self.entity_description.key)
         value = self.coordinator.data.get(self.entity_description.key)
+        if self.entity_description.key.endswith("_probe_set_temp") and value == 0:
+            return None
         return value if is_finite_number(value) else None
 
     @property
@@ -103,12 +118,17 @@ class SubZeroNumber(SubZeroEntity, NumberEntity):
             return False
         if key in KITCHEN_TIMERS:
             return type(data.get(f"{KITCHEN_TIMERS[key]}_active")) is bool
-        if self.native_value is None:
+        if not is_finite_number(data.get(key)):
             return False
         if temperature_range(key, data) is None:
             return False
         if key == "crisp_set_temp":
             return type(data.get("crisp_temp_mode")) is int and data["crisp_temp_mode"] == 0
+        if key.endswith("_probe_set_temp"):
+            prefix = key.split("_", 1)[0]
+            return data.get(f"{prefix}_probe_on") is True and (
+                data.get(f"{prefix}_unit_on") is True or data.get(f"{prefix}_remote_ready") is True
+            )
         return key != "frz_set_temp" or "max_ice_on" not in data or data["max_ice_on"] is False
 
     async def async_set_native_value(self, value: float) -> None:
