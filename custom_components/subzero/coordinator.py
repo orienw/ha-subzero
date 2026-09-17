@@ -108,7 +108,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                         self.data, self.device.get("temperature_unit"), {key: value}
                     )
                     requested_at[key] = dt_util.utcnow()
-                    if key in KITCHEN_TIMERS or not control_matches(
+                    if (key in KITCHEN_TIMERS and value > 0) or not control_matches(
                         self.data, key, value, requested_at[key]
                     ):
                         await self._async_set_property(key, value, requested_at[key])

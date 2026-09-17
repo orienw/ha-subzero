@@ -495,7 +495,7 @@ async def test_timer_duration_is_confirmed_from_timer_state(hass, appliances, ke
     appliances.behavior["push"] = push
     reads = appliances.client.state.await_count
     assert hass.states.get(entity_id).attributes["max"] == 719
-    for minutes in (15, 15, 719, 0):
+    for minutes in (0, 15, 15, 719, 0, 0):
         await hass.services.async_call(
             "number", "set_value", {"entity_id": entity_id, "value": minutes}, blocking=True
         )
