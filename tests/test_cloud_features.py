@@ -250,6 +250,40 @@ async def test_internal_dispenser_follows_reported_capability(hass, appliances):
     assert hass.states.get("switch.oven_internal_water_dispenser") is None
 
 
+async def test_extra_refrigeration_zones_follow_reported_properties(hass, appliances):
+    await appliances.update(
+        "fridge",
+        {
+            "appliance_model": "TEST-WINE-DRAWER",
+            "appliance_type": "17.5.2.1",
+            "ref2_set_temp": 40,
+            "ref2_display_temp": 39,
+            "crisp_display_temp": 37,
+            "ref2_door_ajar": False,
+            "wine2_door_ajar": True,
+        },
+        full=True,
+    )
+    state = hass.states.get("climate.fridge_refrigerator_drawer")
+    assert state.attributes["current_temperature"] == 39
+    assert state.attributes["max_temp"] == 45
+    assert hass.states.get("sensor.fridge_crisper_display_temperature").state == "37"
+    assert hass.states.get("binary_sensor.fridge_refrigerator_drawer_door").state == "off"
+    assert hass.states.get("binary_sensor.fridge_wine_storage_door_2").state == "on"
+    await hass.services.async_call(
+        "number",
+        "set_value",
+        {"entity_id": "number.fridge_refrigerator_drawer_setpoint", "value": 45},
+        blocking=True,
+    )
+    appliances.client.set_property.assert_awaited_once_with("fridge", "ref2_set_temp", 45)
+    assert hass.states.get("climate.fridge_refrigerator_drawer").attributes["temperature"] == 45
+    with pytest.raises(ServiceValidationError, match="range"):
+        await appliances.entry.runtime_data.coordinators["fridge"].async_set_properties(
+            {"ref2_set_temp": 46}
+        )
+
+
 async def test_wine_display_temperatures_survive_snapshots_and_updates(hass, appliances):
     await appliances.update(
         "fridge",

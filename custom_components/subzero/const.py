@@ -5,7 +5,7 @@ CONTROL_CONFIRM_TIMEOUT = 5
 RECONNECT_DELAY = 30
 MAX_RECONNECT_DELAY = 900
 
-SETPOINT_KEYS = {"ref_set_temp", "frz_set_temp", "crisp_set_temp"}
+SETPOINT_KEYS = {"ref_set_temp", "ref2_set_temp", "frz_set_temp", "crisp_set_temp"}
 WINE_SETPOINT_KEYS = {"wine_set_temp", "wine2_set_temp"}
 FRIDGE_MODE_KEYS = ("sabbath_on", "high_use_on", "short_vacation_on", "long_vacation_on")
 ICE_KEYS = ("ice_maker_on", "max_ice_on", "night_ice_on")
@@ -124,6 +124,8 @@ SENSOR_KEYS = {
     *SETPOINT_KEYS,
     *WINE_SETPOINT_KEYS,
     "ref_display_temp",
+    "ref2_display_temp",
+    "crisp_display_temp",
     "frz_display_temp",
     "wine_display_temp",
     "wine2_display_temp",
@@ -143,8 +145,10 @@ SENSOR_KEYS = {
 }
 BINARY_KEYS = {
     "ref_door_ajar",
+    "ref2_door_ajar",
     "frz_door_ajar",
     "wine_door_ajar",
+    "wine2_door_ajar",
     "wine_temp_alert_on",
     "service_required",
     "unit_on",

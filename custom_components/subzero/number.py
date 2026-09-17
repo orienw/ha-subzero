@@ -27,6 +27,7 @@ DESCRIPTIONS = (
         )
         for key, name in (
             ("ref_set_temp", "Refrigerator setpoint"),
+            ("ref2_set_temp", "Refrigerator drawer setpoint"),
             ("frz_set_temp", "Freezer setpoint"),
             ("crisp_set_temp", "Crisper setpoint"),
             ("wine_set_temp", "Wine setpoint"),

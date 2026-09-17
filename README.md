@@ -42,7 +42,7 @@ Installing, restarting, or reconnecting the integration never changes appliance 
 
 | Control | Settings |
 | --- | --- |
-| Temperature setpoints | Refrigerator, freezer, crisper |
+| Temperature setpoints | Refrigerator, refrigerator drawer, freezer, crisper |
 | Crisper temperature mode | Automatic, Manual |
 | Humidity control | Normal, Enhanced |
 | Ice maker | Off, On, Max ice, Night ice |
@@ -64,10 +64,10 @@ Turn off **Max ice** before adjusting the freezer setpoint. Refrigerator and fre
 
 | Type | Available properties |
 | --- | --- |
-| Temperature setpoints | Refrigerator, freezer, crisper |
-| Display temperatures | Refrigerator and freezer, on models that report them |
+| Temperature setpoints | Refrigerator, refrigerator drawer, freezer, crisper |
+| Display temperatures | Refrigerator, refrigerator drawer, freezer, crisper, on models that report them |
 | Filters | Air and water filter life remaining, water filter capacity in gallons |
-| Doors | Refrigerator and freezer door open |
+| Doors | Refrigerator, refrigerator drawer, and freezer door open |
 | Ice-maker settings | Enabled, max ice, night ice, plus Max ice start and end times |
 | Operating modes | Sabbath, high use, short vacation, long vacation, plus High use start and end times |
 | Device status | Service required, power |
@@ -76,6 +76,8 @@ Turn off **Max ice** before adjusting the freezer setpoint. Refrigerator and fre
 Ice-maker settings and operating modes report their on/off state alongside their selectors. Switches report their own On/Off state, so they have no duplicate binary sensors.
 
 Refrigerator temperatures on the primary tested model are **configured setpoints**. The integration does not infer a measured temperature from a setpoint. A negative water filter capacity indicates usage beyond the reported filter capacity.
+
+Wine storage units expose setpoint controls from 40–65°F, climate entities, display temperatures, and door status for each reported wine zone.
 
 ## Wolf ovens
 

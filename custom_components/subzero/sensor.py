@@ -41,6 +41,12 @@ DESCRIPTIONS = (
         native_unit_of_measurement=UnitOfTemperature.FAHRENHEIT,
     ),
     SensorEntityDescription(
+        key="ref2_set_temp",
+        name="Refrigerator drawer setpoint",
+        device_class=SensorDeviceClass.TEMPERATURE,
+        native_unit_of_measurement=UnitOfTemperature.FAHRENHEIT,
+    ),
+    SensorEntityDescription(
         key="frz_set_temp",
         name="Freezer setpoint",
         device_class=SensorDeviceClass.TEMPERATURE,
@@ -153,6 +159,8 @@ DESCRIPTIONS = (
         )
         for key, name in (
             ("ref_display_temp", "Refrigerator display temperature"),
+            ("ref2_display_temp", "Refrigerator drawer display temperature"),
+            ("crisp_display_temp", "Crisper display temperature"),
             ("frz_display_temp", "Freezer display temperature"),
             ("wine_display_temp", "Wine display temperature"),
             ("wine2_display_temp", "Wine display temperature 2"),

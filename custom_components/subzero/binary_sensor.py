@@ -17,10 +17,18 @@ DESCRIPTIONS = (
         key="ref_door_ajar", name="Refrigerator door", device_class=BinarySensorDeviceClass.DOOR
     ),
     BinarySensorEntityDescription(
+        key="ref2_door_ajar",
+        name="Refrigerator drawer door",
+        device_class=BinarySensorDeviceClass.DOOR,
+    ),
+    BinarySensorEntityDescription(
         key="frz_door_ajar", name="Freezer door", device_class=BinarySensorDeviceClass.DOOR
     ),
     BinarySensorEntityDescription(
         key="wine_door_ajar", name="Wine storage door", device_class=BinarySensorDeviceClass.DOOR
+    ),
+    BinarySensorEntityDescription(
+        key="wine2_door_ajar", name="Wine storage door 2", device_class=BinarySensorDeviceClass.DOOR
     ),
     BinarySensorEntityDescription(
         key="wine_temp_alert_on",

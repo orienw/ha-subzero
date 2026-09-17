@@ -15,6 +15,7 @@ DESCRIPTIONS = tuple(
     EntityDescription(key=key, name=name)
     for key, name in (
         ("ref_set_temp", "Refrigerator"),
+        ("ref2_set_temp", "Refrigerator drawer"),
         ("frz_set_temp", "Freezer"),
         ("wine_set_temp", "Wine"),
         ("wine2_set_temp", "Wine 2"),

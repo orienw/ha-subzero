@@ -184,7 +184,7 @@ def temperature_range(key: str, data: dict) -> tuple[int, int] | None:
         maximum = temperature_range("ref_set_temp", data)[1]
         lower, upper = max(34, refrigerator - 2), min(maximum, refrigerator + 2)
         return (math.ceil(lower), math.floor(upper)) if lower <= upper else None
-    if key == "ref_set_temp":
+    if key in {"ref_set_temp", "ref2_set_temp"}:
         if (parts := appliance_type(data)) is not None:
             _, series, middle, _ = parts
             if series == 13 and middle in {3, 6}:
