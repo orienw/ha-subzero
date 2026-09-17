@@ -92,6 +92,7 @@ Each reported oven cavity has its own entities. First-cavity entity IDs are pres
 | Status | Door, cooking, preheated, remote ready, probe in use, probe target reached, Gourmet mode |
 | Timers | Cooking timer active or complete, both kitchen timers active or complete, reported start/end times |
 | Cooking mode | Recognized mode name and whether the appliance permits mode changes |
+| Gourmet program | Named program reported by each cavity, such as Baked potato or Fresh pizza |
 | Shared status | Sabbath mode, service required, Wi-Fi signal strength |
 
 Controls include:
@@ -105,6 +106,8 @@ Controls include:
 Enable **Remote Ready at the oven before each remote start**. Opening a door cancels it. Broil, Convection broil, Proof, Self clean, and Gourmet must be started at the appliance. Those restrictions also apply to automations. See [Wolf's Remote Ready guide](https://www.subzero-wolf.com/assistance/answers/wolf/m-series-oven/sub-zero-group-owners-app---set-up-remote-access).
 
 Oven temperature fields that report zero while idle show as unknown; probe readings also show as unknown when the probe is not in use. Unknown cooking-mode codes show as unknown and cannot be selected.
+
+Gourmet program sensors report the appliance's recipe code as a name. Code 0 shows None; unrecognized codes show as unknown. Select and start Gourmet programs at the oven.
 
 ## Cove dishwashers
 

@@ -20,7 +20,14 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import SubZeroConfigEntry
-from .const import COOK_MODES, NETWORK_KEYS, OVEN_PREFIXES, WASH_CYCLES, WASH_STATUSES
+from .const import (
+    COOK_MODES,
+    GOURMET_RECIPES,
+    NETWORK_KEYS,
+    OVEN_PREFIXES,
+    WASH_CYCLES,
+    WASH_STATUSES,
+)
 from .controls import appliance_datetime, is_finite_number
 from .entity import SubZeroEntity, async_setup_entities
 
@@ -31,6 +38,7 @@ ENUM_VALUES = {
         f"{prefix}_cook_mode": {value: name for name, value in COOK_MODES.items()}
         for prefix in OVEN_PREFIXES
     },
+    **{f"{prefix}_gourmet_recipe": GOURMET_RECIPES for prefix in OVEN_PREFIXES},
 }
 # Entities write state in this order within one update, and automations can observe it.
 DESCRIPTIONS = (
@@ -185,6 +193,8 @@ DESCRIPTIONS = (
             ("wash_status", "Wash status"),
             ("cav_cook_mode", "Cooking mode"),
             ("cav2_cook_mode", "Lower oven cooking mode"),
+            ("cav_gourmet_recipe", "Gourmet program"),
+            ("cav2_gourmet_recipe", "Lower oven Gourmet program"),
         )
     ),
     *(

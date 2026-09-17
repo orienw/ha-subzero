@@ -831,6 +831,34 @@ async def test_dishwasher_pending_delayed_and_error_states(hass, appliances):
         assert hass.states.get("sensor.dishwasher_wash_status").state == label
 
 
+async def test_gourmet_programs_are_discovered_from_reported_recipe_codes(hass, appliances):
+    upper = "sensor.oven_gourmet_program"
+    lower = "sensor.oven_lower_oven_gourmet_program"
+    assert hass.states.get(upper) is None
+    assert hass.states.get(lower) is None
+
+    await appliances.update("oven", {"cav_gourmet_recipe": 45, "cav2_gourmet_recipe": 70})
+    assert hass.states.get(upper).state == "Baked potato"
+    assert hass.states.get(lower).state == "Fresh pizza"
+
+    await appliances.update("oven", {"cav_gourmet_recipe": 0, "cav2_gourmet_recipe": 79})
+    assert hass.states.get(upper).state == "None"
+    assert hass.states.get(lower).state == "Lasagna, 3 racks"
+    appliances.client.set_property.assert_not_awaited()
+
+    with pytest.raises(ServiceValidationError, match="does not report this setting"):
+        await appliances.entry.runtime_data.coordinators["oven"].async_set_properties(
+            {"cav_gourmet_recipe": 70}
+        )
+    appliances.client.set_property.assert_not_awaited()
+
+
+@pytest.mark.parametrize("value", [True, "45", 45.0, None, -1, 80])
+async def test_unrecognized_gourmet_recipe_codes_are_unknown(hass, appliances, value):
+    await appliances.update("oven", {"cav_gourmet_recipe": value})
+    assert hass.states.get("sensor.oven_gourmet_program").state == "unknown"
+
+
 async def test_unknown_enum_values_do_not_become_known_modes(hass, appliances):
     await appliances.update(
         "dishwasher", {"wash_cycle": True, "wash_status": 900, "delay_start_timer_duration": 13}
