@@ -34,6 +34,8 @@ Temperature entities require the appliance to be set to Fahrenheit in the Sub-Ze
 
 Timestamp sensors require an explicit timezone offset, either in the timestamp or in the appliance clock, and otherwise show as unknown.
 
+Each appliance reports **Active faults**: the count of currently active faults and their details, refreshed every 30 minutes. Clearing faults happens at the appliance.
+
 Installing, restarting, or reconnecting the integration never changes appliance settings. Settings change only when you use a control or run an automation.
 
 ## Sub-Zero refrigerators

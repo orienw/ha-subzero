@@ -19,6 +19,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry, async_
 from custom_components.subzero.api import (
     ApiError,
     Appliance,
+    ApplianceFault,
     StateUpdate,
     parse_notification,
     token_state,
@@ -193,6 +194,8 @@ async def appliances(hass, tokens, request):
         client.state = AsyncMock(side_effect=lambda device_id: dict(states[device_id]))
         client.set_property = AsyncMock(side_effect=write)
         client.reset_air_filter = AsyncMock()
+        client.appliance_faults = AsyncMock(return_value=[])
+        client.fault_metadata = AsyncMock(return_value=None)
         client.watch = watch
         assert await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
@@ -1267,6 +1270,109 @@ async def test_device_diagnostics_select_only_the_requested_appliance(hass, appl
     assert result["state"]["appliance_model"] == "DO30PM"
     assert "DW2450WS" not in json.dumps(result)
     assert appliances.client.state.await_count == 3
+
+
+async def test_active_faults_sensor_counts_active_records_and_caches_metadata(hass, appliances):
+    created = "2026-03-01T12:00:00+00:00"
+    await appliances.update("fridge", {"appliance_type": "17.15.1.3"})
+    appliances.client.appliance_faults = AsyncMock(
+        return_value=[
+            ApplianceFault("ICE01", 3, True, created, "Ice maker"),
+            ApplianceFault("FAN02", 1, False, created, "Fan"),
+            ApplianceFault("DOOR03", 4, True, created, None),
+        ]
+    )
+    appliances.client.fault_metadata = AsyncMock(
+        side_effect=lambda code, series: {
+            "ICE01": {"title": "Ice fault", "resolution_steps": "Reset ice maker"}
+        }.get(code)
+    )
+    coordinator = appliances.entry.runtime_data.fault_coordinators["fridge"]
+    await coordinator.async_refresh()
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    state = hass.states.get("sensor.fridge_active_faults")
+    assert state.state == "2"
+    assert state.attributes["faults"] == [
+        {
+            "code": "ICE01",
+            "severity": "high",
+            "description": "Ice maker",
+            "created": created,
+            "title": "Ice fault",
+            "resolution_steps": "Reset ice maker",
+        },
+        {"code": "DOOR03", "severity": "critical", "created": created},
+    ]
+    assert appliances.client.fault_metadata.await_args_list == [
+        call("ICE01", "nge"),
+        call("DOOR03", "nge"),
+    ]
+
+
+async def test_active_faults_sensor_distinguishes_fetch_failure_from_an_empty_list(
+    hass, appliances
+):
+    entity_id = "sensor.fridge_active_faults"
+    assert hass.states.get(entity_id).state == "0"
+    assert hass.states.get(entity_id).attributes["faults"] == []
+    coordinator = appliances.entry.runtime_data.fault_coordinators["fridge"]
+    appliances.client.appliance_faults = AsyncMock(side_effect=ApiError("Disconnected"))
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    assert hass.states.get(entity_id).state == "unavailable"
+    appliances.client.appliance_faults = AsyncMock(return_value=[])
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    state = hass.states.get(entity_id)
+    assert state.state == "0"
+    assert state.attributes["faults"] == []
+
+
+async def test_fault_metadata_uses_the_appliance_series_name(hass, appliances):
+    created = "2026-03-01T12:00:00+00:00"
+    appliances.client.appliance_faults = AsyncMock(
+        return_value=[ApplianceFault("ICE01", 3, True, created, None)]
+    )
+    appliances.client.fault_metadata.reset_mock()
+    coordinator = appliances.entry.runtime_data.fault_coordinators["fridge"]
+    await coordinator.async_refresh()
+    appliances.client.fault_metadata.assert_not_awaited()
+    await appliances.update("fridge", {"appliance_type": "17.15.1.3"})
+    await coordinator.async_refresh()
+    appliances.client.fault_metadata.assert_awaited_once_with("ICE01", "nge")
+    appliances.client.fault_metadata.reset_mock()
+    await appliances.update("fridge", {"appliance_type": "not-a-type"})
+    await coordinator.async_refresh()
+    appliances.client.fault_metadata.assert_not_awaited()
+
+
+async def test_diagnostics_include_faults_without_identifiers(hass, appliances):
+    created = "2026-03-01T12:00:00+00:00"
+    appliances.client.appliance_faults = AsyncMock(
+        return_value=[
+            ApplianceFault("ICE01", 3, True, created, "Ice maker"),
+            ApplianceFault("FAN02", 1, False, created, None),
+        ]
+    )
+    await appliances.entry.runtime_data.fault_coordinators["fridge"].async_refresh()
+    device = dr.async_get(hass).async_get_device_by_identifier(
+        (DOMAIN, "fridge"), appliances.entry.entry_id
+    )
+    result = await async_get_device_diagnostics(hass, appliances.entry, device)
+    assert result["faults"] == [
+        {
+            "code": "ICE01",
+            "severity": "high",
+            "active": True,
+            "created": created,
+            "description": "Ice maker",
+        },
+        {"code": "FAN02", "severity": "low", "active": False, "created": created},
+    ]
+    for item in result["faults"]:
+        assert "id" not in item
+        assert "deviceId" not in item
 
 
 @pytest.mark.parametrize(

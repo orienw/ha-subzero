@@ -17,11 +17,14 @@ from homeassistant.const import (
     UnitOfVolume,
 )
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import SubZeroConfigEntry
 from .const import (
     COOK_MODES,
+    FAULT_SEVERITIES,
     GOURMET_RECIPES,
     NETWORK_KEYS,
     OVEN_PREFIXES,
@@ -29,6 +32,7 @@ from .const import (
     WASH_STATUSES,
 )
 from .controls import appliance_datetime, is_finite_number
+from .coordinator import SubZeroCoordinator, SubZeroFaultsCoordinator
 from .entity import SubZeroEntity, async_setup_entities
 
 ENUM_VALUES = {
@@ -253,6 +257,10 @@ async def async_setup_entry(
             )
         ),
     )
+    async_add_entities(
+        SubZeroActiveFaultsSensor(coordinator, entry.runtime_data.fault_coordinators[device_id])
+        for device_id, coordinator in entry.runtime_data.coordinators.items()
+    )
 
 
 class SubZeroSensor(SubZeroEntity, SensorEntity):
@@ -297,3 +305,48 @@ class SubZeroSensor(SubZeroEntity, SensorEntity):
             ):
                 return None
         return value
+
+
+class SubZeroActiveFaultsSensor(CoordinatorEntity[SubZeroFaultsCoordinator], SensorEntity):
+    _attr_has_entity_name = True
+    _attr_name = "Active faults"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, appliance: SubZeroCoordinator, coordinator: SubZeroFaultsCoordinator):
+        super().__init__(coordinator)
+        self.appliance = appliance
+        self._attr_unique_id = f"{appliance.device_id}_active_faults"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return self.appliance.device_info
+
+    @property
+    def available(self) -> bool:
+        return super().available and self.coordinator.data is not None
+
+    @property
+    def native_value(self) -> int | None:
+        if self.coordinator.data is None:
+            return None
+        return sum(1 for fault in self.coordinator.data if fault.active)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, list[dict]]:
+        if self.coordinator.data is None:
+            return {}
+        faults = []
+        for fault in self.coordinator.data:
+            if not fault.active:
+                continue
+            item = {}
+            if fault.code is not None:
+                item["code"] = fault.code
+            item["severity"] = FAULT_SEVERITIES.get(fault.severity, "unknown")
+            if fault.description is not None:
+                item["description"] = fault.description
+            item["created"] = fault.created
+            if metadata := self.coordinator.metadata(fault.code):
+                item.update(metadata)
+            faults.append(item)
+        return {"faults": faults}

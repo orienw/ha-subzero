@@ -75,6 +75,15 @@ class StateUpdate:
 
 
 @dataclass(frozen=True)
+class ApplianceFault:
+    code: str | None
+    severity: int
+    active: bool
+    created: str
+    description: str | None
+
+
+@dataclass(frozen=True)
 class ChannelOpened:
     """The appliance accepted its update channel."""
 
@@ -132,7 +141,7 @@ def retry_delay(value: str | None) -> float:
     return 600
 
 
-def _object(value) -> dict:
+def _object(value, expected=dict) -> dict | list:
     layers = 0
     while isinstance(value, str):
         try:
@@ -146,11 +155,40 @@ def _object(value) -> dict:
         except ValueError, RecursionError:
             raise ApiError("Sub-Zero sent an invalid notification.") from None
         layers += 1
-    if not isinstance(value, dict):
+    if not isinstance(value, expected):
         raise ApiError("Sub-Zero sent an invalid notification.")
     if layers > 1:
         _LOGGER.debug("Decoded %d JSON string layers", layers)
     return value
+
+
+def _parse_fault(item) -> ApplianceFault | None:
+    if not isinstance(item, dict):
+        return None
+    created = item.get("createdTime")
+    if not isinstance(created, str):
+        return None
+    try:
+        datetime.fromisoformat(created)
+    except ValueError:
+        return None
+    severity = item.get("corporateSeverity", 1)
+    if type(severity) is not int:
+        severity = 1
+    active = item.get("active")
+    if isinstance(active, str):
+        active = active == "true"
+    else:
+        active = active is True
+    code = item.get("fault")
+    description = item.get("description")
+    return ApplianceFault(
+        code if isinstance(code, str) else None,
+        severity,
+        active,
+        created,
+        description if isinstance(description, str) else None,
+    )
 
 
 def _rejected(response: dict) -> bool:
@@ -277,7 +315,7 @@ class SubZeroClient:
         appliance_command=False,
         headers: dict[str, str] | None = None,
         **kwargs,
-    ) -> dict:
+    ) -> dict | list:
         if self._retry_at > time.monotonic():
             raise RateLimited(self._retry_at - time.monotonic())
         try:
@@ -314,7 +352,7 @@ class SubZeroClient:
                 if response.status != 200:
                     raise ApiError(f"Sub-Zero returned HTTP {response.status}.")
                 try:
-                    return _object(await response.json(content_type=None))
+                    return _object(await response.json(content_type=None), expected=(dict, list))
                 except ValueError:
                     raise ApiError("Sub-Zero returned an invalid API response.") from None
         except aiohttp.ClientError, TimeoutError:
@@ -344,7 +382,7 @@ class SubZeroClient:
 
     async def _request(
         self, method: str, path: str, *, user_id: str | None = None, **kwargs
-    ) -> dict:
+    ) -> dict | list:
         await self.refresh()
         token = self._api_token
         headers = {
@@ -430,6 +468,45 @@ class SubZeroClient:
     async def reset_air_filter(self, device_id: str) -> None:
         response = await self._command(device_id, "reset_air_filter")
         _check_control_response(response, "Sub-Zero rejected the air filter reset.")
+
+    async def appliance_faults(self, device_id: str) -> list[ApplianceFault]:
+        path = "/fault-notifications/v1/notifications/device/" + quote(device_id, safe="")
+        try:
+            data = await self._request("GET", path)
+        except ApiError as error:
+            if str(error) == "Sub-Zero returned HTTP 404.":
+                return []
+            raise
+        if not isinstance(data, list):
+            raise ApiError("Sub-Zero returned an invalid API response.")
+        faults = []
+        for item in data:
+            if fault := _parse_fault(item):
+                faults.append(fault)
+        return faults
+
+    async def fault_metadata(self, code: str, applies_to: str) -> dict | None:
+        path = (
+            "/faults-meta-data/v1/Search?code="
+            + quote(code, safe="")
+            + "&appliesTo="
+            + quote(applies_to, safe="")
+        )
+        try:
+            data = await self._request("GET", path)
+        except ApiError, InvalidAuth:
+            return None
+        if not isinstance(data, list) or not data:
+            return None
+        item = data[-1]
+        if not isinstance(item, dict):
+            return None
+        metadata = {}
+        if isinstance(item.get("title"), str):
+            metadata["title"] = item["title"]
+        if isinstance(item.get("resolutionSteps"), str):
+            metadata["resolution_steps"] = item["resolutionSteps"]
+        return metadata or None
 
     async def watch(
         self, device_ids: list[str]

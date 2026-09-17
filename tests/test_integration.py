@@ -74,6 +74,8 @@ async def loaded(hass, tokens, request):
         }
         client.watched = []
         client.open_channel = AsyncMock()
+        client.appliance_faults = AsyncMock(return_value=[])
+        client.fault_metadata = AsyncMock(return_value=None)
         client.appliances = AsyncMock(
             return_value=[
                 Appliance("test-fridge", "Kitchen", getattr(request, "param", "F")),
@@ -108,6 +110,7 @@ async def test_reported_properties_drive_entity_discovery(hass, loaded):
         "test-fridge_ref_set_temp",
         "test-fridge_ref_door_ajar",
         "test-fridge_live_reporting_mode",
+        "test-fridge_active_faults",
     }
     assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "38"
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
@@ -1009,6 +1012,11 @@ async def test_v1_upgrade_enables_integration_disabled_entities(hass, tokens):
                 "long_vacation_on": False,
             },
         ),
+        patch(
+            "custom_components.subzero.api.SubZeroClient.appliance_faults",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
         patch("custom_components.subzero.coordinator.SubZeroAccount.listen"),
     ):
         assert await hass.config_entries.async_setup(entry.entry_id)
@@ -1076,7 +1084,7 @@ async def test_oven_entities_follow_the_reported_snapshot(hass, oven_loaded):
     entities = er.async_entries_for_device(
         er.async_get(hass), device.id, include_disabled_entities=True
     )
-    assert len(entities) == 24
+    assert len(entities) == 25
     assert {entity.unique_id for entity in entities if entity.disabled_by is not None} == {
         "test-oven_live_reporting_mode",
     }

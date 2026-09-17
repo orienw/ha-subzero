@@ -1250,3 +1250,141 @@ async def test_notification_protocol_failures_still_disconnect(
         with pytest.raises(api.ApiError, match=message):
             await anext(stream)
     assert not client.push_connected
+
+
+@pytest.fixture
+async def fault_server(aiohttp_server, monkeypatch, socket_enabled, tokens):
+    behavior = {
+        "requests": [],
+        "faults": {"status": 200, "body": []},
+        "metadata": {"status": 200, "body": []},
+    }
+
+    def respond(spec):
+        status, body = spec["status"], spec["body"]
+        if isinstance(body, str):
+            return web.Response(text=body, status=status)
+        return web.json_response(body, status=status)
+
+    async def faults(request):
+        assert request.headers.getall("User-Agent") == ["Dart/3.11 (dart:io)"]
+        assert request.headers["Accept-Encoding"] == "gzip"
+        assert request.match_info["device_id"] == "test-fridge"
+        assert request.headers["Userid"] == "test-owner"
+        assert request.headers["Ocp-Apim-Subscription-Key"] == "test-key"
+        assert request.headers["Authorization"] == "Bearer " + tokens["id_token"]
+        behavior["requests"].append(str(request.rel_url))
+        return respond(behavior["faults"])
+
+    async def metadata(request):
+        assert request.headers.getall("User-Agent") == ["Dart/3.11 (dart:io)"]
+        assert request.headers["Accept-Encoding"] == "gzip"
+        assert request.headers["Userid"] == "test-owner"
+        assert request.headers["Ocp-Apim-Subscription-Key"] == "test-key"
+        assert request.headers["Authorization"] == "Bearer " + tokens["id_token"]
+        behavior["requests"].append(dict(request.query))
+        return respond(behavior["metadata"])
+
+    app = web.Application()
+    app.router.add_get("/fault-notifications/v1/notifications/device/{device_id}", faults)
+    app.router.add_get("/faults-meta-data/v1/Search", metadata)
+    server = await aiohttp_server(app)
+    monkeypatch.setattr(api, "API_BASE", str(server.make_url("/")).rstrip("/"))
+    return behavior
+
+
+async def test_fault_records_parse_active_flags_and_severity_defaults(fault_server, tokens):
+    created = "2026-03-01T12:00:00+00:00"
+    fault_server["faults"]["body"] = [
+        {
+            "id": "guid-active",
+            "fault": "ICE01",
+            "corporateSeverity": 3,
+            "active": "true",
+            "description": "Ice maker",
+            "createdTime": created,
+            "deviceId": "test-fridge",
+        },
+        {
+            "fault": "FAN02",
+            "active": "false",
+            "createdTime": created,
+        },
+        {
+            "fault": "DOOR03",
+            "active": True,
+            "createdTime": created,
+        },
+        {
+            "fault": "UNK04",
+            "corporateSeverity": 9,
+            "active": False,
+            "createdTime": created,
+        },
+    ]
+    async with aiohttp.ClientSession() as session:
+        records = await api.SubZeroClient(session, "test-key", tokens).appliance_faults(
+            "test-fridge"
+        )
+    assert records == [
+        api.ApplianceFault("ICE01", 3, True, created, "Ice maker"),
+        api.ApplianceFault("FAN02", 1, False, created, None),
+        api.ApplianceFault("DOOR03", 1, True, created, None),
+        api.ApplianceFault("UNK04", 9, False, created, None),
+    ]
+    assert fault_server["requests"] == ["/fault-notifications/v1/notifications/device/test-fridge"]
+
+
+async def test_missing_fault_records_are_an_empty_list(fault_server, tokens):
+    fault_server["faults"] = {"status": 404, "body": {}}
+    async with aiohttp.ClientSession() as session:
+        client = api.SubZeroClient(session, "test-key", tokens)
+        assert await client.appliance_faults("test-fridge") == []
+
+
+@pytest.mark.parametrize(("status", "body"), [(500, {}), (200, {})])
+async def test_invalid_fault_list_is_an_error(fault_server, tokens, status, body):
+    fault_server["faults"] = {"status": status, "body": body}
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(api.ApiError):
+            await api.SubZeroClient(session, "test-key", tokens).appliance_faults("test-fridge")
+
+
+async def test_fault_records_without_created_time_are_skipped(fault_server, tokens):
+    created = "2026-03-01T12:00:00+00:00"
+    fault_server["faults"]["body"] = [
+        {"fault": "SKIP", "active": "true"},
+        {"fault": "KEEP", "active": "true", "createdTime": created},
+        {"fault": "ALSO_SKIP", "active": "true", "createdTime": None},
+    ]
+    async with aiohttp.ClientSession() as session:
+        records = await api.SubZeroClient(session, "test-key", tokens).appliance_faults(
+            "test-fridge"
+        )
+    assert records == [api.ApplianceFault("KEEP", 1, True, created, None)]
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "expected"),
+    [
+        (
+            200,
+            [
+                {"title": "first", "resolutionSteps": "one"},
+                {"title": "Door ajar", "resolutionSteps": "Close the door"},
+            ],
+            {"title": "Door ajar", "resolution_steps": "Close the door"},
+        ),
+        (200, [], None),
+        (404, {}, None),
+        (500, {"error": "failed"}, None),
+    ],
+)
+async def test_fault_metadata_uses_the_last_item_and_ignores_failures(
+    fault_server, tokens, status, body, expected
+):
+    fault_server["metadata"] = {"status": status, "body": body}
+    async with aiohttp.ClientSession() as session:
+        result = await api.SubZeroClient(session, "test-key", tokens).fault_metadata("ICE01", "nge")
+    assert result == expected
+    assert fault_server["requests"] == [{"code": "ICE01", "appliesTo": "nge"}]

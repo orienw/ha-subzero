@@ -216,6 +216,38 @@ WRITABLE_INTEGER_KEYS = {
     "door_ajar_timeout",
 }
 NETWORK_KEYS = {"ipv4_addr", "device_wlan_id"}
+FAULT_SEVERITIES = {
+    0: "undefined",
+    1: "low",
+    2: "medium",
+    3: "high",
+    4: "critical",
+    5: "urgent",
+}
+FAULT_METADATA_APPLIES_TO_BY_SERIES = {
+    0: "unknown",
+    1: "bi",
+    2: "ngi",
+    3: "eSeries",
+    4: "mSeries",
+    5: "wine",
+    6: "cove",
+    7: "pro",
+    8: "range",
+    9: "specialty",
+    11: "bi5",
+    12: "bi5Wine",
+    13: "deu",
+    14: "deuWine",
+    15: "nge",
+    16: "hybridM",
+    17: "ds3",
+    18: "ds3Wine",
+    20: "cove2",
+    21: "dice",
+    22: "ngix",
+    23: "pvii",
+}
 SENSOR_KEYS = {
     *SETPOINT_KEYS,
     *WINE_SETPOINT_KEYS,

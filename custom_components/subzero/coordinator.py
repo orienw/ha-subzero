@@ -4,7 +4,7 @@ import asyncio
 import logging
 import random
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
@@ -18,11 +18,19 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
-from .api import ApiError, ChannelOpened, RateLimited, StateUpdate, SubZeroClient
+from .api import (
+    ApiError,
+    ApplianceFault,
+    ChannelOpened,
+    RateLimited,
+    StateUpdate,
+    SubZeroClient,
+)
 from .auth import InvalidAuth
 from .const import (
     CONTROL_CONFIRM_TIMEOUT,
     DOMAIN,
+    FAULT_METADATA_APPLIES_TO_BY_SERIES,
     KITCHEN_TIMERS,
     MAX_RECONNECT_DELAY,
     NETWORK_KEYS,
@@ -30,6 +38,7 @@ from .const import (
     STATE_KEYS,
 )
 from .controls import (
+    appliance_type,
     control_matches,
     is_dishwasher,
     is_oven,
@@ -279,6 +288,56 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             self.async_set_updated_data(updated)
 
 
+class SubZeroFaultsCoordinator(DataUpdateCoordinator[list[ApplianceFault]]):
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: ConfigEntry,
+        client: SubZeroClient,
+        appliance: SubZeroCoordinator,
+        metadata: dict[tuple[str, str], dict | None],
+    ):
+        super().__init__(
+            hass,
+            _LOGGER,
+            config_entry=entry,
+            name=f"{DOMAIN} faults",
+            update_interval=timedelta(minutes=30),
+        )
+        self.client = client
+        self.appliance = appliance
+        self._metadata = metadata
+
+    def series_name(self) -> str | None:
+        parts = appliance_type(self.appliance.data)
+        if parts is None:
+            return None
+        return FAULT_METADATA_APPLIES_TO_BY_SERIES.get(parts[1])
+
+    def metadata(self, code: str | None) -> dict | None:
+        series = self.series_name()
+        if not code or not series:
+            return None
+        return self._metadata.get((code, series))
+
+    async def _async_update_data(self) -> list[ApplianceFault]:
+        try:
+            faults = await self.client.appliance_faults(self.appliance.device_id)
+        except InvalidAuth as error:
+            raise ConfigEntryAuthFailed(str(error)) from error
+        except RateLimited as error:
+            raise UpdateFailed(str(error), retry_after=error.retry_after) from error
+        except ApiError as error:
+            raise UpdateFailed(str(error)) from error
+        series = self.series_name()
+        if series is not None:
+            for fault in faults:
+                key = (fault.code, series)
+                if fault.active and fault.code and key not in self._metadata:
+                    self._metadata[key] = await self.client.fault_metadata(fault.code, series)
+        return faults
+
+
 class SubZeroAccount:
     """Share account tokens and one notification stream across selected appliances."""
 
@@ -289,6 +348,13 @@ class SubZeroAccount:
         self.coordinators = {
             device_id: SubZeroCoordinator(hass, entry, client, device_id, device)
             for device_id, device in selected_devices(entry).items()
+        }
+        self._fault_metadata: dict[tuple[str, str], dict | None] = {}
+        self.fault_coordinators = {
+            device_id: SubZeroFaultsCoordinator(
+                hass, entry, client, coordinator, self._fault_metadata
+            )
+            for device_id, coordinator in self.coordinators.items()
         }
         self._initial_states = {device_id: asyncio.Event() for device_id in self.coordinators}
         self._recoveries: dict[str, asyncio.Task] = {}
@@ -356,6 +422,10 @@ class SubZeroAccount:
             _LOGGER.warning(
                 "Could not refresh appliance units; using cached units where available: %s",
                 metadata_error,
+            )
+        for coordinator in self.fault_coordinators.values():
+            self.entry.async_create_background_task(
+                self.hass, coordinator.async_refresh(), "Sub-Zero faults"
             )
 
     @callback
