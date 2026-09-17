@@ -112,6 +112,7 @@ Oven temperature fields that report zero while idle show as unknown; probe readi
 | --- | --- |
 | Cycle monitoring | Wash cycle, wash status, cycle active, cycle end time |
 | Cycle selection | Choose a cycle while idle or waiting to start |
+| Mode | Normal, Child lock, Sabbath, while idle or waiting to start |
 | Status | Door, Remote Ready, rinse aid low, softener salt low, service required |
 | Options | Heated dry, Extended dry, High temperature wash, Sanitize rinse, Top rack only |
 | Delay start | Off or 1–12 hours, active status and reported start/end times |

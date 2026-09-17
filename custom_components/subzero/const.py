@@ -75,6 +75,7 @@ DISHWASHER_SWITCHES = {
     "sani_rinse_on": "Sanitize rinse",
     "top_rack_only_on": "Top rack only",
 }
+DISHWASHER_MODES = {"Normal": 0, "Child lock": 1, "Sabbath": 2}
 WASH_CYCLES = {
     0: "None",
     1: "Auto",
@@ -122,6 +123,7 @@ WRITABLE_INTEGER_KEYS = {
     ),
     *KITCHEN_TIMERS,
     "wash_cycle",
+    "mode",
     "delay_start_timer_duration",
 }
 NETWORK_KEYS = {"ipv4_addr", "device_wlan_id"}

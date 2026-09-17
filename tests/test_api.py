@@ -757,6 +757,7 @@ async def test_failed_control_request_is_not_automatically_retried(control_serve
         ("accent_light_level", 50),
         ("wash_cycle_on", True),
         ("wash_cycle", 3),
+        ("mode", 2),
         ("delay_start_timer_duration", 12),
         ("heated_dry_on", True),
         ("internal_dispenser_enabled", False),

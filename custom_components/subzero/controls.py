@@ -8,6 +8,7 @@ from homeassistant.exceptions import ServiceValidationError
 from .const import (
     ACCENT_LIGHT_LABELS,
     COOK_MODES,
+    DISHWASHER_MODES,
     DISHWASHER_SWITCHES,
     FRIDGE_ENUM_OPTIONS,
     FRIDGE_MODE_KEYS,
@@ -80,7 +81,13 @@ def supports_control(data: dict, key: str) -> bool:
         return False
     if key.startswith(("cav_", "cav2_")):
         return key in WRITABLE_BOOLEAN_KEYS | WRITABLE_INTEGER_KEYS
-    if key in {*DISHWASHER_SWITCHES, "wash_cycle", "wash_cycle_on", "delay_start_timer_duration"}:
+    if key in {
+        *DISHWASHER_SWITCHES,
+        "wash_cycle",
+        "wash_cycle_on",
+        "mode",
+        "delay_start_timer_duration",
+    }:
         return is_dishwasher(data)
     if key in WINE_SETPOINT_KEYS:
         return is_wine(data)
@@ -156,6 +163,13 @@ def validate_remote_start(data: dict, key: str) -> None:
             )
         if "door_ajar" in data and data["door_ajar"] is not False:
             raise ServiceValidationError("Close the dishwasher door before starting it.")
+        if "mode" in data:
+            if type(data["mode"]) is not int or data["mode"] not in DISHWASHER_MODES.values():
+                raise ServiceValidationError("The dishwasher mode is unknown.")
+            if data["mode"] == 2:
+                raise ServiceValidationError(
+                    "Turn off Sabbath mode before starting the dishwasher."
+                )
         return
     prefix = key.removesuffix("_unit_on")
     if data.get(f"{prefix}_remote_ready") is not True:
@@ -226,11 +240,12 @@ def validate_control_properties(data: dict, temperature_unit: str | None, proper
             known_values = ACCENT_LIGHT_LABELS if accent else values
             if type(data[key]) is not int or data[key] not in known_values:
                 raise ServiceValidationError("The current appliance setting is unknown.")
-        elif key == "wash_cycle":
-            if type(value) is not int or value not in WASH_CYCLES or value == 0:
-                raise ServiceValidationError("Select a supported wash cycle.")
-            if type(data[key]) is not int or data[key] not in WASH_CYCLES:
-                raise ServiceValidationError("The current wash cycle is unknown.")
+        elif key in {"wash_cycle", "mode"}:
+            values = WASH_CYCLES if key == "wash_cycle" else DISHWASHER_MODES.values()
+            if type(value) is not int or value not in values or key == "wash_cycle" and value == 0:
+                raise ServiceValidationError("Select a supported dishwasher option.")
+            if type(data[key]) is not int or data[key] not in values:
+                raise ServiceValidationError("The current dishwasher setting is unknown.")
             if not wash_settings_enabled(data):
                 raise ServiceValidationError("The dishwasher must be idle or waiting to start.")
         elif key in KITCHEN_TIMERS:

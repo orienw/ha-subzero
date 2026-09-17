@@ -735,6 +735,45 @@ async def test_dishwasher_cancel_needs_confirmation_but_not_remote_ready(hass, a
     appliances.client.set_property.assert_awaited_once_with("dishwasher", "wash_cycle_on", False)
 
 
+async def test_dishwasher_modes_follow_capability_and_block_start_in_sabbath(hass, appliances):
+    entity_id = "select.dishwasher_mode"
+    assert hass.states.get(entity_id) is None
+    await appliances.update("dishwasher", {"mode": 0, "remote_ready": True})
+    for option, value in (("Child lock", 1), ("Sabbath", 2), ("Normal", 0)):
+        await hass.services.async_call(
+            "select", "select_option", {"entity_id": entity_id, "option": option}, blocking=True
+        )
+        appliances.client.set_property.assert_awaited_with("dishwasher", "mode", value)
+        assert hass.states.get(entity_id).state == option
+        if value == 2:
+            assert hass.states.get("button.dishwasher_start_wash_cycle").state == "unavailable"
+            with pytest.raises(ServiceValidationError, match="Turn off Sabbath mode"):
+                await appliances.entry.runtime_data.coordinators["dishwasher"].async_set_properties(
+                    {"wash_cycle_on": True}
+                )
+    assert appliances.client.set_property.await_count == 3
+    await appliances.update("oven", {"mode": 0})
+    assert hass.states.get("select.oven_mode") is None
+
+
+@pytest.mark.parametrize(
+    ("properties", "value"),
+    [
+        ({"mode": 0, "wash_status": 2}, 1),
+        ({"mode": None}, 0),
+        ({"mode": 0}, 3),
+        ({"mode": 0}, True),
+    ],
+)
+async def test_invalid_dishwasher_mode_changes_do_not_send(appliances, properties, value):
+    await appliances.update("dishwasher", properties)
+    with pytest.raises(ServiceValidationError):
+        await appliances.entry.runtime_data.coordinators["dishwasher"].async_set_properties(
+            {"mode": value}
+        )
+    appliances.client.set_property.assert_not_awaited()
+
+
 async def test_dishwasher_delay_start_then_completion_updates(hass, appliances):
     await hass.services.async_call(
         "select",
