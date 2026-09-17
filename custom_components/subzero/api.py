@@ -256,7 +256,6 @@ class SubZeroClient:
         self.on_tokens = on_tokens
         self._refresh_lock = asyncio.Lock()
         self._retry_at = 0.0
-        self._state_commands: dict[str, str] = {}
         self.push_connected = False
         self.notification_stats: dict[str, int | str | None] = {
             "received": 0,
@@ -388,7 +387,7 @@ class SubZeroClient:
         return appliances
 
     async def _command(self, device_id: str, command: str, params: dict | None = None) -> dict:
-        if command not in {"get", "get_async", "open_cloud_async", "set", "reset_air_filter"}:
+        if command not in {"get", "open_cloud_async", "set", "reset_air_filter"}:
             raise ValueError("Unsupported appliance command")
         payload = {"cmd": command}
         if params is not None:
@@ -402,11 +401,7 @@ class SubZeroClient:
         )
 
     async def state(self, device_id: str) -> dict:
-        command = self._state_commands.get(device_id, "get")
-        data = await self._command(device_id, command)
-        if not data and command == "get":
-            command = "get_async"
-            data = await self._command(device_id, command)
+        data = await self._command(device_id, "get")
         if _rejected(data):
             raise ApiError("The appliance rejected the status request.")
         data = _object(data.get("resp", data))
@@ -414,7 +409,6 @@ class SubZeroClient:
             raise ApiError("The appliance rejected the status request.")
         if not isinstance(data.get("appliance_model"), str):
             raise ApiError("The appliance did not return a status snapshot.")
-        self._state_commands[device_id] = command
         return data
 
     async def open_channel(self, device_id: str) -> None:

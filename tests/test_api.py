@@ -890,18 +890,12 @@ async def test_air_filter_reset_rejects_error_responses(control_server, tokens, 
 
 
 @pytest.mark.parametrize(("status", "ack"), [(200, "OK"), (500, {"Message": "OK"})])
-async def test_cloud_status_remembers_get_async_fallback(control_server, tokens, status, ack):
-    data = {"appliance_model": "DW2450WS", "wash_status": 0}
-    control_server["responses"] = [(status, ack), (200, {"resp": data}), (200, {"resp": data})]
+async def test_cloud_status_requires_a_snapshot_from_get(control_server, tokens, status, ack):
+    control_server.update(status=status, response=ack)
     async with aiohttp.ClientSession() as session:
-        client = api.SubZeroClient(session, "test-key", tokens)
-        assert await client.state("test-fridge") == data
-        assert await client.state("test-fridge") == data
-    assert [request["pload"]["cmd"] for request in control_server["requests"]] == [
-        "get",
-        "get_async",
-        "get_async",
-    ]
+        with pytest.raises(api.ApiError, match="did not return a status snapshot"):
+            await api.SubZeroClient(session, "test-key", tokens).state("test-fridge")
+    assert [request["pload"]["cmd"] for request in control_server["requests"]] == ["get"]
 
 
 async def test_http_500_without_ok_message_is_an_error(control_server, tokens):
