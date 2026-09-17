@@ -1285,7 +1285,7 @@ async def test_active_faults_sensor_counts_active_records_and_caches_metadata(ha
     appliances.client.fault_metadata = AsyncMock(
         side_effect=lambda code, series: {
             "ICE01": {"title": "Ice fault", "resolution_steps": "Reset ice maker"}
-        }.get(code)
+        }.get(code, {})
     )
     coordinator = appliances.entry.runtime_data.fault_coordinators["fridge"]
     await coordinator.async_refresh()
@@ -1345,6 +1345,46 @@ async def test_fault_metadata_uses_the_appliance_series_name(hass, appliances):
     await appliances.update("fridge", {"appliance_type": "not-a-type"})
     await coordinator.async_refresh()
     appliances.client.fault_metadata.assert_not_awaited()
+
+
+async def test_fault_metadata_is_retried_after_a_failed_lookup(hass, appliances):
+    created = "2026-03-01T12:00:00+00:00"
+    await appliances.update("fridge", {"appliance_type": "17.15.1.3"})
+    appliances.client.appliance_faults = AsyncMock(
+        return_value=[ApplianceFault("ICE01", 3, True, created, None)]
+    )
+    appliances.client.fault_metadata = AsyncMock(
+        side_effect=[None, {"title": "Ice fault"}, {"title": "should not be used"}]
+    )
+    coordinator = appliances.entry.runtime_data.fault_coordinators["fridge"]
+    await coordinator.async_refresh()
+    await coordinator.async_refresh()
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    assert appliances.client.fault_metadata.await_args_list == [
+        call("ICE01", "nge"),
+        call("ICE01", "nge"),
+    ]
+    assert hass.states.get("sensor.fridge_active_faults").attributes["faults"] == [
+        {"code": "ICE01", "severity": "high", "created": created, "title": "Ice fault"}
+    ]
+
+
+async def test_sensor_and_diagnostics_share_fault_record_fields(hass, appliances):
+    created = "2026-03-01T12:00:00+00:00"
+    appliances.client.appliance_faults = AsyncMock(
+        return_value=[ApplianceFault("ICE01", 3, True, created, "Ice maker")]
+    )
+    coordinator = appliances.entry.runtime_data.fault_coordinators["fridge"]
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    attributes = hass.states.get("sensor.fridge_active_faults").attributes["faults"][0]
+    device = dr.async_get(hass).async_get_device_by_identifier(
+        (DOMAIN, "fridge"), appliances.entry.entry_id
+    )
+    diagnostics = (await async_get_device_diagnostics(hass, appliances.entry, device))["faults"][0]
+    for key in ("code", "severity", "description", "created"):
+        assert attributes[key] == diagnostics[key]
 
 
 async def test_diagnostics_include_faults_without_identifiers(hass, appliances):

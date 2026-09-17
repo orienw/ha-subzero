@@ -334,7 +334,9 @@ class SubZeroFaultsCoordinator(DataUpdateCoordinator[list[ApplianceFault]]):
             for fault in faults:
                 key = (fault.code, series)
                 if fault.active and fault.code and key not in self._metadata:
-                    self._metadata[key] = await self.client.fault_metadata(fault.code, series)
+                    metadata = await self.client.fault_metadata(fault.code, series)
+                    if isinstance(metadata, dict):
+                        self._metadata[key] = metadata
         return faults
 
 
@@ -349,7 +351,7 @@ class SubZeroAccount:
             device_id: SubZeroCoordinator(hass, entry, client, device_id, device)
             for device_id, device in selected_devices(entry).items()
         }
-        self._fault_metadata: dict[tuple[str, str], dict | None] = {}
+        self._fault_metadata: dict[tuple[str, str], dict] = {}
         self.fault_coordinators = {
             device_id: SubZeroFaultsCoordinator(
                 hass, entry, client, coordinator, self._fault_metadata

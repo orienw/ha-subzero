@@ -1335,11 +1335,29 @@ async def test_fault_records_parse_active_flags_and_severity_defaults(fault_serv
     assert fault_server["requests"] == ["/fault-notifications/v1/notifications/device/test-fridge"]
 
 
-async def test_missing_fault_records_are_an_empty_list(fault_server, tokens):
-    fault_server["faults"] = {"status": 404, "body": {}}
+@pytest.mark.parametrize(
+    "body", [{}, [{"fault": "ICE01", "createdTime": "2026-03-01T12:00:00+00:00"}]]
+)
+async def test_missing_fault_records_are_an_empty_list(fault_server, tokens, body):
+    fault_server["faults"] = {"status": 404, "body": body}
     async with aiohttp.ClientSession() as session:
         client = api.SubZeroClient(session, "test-key", tokens)
         assert await client.appliance_faults("test-fridge") == []
+
+
+async def test_http_404_on_other_endpoints_keeps_the_status(fault_server, tokens):
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(api.ApiError) as error:
+            await api.SubZeroClient(session, "test-key", tokens).appliances()
+    assert str(error.value) == "Sub-Zero returned HTTP 404."
+    assert error.value.status == 404
+
+
+async def test_dict_endpoints_reject_a_list_body(api_server, tokens):
+    api_server["response"] = [{"id": "test-fridge"}]
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(api.ApiError, match="invalid API response"):
+            await api.SubZeroClient(session, "test-key", tokens).appliances()
 
 
 @pytest.mark.parametrize(("status", "body"), [(500, {}), (200, {})])
@@ -1375,6 +1393,12 @@ async def test_fault_records_without_created_time_are_skipped(fault_server, toke
             ],
             {"title": "Door ajar", "resolution_steps": "Close the door"},
         ),
+        (
+            200,
+            [{"title": "Ice", "resolutionSteps": ["Step one", "Step two"]}],
+            {"title": "Ice", "resolution_steps": "Step one\nStep two"},
+        ),
+        (200, [{"title": "Ice", "resolutionSteps": ["Step one", 2]}], {"title": "Ice"}),
         (200, [], None),
         (404, {}, None),
         (500, {"error": "failed"}, None),

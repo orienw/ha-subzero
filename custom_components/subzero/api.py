@@ -22,6 +22,7 @@ from yarl import URL
 from .app_config import APP_HEADERS, AUTH_HEADERS
 from .auth import CLIENT_ID, SCOPES, TOKEN_URL, InvalidAuth
 from .const import (
+    FAULT_SEVERITIES,
     MAX_RECONNECT_DELAY,
     RECONNECT_DELAY,
     STATE_KEYS,
@@ -52,6 +53,10 @@ def notification_lifetime(token: str) -> float:
 class ApiError(Exception):
     """The cloud service or appliance could not complete a request."""
 
+    def __init__(self, message, status: int | None = None):
+        super().__init__(message)
+        self.status = status
+
 
 class RateLimited(ApiError):
     """Wait before making another request to the service."""
@@ -81,6 +86,17 @@ class ApplianceFault:
     active: bool
     created: str
     description: str | None
+
+
+def fault_record(fault: ApplianceFault) -> dict:
+    record = {}
+    if fault.code is not None:
+        record["code"] = fault.code
+    record["severity"] = FAULT_SEVERITIES.get(fault.severity, "unknown")
+    if fault.description is not None:
+        record["description"] = fault.description
+    record["created"] = fault.created
+    return record
 
 
 @dataclass(frozen=True)
@@ -313,6 +329,7 @@ class SubZeroClient:
         *,
         token_request=False,
         appliance_command=False,
+        list_response=False,
         headers: dict[str, str] | None = None,
         **kwargs,
     ) -> dict | list:
@@ -350,9 +367,16 @@ class SubZeroClient:
                     if response.status < 300:
                         return _object(result)
                 if response.status != 200:
-                    raise ApiError(f"Sub-Zero returned HTTP {response.status}.")
+                    raise ApiError(
+                        f"Sub-Zero returned HTTP {response.status}.", status=response.status
+                    )
                 try:
-                    return _object(await response.json(content_type=None), expected=(dict, list))
+                    payload = await response.json(content_type=None)
+                    if list_response:
+                        return _object(payload, expected=(dict, list))
+                    if isinstance(payload, list):
+                        raise ApiError("Sub-Zero returned an invalid API response.")
+                    return _object(payload)
                 except ValueError:
                     raise ApiError("Sub-Zero returned an invalid API response.") from None
         except aiohttp.ClientError, TimeoutError:
@@ -381,7 +405,13 @@ class SubZeroClient:
                 await self.on_tokens(dict(updated))
 
     async def _request(
-        self, method: str, path: str, *, user_id: str | None = None, **kwargs
+        self,
+        method: str,
+        path: str,
+        *,
+        user_id: str | None = None,
+        list_response=False,
+        **kwargs,
     ) -> dict | list:
         await self.refresh()
         token = self._api_token
@@ -392,12 +422,16 @@ class SubZeroClient:
             "Accept": "application/json",
         }
         try:
-            return await self._json(method, API_BASE + path, headers=headers, **kwargs)
+            return await self._json(
+                method, API_BASE + path, headers=headers, list_response=list_response, **kwargs
+            )
         except InvalidAuth:
             await self.refresh(rejected_token=token)
         headers["Authorization"] = "Bearer " + self._api_token
         headers["Userid"] = user_id or self.tokens["api_user_id"]
-        return await self._json(method, API_BASE + path, headers=headers, **kwargs)
+        return await self._json(
+            method, API_BASE + path, headers=headers, list_response=list_response, **kwargs
+        )
 
     async def appliances(self) -> list[Appliance]:
         data = await self._request("GET", "/consumerapp/user/devices")
@@ -472,9 +506,9 @@ class SubZeroClient:
     async def appliance_faults(self, device_id: str) -> list[ApplianceFault]:
         path = "/fault-notifications/v1/notifications/device/" + quote(device_id, safe="")
         try:
-            data = await self._request("GET", path)
+            data = await self._request("GET", path, list_response=True)
         except ApiError as error:
-            if str(error) == "Sub-Zero returned HTTP 404.":
+            if error.status == 404:
                 return []
             raise
         if not isinstance(data, list):
@@ -493,7 +527,7 @@ class SubZeroClient:
             + quote(applies_to, safe="")
         )
         try:
-            data = await self._request("GET", path)
+            data = await self._request("GET", path, list_response=True)
         except ApiError, InvalidAuth:
             return None
         if not isinstance(data, list) or not data:
@@ -504,8 +538,11 @@ class SubZeroClient:
         metadata = {}
         if isinstance(item.get("title"), str):
             metadata["title"] = item["title"]
-        if isinstance(item.get("resolutionSteps"), str):
-            metadata["resolution_steps"] = item["resolutionSteps"]
+        steps = item.get("resolutionSteps")
+        if isinstance(steps, str):
+            metadata["resolution_steps"] = steps
+        elif isinstance(steps, list) and steps and all(isinstance(step, str) for step in steps):
+            metadata["resolution_steps"] = "\n".join(steps)
         return metadata or None
 
     async def watch(

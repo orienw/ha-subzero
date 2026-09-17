@@ -5,7 +5,8 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceEntry
 
 from . import SubZeroConfigEntry
-from .const import DOMAIN, FAULT_SEVERITIES, NETWORK_KEYS
+from .api import fault_record
+from .const import DOMAIN, NETWORK_KEYS
 from .coordinator import SubZeroCoordinator, SubZeroFaultsCoordinator
 
 
@@ -14,14 +15,8 @@ def appliance_diagnostics(
 ) -> dict:
     records = []
     for fault in faults.data or []:
-        item = {}
-        if fault.code is not None:
-            item["code"] = fault.code
-        item["severity"] = FAULT_SEVERITIES.get(fault.severity, "unknown")
+        item = fault_record(fault)
         item["active"] = fault.active
-        item["created"] = fault.created
-        if fault.description is not None:
-            item["description"] = fault.description
         records.append(item)
     return {
         "available": coordinator.last_update_success,

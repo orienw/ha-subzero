@@ -22,9 +22,9 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import SubZeroConfigEntry
+from .api import fault_record
 from .const import (
     COOK_MODES,
-    FAULT_SEVERITIES,
     GOURMET_RECIPES,
     NETWORK_KEYS,
     OVEN_PREFIXES,
@@ -339,13 +339,7 @@ class SubZeroActiveFaultsSensor(CoordinatorEntity[SubZeroFaultsCoordinator], Sen
         for fault in self.coordinator.data:
             if not fault.active:
                 continue
-            item = {}
-            if fault.code is not None:
-                item["code"] = fault.code
-            item["severity"] = FAULT_SEVERITIES.get(fault.severity, "unknown")
-            if fault.description is not None:
-                item["description"] = fault.description
-            item["created"] = fault.created
+            item = fault_record(fault)
             if metadata := self.coordinator.metadata(fault.code):
                 item.update(metadata)
             faults.append(item)
