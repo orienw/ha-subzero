@@ -111,12 +111,13 @@ Oven temperature fields that report zero while idle show as unknown; probe readi
 | Type | Features |
 | --- | --- |
 | Cycle monitoring | Wash cycle, wash status, cycle active, cycle end time |
+| Cycle selection | Choose a cycle while idle or waiting to start |
 | Status | Door, Remote Ready, rinse aid low, softener salt low, service required |
 | Options | Heated dry, Extended dry, High temperature wash, Sanitize rinse, Top rack only |
 | Delay start | Off or 1–12 hours, active status and reported start/end times |
 | Start | Start wash cycle button, available when Remote Ready is enabled |
 
-Select the wash cycle using the appliance or official app. To enable remote starting, hold ENTER on the dishwasher for five seconds, then close the door within four seconds. Opening the door cancels Remote Ready. See [Cove's Remote Ready guide](https://www.subzero-wolf.com/assistance/answers/cove/dishwasher/cove-dishwasher-remote-ready-feature).
+Selecting a cycle does not start it. To enable remote starting, hold ENTER on the dishwasher for five seconds, then close the door within four seconds. Opening the door cancels Remote Ready. See [Cove's Remote Ready guide](https://www.subzero-wolf.com/assistance/answers/cove/dishwasher/cove-dishwasher-remote-ready-feature).
 
 Unknown wash cycle/status codes show as unknown. The integration sends only supported option properties; the appliance enforces which options apply to its selected cycle.
 

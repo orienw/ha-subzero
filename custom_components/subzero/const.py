@@ -121,6 +121,7 @@ WRITABLE_INTEGER_KEYS = {
         for suffix in ("set_temp", "cook_mode", "probe_set_temp")
     ),
     *KITCHEN_TIMERS,
+    "wash_cycle",
     "delay_start_timer_duration",
 }
 NETWORK_KEYS = {"ipv4_addr", "device_wlan_id"}

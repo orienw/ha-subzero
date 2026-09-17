@@ -676,12 +676,41 @@ async def test_timer_ack_without_correct_end_time_is_not_success(
         ("fridge", "accent_light_level", -1),
         ("dishwasher", "delay_start_timer_duration", 13),
         ("dishwasher", "delay_start_timer_duration", 0.5),
+        ("dishwasher", "wash_cycle", 0),
+        ("dishwasher", "wash_cycle", 13),
+        ("dishwasher", "wash_cycle", True),
     ],
 )
 async def test_invalid_new_control_values_never_reach_cloud(appliances, device, key, value):
     with pytest.raises(ServiceValidationError):
         await appliances.entry.runtime_data.coordinators[device].async_set_properties({key: value})
     appliances.client.set_property.assert_not_called()
+
+
+@pytest.mark.parametrize("status", [0, 1])
+async def test_dishwasher_cycle_selection_does_not_start_a_wash(hass, appliances, status):
+    await appliances.update("dishwasher", {"wash_cycle": 0, "wash_status": status})
+    entity_id = "select.dishwasher_wash_cycle"
+    assert hass.states.get(entity_id).state == "unknown"
+    assert "None" not in hass.states.get(entity_id).attributes["options"]
+    await hass.services.async_call(
+        "select", "select_option", {"entity_id": entity_id, "option": "Heavy"}, blocking=True
+    )
+    appliances.client.set_property.assert_awaited_once_with("dishwasher", "wash_cycle", 3)
+    assert hass.states.get(entity_id).state == "Heavy"
+    assert hass.states.get("sensor.dishwasher_wash_cycle").state == "Heavy"
+    assert appliances.states["dishwasher"]["wash_cycle_on"] is False
+
+
+@pytest.mark.parametrize("status", [2, 3, 4, 5, 6, 7, 8, None, True])
+async def test_dishwasher_cycle_change_requires_idle_status(hass, appliances, status):
+    await appliances.update("dishwasher", {"wash_status": status})
+    assert hass.states.get("select.dishwasher_wash_cycle").state == "unavailable"
+    with pytest.raises(ServiceValidationError, match="idle or waiting to start"):
+        await appliances.entry.runtime_data.coordinators["dishwasher"].async_set_properties(
+            {"wash_cycle": 3}
+        )
+    appliances.client.set_property.assert_not_awaited()
 
 
 async def test_dishwasher_delay_start_then_completion_updates(hass, appliances):

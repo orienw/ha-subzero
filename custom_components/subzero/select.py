@@ -13,8 +13,9 @@ from .const import (
     FRIDGE_MODE_KEYS,
     ICE_KEYS,
     MANUAL_COOK_MODES,
+    WASH_CYCLES,
 )
-from .controls import accent_light_options, is_fridge, supports_control
+from .controls import accent_light_options, is_fridge, supports_control, wash_settings_enabled
 from .entity import SubZeroEntity, async_setup_entities
 
 MODES = {
@@ -37,6 +38,7 @@ DESCRIPTIONS = (
     ),
     SelectEntityDescription(key="cav_cook_mode", name="Cooking mode", icon="mdi:stove"),
     SelectEntityDescription(key="cav2_cook_mode", name="Lower oven cooking mode", icon="mdi:stove"),
+    SelectEntityDescription(key="wash_cycle", name="Wash cycle", icon="mdi:dishwasher"),
     SelectEntityDescription(
         key="delay_start_timer_duration", name="Delay start", icon="mdi:timer-sand"
     ),
@@ -45,6 +47,7 @@ ENUM_OPTIONS = {
     **FRIDGE_ENUM_OPTIONS,
     "cav_cook_mode": COOK_MODES,
     "cav2_cook_mode": COOK_MODES,
+    "wash_cycle": {name: value for value, name in WASH_CYCLES.items() if value != 0},
     "delay_start_timer_duration": {
         "Off": 0,
         **{f"{hours} hour{'s' if hours != 1 else ''}": hours for hours in range(1, 13)},
@@ -99,6 +102,12 @@ class SubZeroSelect(SubZeroEntity, SelectEntity):
         keys = control_keys(self.entity_description.key, data)
         if not self.coordinator.last_update_success or not keys:
             return False
+        if self.entity_description.key == "wash_cycle":
+            return (
+                type(data["wash_cycle"]) is int
+                and data["wash_cycle"] in WASH_CYCLES
+                and wash_settings_enabled(data)
+            )
         if self.entity_description.key in ENUM_OPTIONS:
             key = self.entity_description.key
             values = (
@@ -116,7 +125,9 @@ class SubZeroSelect(SubZeroEntity, SelectEntity):
             return ACCENT_LIGHT_LABELS[data["accent_light_level"]]
         if self.entity_description.key in ENUM_OPTIONS:
             key = self.entity_description.key
-            return next(name for name, value in ENUM_OPTIONS[key].items() if data[key] == value)
+            return next(
+                (name for name, value in ENUM_OPTIONS[key].items() if data[key] == value), None
+            )
         if self.entity_description.key == "ice_maker_mode":
             active = [name for name, key in ICE_MODES.items() if data.get(key) is True]
             if active:

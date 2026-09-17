@@ -756,6 +756,7 @@ async def test_failed_control_request_is_not_automatically_retried(control_serve
         ("kitchen_timer2_duration", 0),
         ("accent_light_level", 50),
         ("wash_cycle_on", True),
+        ("wash_cycle", 3),
         ("delay_start_timer_duration", 12),
         ("heated_dry_on", True),
         ("internal_dispenser_enabled", False),

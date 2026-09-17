@@ -18,6 +18,7 @@ from .const import (
     OVEN_PREFIXES,
     OVEN_TEMPERATURE_RANGES,
     SETPOINT_KEYS,
+    WASH_CYCLES,
     WINE_SETPOINT_KEYS,
     WRITABLE_BOOLEAN_KEYS,
     WRITABLE_INTEGER_KEYS,
@@ -67,6 +68,10 @@ def supports_air_filter_reset(data: dict) -> bool:
     return (is_fridge(data) or is_wine(data)) and "air_filter_pct_remaining" in data
 
 
+def wash_settings_enabled(data: dict) -> bool:
+    return type(data.get("wash_status")) is int and data["wash_status"] in {0, 1}
+
+
 def supports_control(data: dict, key: str) -> bool:
     if key in KITCHEN_TIMERS:
         prefix = KITCHEN_TIMERS[key]
@@ -75,7 +80,7 @@ def supports_control(data: dict, key: str) -> bool:
         return False
     if key.startswith(("cav_", "cav2_")):
         return key in WRITABLE_BOOLEAN_KEYS | WRITABLE_INTEGER_KEYS
-    if key in {*DISHWASHER_SWITCHES, "wash_cycle_on", "delay_start_timer_duration"}:
+    if key in {*DISHWASHER_SWITCHES, "wash_cycle", "wash_cycle_on", "delay_start_timer_duration"}:
         return is_dishwasher(data)
     if key in WINE_SETPOINT_KEYS:
         return is_wine(data)
@@ -221,6 +226,13 @@ def validate_control_properties(data: dict, temperature_unit: str | None, proper
             known_values = ACCENT_LIGHT_LABELS if accent else values
             if type(data[key]) is not int or data[key] not in known_values:
                 raise ServiceValidationError("The current appliance setting is unknown.")
+        elif key == "wash_cycle":
+            if type(value) is not int or value not in WASH_CYCLES or value == 0:
+                raise ServiceValidationError("Select a supported wash cycle.")
+            if type(data[key]) is not int or data[key] not in WASH_CYCLES:
+                raise ServiceValidationError("The current wash cycle is unknown.")
+            if not wash_settings_enabled(data):
+                raise ServiceValidationError("The dishwasher must be idle or waiting to start.")
         elif key in KITCHEN_TIMERS:
             prefix = KITCHEN_TIMERS[key]
             if type(value) is not int or not 0 <= value <= 719:
