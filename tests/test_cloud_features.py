@@ -713,6 +713,28 @@ async def test_dishwasher_cycle_change_requires_idle_status(hass, appliances, st
     appliances.client.set_property.assert_not_awaited()
 
 
+@pytest.mark.parametrize("accept", [True, False])
+async def test_dishwasher_cancel_needs_confirmation_but_not_remote_ready(hass, appliances, accept):
+    entity_id = "button.dishwasher_cancel_wash_cycle"
+    assert hass.states.get(entity_id).state == "unavailable"
+    await appliances.update(
+        "dishwasher",
+        {"wash_cycle_on": True, "wash_status": 2, "remote_ready": False, "door_ajar": True},
+    )
+    appliances.behavior["accept"] = accept
+    if accept:
+        await hass.services.async_call("button", "press", {"entity_id": entity_id}, blocking=True)
+        assert hass.states.get("binary_sensor.dishwasher_wash_cycle_active").state == "off"
+        assert hass.states.get(entity_id).state == "unavailable"
+    else:
+        with pytest.raises(HomeAssistantError, match="did not confirm"):
+            await hass.services.async_call(
+                "button", "press", {"entity_id": entity_id}, blocking=True
+            )
+        assert hass.states.get("binary_sensor.dishwasher_wash_cycle_active").state == "on"
+    appliances.client.set_property.assert_awaited_once_with("dishwasher", "wash_cycle_on", False)
+
+
 async def test_dishwasher_delay_start_then_completion_updates(hass, appliances):
     await hass.services.async_call(
         "select",

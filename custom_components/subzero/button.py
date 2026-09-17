@@ -40,6 +40,17 @@ async def async_setup_entry(
         async_add_entities,
         (
             ButtonEntityDescription(
+                key="cancel_wash_cycle", name="Cancel wash cycle", icon="mdi:stop-circle"
+            ),
+        ),
+        SubZeroCancelWashButton,
+        lambda coordinator, description: supports_control(coordinator.data, "wash_cycle_on"),
+    )
+    async_setup_entities(
+        entry,
+        async_add_entities,
+        (
+            ButtonEntityDescription(
                 key="reset_air_filter",
                 name="Reset air filter",
                 icon="mdi:air-filter",
@@ -68,6 +79,19 @@ class SubZeroStartButton(SubZeroEntity, ButtonEntity):
         await self.coordinator.async_set_properties(
             {self.entity_description.key.removeprefix("remote_start_"): True}
         )
+
+
+class SubZeroCancelWashButton(SubZeroEntity, ButtonEntity):
+    @property
+    def available(self) -> bool:
+        return (
+            self.coordinator.last_update_success
+            and supports_control(self.coordinator.data, "wash_cycle_on")
+            and self.coordinator.data.get("wash_cycle_on") is True
+        )
+
+    async def async_press(self) -> None:
+        await self.coordinator.async_set_properties({"wash_cycle_on": False})
 
 
 class SubZeroAirFilterResetButton(SubZeroEntity, ButtonEntity):

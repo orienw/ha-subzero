@@ -116,6 +116,7 @@ Oven temperature fields that report zero while idle show as unknown; probe readi
 | Options | Heated dry, Extended dry, High temperature wash, Sanitize rinse, Top rack only |
 | Delay start | Off or 1–12 hours, active status and reported start/end times |
 | Start | Start wash cycle button, available when Remote Ready is enabled |
+| Cancel | Cancel wash cycle button, available while a cycle is active |
 
 Selecting a cycle does not start it. To enable remote starting, hold ENTER on the dishwasher for five seconds, then close the door within four seconds. Opening the door cancels Remote Ready. See [Cove's Remote Ready guide](https://www.subzero-wolf.com/assistance/answers/cove/dishwasher/cove-dishwasher-remote-ready-feature).
 
