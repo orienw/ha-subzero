@@ -157,12 +157,34 @@ async def async_setup_entry(
         async_add_entities,
         DESCRIPTIONS,
         SubZeroBinarySensor,
-        lambda coordinator, description: description.key in coordinator.data,
+        lambda coordinator, description: (
+            description.key in coordinator.data
+            or description.key == "sabbath_on"
+            and "mode" in coordinator.data
+        ),
     )
 
 
 class SubZeroBinarySensor(SubZeroEntity, BinarySensorEntity):
     @property
+    def available(self) -> bool:
+        if self.entity_description.key == "sabbath_on":
+            return self.coordinator.last_update_success and bool(
+                {"sabbath_on", "mode"}.intersection(self.coordinator.data)
+            )
+        return super().available
+
+    @property
     def is_on(self) -> bool | None:
-        value = self.coordinator.data.get(self.entity_description.key)
+        data = self.coordinator.data
+        value = data.get(self.entity_description.key)
+        if self.entity_description.key == "sabbath_on":
+            mode = data.get("mode")
+            if value is True or type(mode) is int and mode == 2:
+                return True
+            if "mode" in data:
+                if type(mode) is not int or mode not in {0, 1}:
+                    return None
+                if "sabbath_on" not in data:
+                    return False
         return value if isinstance(value, bool) else None

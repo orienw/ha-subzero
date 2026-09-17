@@ -774,6 +774,26 @@ async def test_invalid_dishwasher_mode_changes_do_not_send(appliances, propertie
     appliances.client.set_property.assert_not_awaited()
 
 
+@pytest.mark.parametrize("device", ["oven", "dishwasher"])
+async def test_sabbath_status_combines_boolean_and_special_mode(hass, appliances, device):
+    entity_id = f"binary_sensor.{device}_sabbath_mode"
+    assert hass.states.get(entity_id) is None
+    for properties, expected in (
+        ({"mode": 2}, "on"),
+        ({"mode": 0}, "off"),
+        ({"mode": None}, "unknown"),
+        ({"sabbath_on": True}, "on"),
+        ({"sabbath_on": False, "mode": 3}, "unknown"),
+        ({"mode": 2}, "on"),
+        ({"mode": True}, "unknown"),
+    ):
+        await appliances.update(device, properties)
+        assert hass.states.get(entity_id).state == expected
+    await appliances.update(device, {"appliance_model": "TEST-MODEL"}, full=True)
+    assert hass.states.get(entity_id).state == "unavailable"
+    appliances.client.set_property.assert_not_awaited()
+
+
 async def test_dishwasher_delay_start_then_completion_updates(hass, appliances):
     await hass.services.async_call(
         "select",
