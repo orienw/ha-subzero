@@ -111,21 +111,29 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         """Serialize writes and confirm their result from appliance state.
 
         Forced writes go out even when the appliance already reports the value,
-        which is how the app starts ovens and dishwashers.
+        which is how the app starts ovens and dishwashers. A value the appliance
+        already reports is re-sent as is, without the checks a change needs.
         """
         properties = dict(properties)
+        unit = self.device.get("temperature_unit")
         async with self._command_lock:
             if not self.last_update_success:
                 raise ServiceValidationError("The appliance is unavailable.")
-            validate_control_properties(self.data, self.device.get("temperature_unit"), properties)
+            now = dt_util.utcnow()
+            changes = {
+                key: value
+                for key, value in properties.items()
+                if not (force and control_matches(self.data, key, value, now))
+            }
+            if changes or not force:
+                validate_control_properties(self.data, unit, changes)
             requested_at = {}
             try:
                 for key, value in properties.items():
                     if not self.last_update_success:
                         raise ServiceValidationError("The appliance is unavailable.")
-                    validate_control_properties(
-                        self.data, self.device.get("temperature_unit"), {key: value}
-                    )
+                    if key in changes:
+                        validate_control_properties(self.data, unit, {key: value})
                     requested_at[key] = dt_util.utcnow()
                     if (
                         force

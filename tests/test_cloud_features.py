@@ -439,6 +439,29 @@ async def test_newer_oven_series_start_with_the_app_write_sequence(hass, applian
     appliances.client.set_property.assert_awaited_once_with("oven", "cav2_set_temp", 425)
 
 
+@pytest.mark.parametrize("appliances", ["C"], indirect=True)
+async def test_start_resends_reported_values_without_change_checks(hass, appliances):
+    await appliances.update("oven", {"appliance_type": "17.15.1.3", "cav_remote_ready": True})
+    await hass.services.async_call(
+        "button", "press", {"entity_id": "button.oven_start_oven"}, blocking=True
+    )
+    assert appliances.client.set_property.await_args_list == [
+        call("oven", "cav_cook_mode", 1),
+        call("oven", "cav_unit_on", True),
+        call("oven", "cav_set_temp", 350),
+    ]
+    appliances.client.set_property.reset_mock()
+    await appliances.update("dishwasher", {"remote_ready": True, "wash_status": 7})
+    await hass.services.async_call(
+        "button", "press", {"entity_id": "button.dishwasher_start_wash_cycle"}, blocking=True
+    )
+    assert appliances.client.set_property.await_args_list == [
+        call("dishwasher", "wash_cycle", 2),
+        call("dishwasher", "delay_start_timer_duration", 0),
+        call("dishwasher", "wash_cycle_on", True),
+    ]
+
+
 @pytest.mark.parametrize(
     ("prefix", "entity_id"),
     [
