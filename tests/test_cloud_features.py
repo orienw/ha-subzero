@@ -1509,3 +1509,34 @@ async def test_null_setpoint_disables_controls_but_not_the_sensor(hass, applianc
     assert hass.states.get("climate.fridge_refrigerator").state == "unavailable"
     assert hass.states.get("number.fridge_refrigerator_setpoint").state == "unavailable"
     assert hass.states.get("sensor.fridge_refrigerator_setpoint").state == "unknown"
+
+
+@pytest.mark.parametrize(
+    ("appliances", "update", "message"),
+    [
+        ("C", {"cav_set_temp": 375}, "Fahrenheit"),
+        ("F", {"cav_cook_mode": 10, "cav_set_temp": 150}, "range"),
+    ],
+    indirect=["appliances"],
+)
+async def test_start_rechecks_a_setting_changed_by_an_intervening_push(
+    hass, appliances, update, message
+):
+    await appliances.update("oven", {"appliance_type": "17.15.1.3", "cav_remote_ready": True})
+    original_write = appliances.client.set_property.side_effect
+
+    async def write(device_id, key, value):
+        await original_write(device_id, key, value)
+        if key == "cav_unit_on" and value is True:
+            appliances.states[device_id].update(update)
+            await appliances.updates.put((device_id, StateUpdate(update, full=False)))
+
+    appliances.client.set_property.side_effect = write
+    with pytest.raises(ServiceValidationError, match=message):
+        await hass.services.async_call(
+            "button", "press", {"entity_id": "button.oven_start_oven"}, blocking=True
+        )
+    assert [args.args[1] for args in appliances.client.set_property.await_args_list] == [
+        "cav_cook_mode",
+        "cav_unit_on",
+    ]

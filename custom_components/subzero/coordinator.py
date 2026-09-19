@@ -132,9 +132,11 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 for key, value in properties.items():
                     if not self.last_update_success:
                         raise ServiceValidationError("The appliance is unavailable.")
-                    if key in changes:
-                        validate_control_properties(self.data, unit, {key: value})
                     requested_at[key] = dt_util.utcnow()
+                    if key in changes or not control_matches(
+                        self.data, key, value, requested_at[key]
+                    ):
+                        validate_control_properties(self.data, unit, {key: value})
                     if (
                         force
                         or (key in KITCHEN_TIMERS and value > 0)
