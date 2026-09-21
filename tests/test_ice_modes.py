@@ -1,0 +1,191 @@
+"""Ice-mode sequences, bounded retries, and state confirmation."""
+
+import asyncio
+from unittest.mock import call
+
+import pytest
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+
+from custom_components.subzero.api import ApiError, RateLimited, StateUpdate
+from custom_components.subzero.auth import InvalidAuth
+
+pytestmark = pytest.mark.parametrize(
+    "cloud_appliance",
+    [
+        {
+            "appliance_model": "CL4850UFDID",
+            "ref_set_temp": 38,
+            "ice_maker_on": True,
+            "max_ice_on": False,
+            "night_ice_on": True,
+        }
+    ],
+    indirect=True,
+)
+
+
+async def test_unconfirmed_step_retries_three_times_and_stops(cloud_appliance):
+    client = cloud_appliance.client
+    client.set_property.side_effect = None
+    reads = client.state.await_count
+
+    with pytest.raises(HomeAssistantError, match="did not confirm"):
+        await cloud_appliance.coordinator.async_set_ice_mode("Off")
+
+    assert client.set_property.await_args_list == [
+        call("appliance", "max_ice_on", False),
+        *[call("appliance", "night_ice_on", False)] * 3,
+    ]
+    assert client.state.await_count == reads
+    assert cloud_appliance.coordinator.data["ice_maker_on"] is True
+
+
+async def test_successful_retry_continues_with_the_next_step(cloud_appliance):
+    client = cloud_appliance.client
+    original = client.set_property.side_effect
+
+    async def write(device_id, key, value):
+        if client.set_property.await_count > 1:
+            await original(device_id, key, value)
+
+    client.set_property.side_effect = write
+    await cloud_appliance.coordinator.async_set_ice_mode("Max ice")
+
+    assert client.set_property.await_args_list == [
+        call("appliance", "night_ice_on", False),
+        call("appliance", "night_ice_on", False),
+        call("appliance", "max_ice_on", True),
+    ]
+
+
+async def test_error_response_can_be_confirmed_by_reading_state(cloud_appliance):
+    client = cloud_appliance.client
+    reads = client.state.await_count
+
+    async def write(device_id, key, value):
+        cloud_appliance.state[key] = value
+        raise ApiError("Sub-Zero returned HTTP 503.")
+
+    client.set_property.side_effect = write
+    await cloud_appliance.coordinator.async_set_ice_mode("Max ice")
+
+    assert client.set_property.await_args_list == [
+        call("appliance", "night_ice_on", False),
+        call("appliance", "max_ice_on", True),
+    ]
+    assert client.state.await_count == reads + 2
+
+
+async def test_error_without_state_change_exhausts_retries(cloud_appliance):
+    client = cloud_appliance.client
+    reads = client.state.await_count
+    client.set_property.side_effect = ApiError("Sub-Zero returned HTTP 503.")
+
+    with pytest.raises(HomeAssistantError, match="did not confirm"):
+        await cloud_appliance.coordinator.async_set_ice_mode("Max ice")
+
+    assert client.set_property.await_args_list == [call("appliance", "night_ice_on", False)] * 3
+    assert client.state.await_count == reads + 3
+
+
+@pytest.mark.parametrize("error", [InvalidAuth("Expired"), RateLimited(60)])
+async def test_authentication_and_rate_limits_stop_without_retry(hass, cloud_appliance, error):
+    client = cloud_appliance.client
+    reads = client.state.await_count
+    client.set_property.side_effect = error
+
+    with pytest.raises(HomeAssistantError):
+        await cloud_appliance.coordinator.async_set_ice_mode("Max ice")
+
+    client.set_property.assert_awaited_once_with("appliance", "night_ice_on", False)
+    assert client.state.await_count == reads
+    await hass.async_block_till_done()
+    flows = hass.config_entries.flow.async_progress()
+    assert [flow["context"]["source"] for flow in flows] == (
+        ["reauth"] if isinstance(error, InvalidAuth) else []
+    )
+
+
+async def test_confirmation_deadline_includes_request_time(cloud_appliance):
+    client = cloud_appliance.client
+    coordinator = cloud_appliance.coordinator
+    listeners = len(coordinator._listeners)
+    cancelled = 0
+
+    async def write(device_id, key, value):
+        nonlocal cancelled
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled += 1
+            raise
+
+    client.set_property.side_effect = write
+    with pytest.raises(HomeAssistantError, match="did not confirm"):
+        async with asyncio.timeout(1):
+            await coordinator.async_set_ice_mode("Max ice")
+
+    assert cancelled == 3
+    assert client.set_property.await_args_list == [call("appliance", "night_ice_on", False)] * 3
+    assert len(coordinator._listeners) == listeners
+
+
+async def test_cancellation_removes_listener_and_stops_writing(cloud_appliance):
+    client = cloud_appliance.client
+    coordinator = cloud_appliance.coordinator
+    listeners = len(coordinator._listeners)
+    entered = asyncio.Event()
+
+    async def write(device_id, key, value):
+        entered.set()
+        await asyncio.Event().wait()
+
+    client.set_property.side_effect = write
+    pending = asyncio.create_task(coordinator.async_set_ice_mode("Max ice"))
+    await entered.wait()
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+
+    client.set_property.assert_awaited_once_with("appliance", "night_ice_on", False)
+    assert len(coordinator._listeners) == listeners
+    assert not coordinator._command_lock.locked()
+
+
+@pytest.mark.parametrize("changed_key", ["night_ice_on", "max_ice_on"])
+async def test_changed_capabilities_stop_retries_or_later_steps(cloud_appliance, changed_key):
+    client = cloud_appliance.client
+    coordinator = cloud_appliance.coordinator
+
+    async def write(device_id, key, value):
+        coordinator.apply_update(StateUpdate({key: value, changed_key: None}, full=False))
+
+    client.set_property.side_effect = write
+    with pytest.raises(ServiceValidationError, match="on/off value"):
+        await coordinator.async_set_ice_mode("Max ice")
+
+    client.set_property.assert_awaited_once_with("appliance", "night_ice_on", False)
+
+
+async def test_queued_mode_change_uses_state_after_previous_command(cloud_appliance):
+    client = cloud_appliance.client
+    coordinator = cloud_appliance.coordinator
+    await cloud_appliance.update({"night_ice_on": False})
+
+    async with coordinator._command_lock:
+        pending = asyncio.create_task(coordinator.async_set_ice_mode("On"))
+        await asyncio.sleep(0)
+        cloud_appliance.state["night_ice_on"] = True
+        coordinator.apply_update(StateUpdate({"night_ice_on": True}, full=False))
+    await pending
+
+    assert client.set_property.await_args_list == [
+        call("appliance", "night_ice_on", False),
+        call("appliance", "ice_maker_on", True),
+    ]
+
+
+async def test_max_ice_from_normal_leaves_power_alone(cloud_appliance):
+    await cloud_appliance.update({"night_ice_on": False})
+    await cloud_appliance.coordinator.async_set_ice_mode("Max ice")
+    cloud_appliance.client.set_property.assert_awaited_once_with("appliance", "max_ice_on", True)

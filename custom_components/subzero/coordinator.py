@@ -33,6 +33,7 @@ from .const import (
     CONTROL_CONFIRM_TIMEOUT,
     DOMAIN,
     FAULT_METADATA_APPLIES_TO_BY_SERIES,
+    ICE_CONFIRM_TIMEOUT,
     ICE_DELAY_KEYS,
     KITCHEN_TIMERS,
     MAX_EVENT_HISTORY,
@@ -45,6 +46,8 @@ from .controls import (
     appliance_datetime,
     appliance_type,
     control_matches,
+    ice_mode,
+    ice_mode_properties,
     is_dishwasher,
     is_hood,
     is_ice_maker,
@@ -213,6 +216,59 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             except ApiError as error:
                 raise HomeAssistantError(str(error)) from error
             await self.async_refresh()
+
+    async def async_set_ice_mode(self, mode: str) -> None:
+        async with self._command_lock:
+            if not self.last_update_success:
+                raise ServiceValidationError("The appliance is unavailable.")
+            properties = ice_mode_properties(self.data, mode)
+            try:
+                for key, value in properties.items():
+                    await self._async_set_ice_property(key, value)
+            except InvalidAuth as error:
+                self.entry.async_start_reauth(self.hass)
+                raise HomeAssistantError("Sign in to Sub-Zero again to change settings.") from error
+            except ApiError as error:
+                raise HomeAssistantError(str(error)) from error
+            if ice_mode(self.data) != mode:
+                raise HomeAssistantError("The appliance did not confirm the requested ice mode.")
+
+    async def _async_set_ice_property(self, key: str, value: bool) -> None:
+        for _ in range(3):
+            if not self.last_update_success:
+                raise ServiceValidationError("The appliance is unavailable.")
+            validate_control_properties(
+                self.data, self.device.get("temperature_unit"), {key: value}
+            )
+            confirmed = asyncio.Event()
+            requested_at = dt_util.utcnow()
+
+            @callback
+            def confirm() -> None:
+                if self.last_update_success and control_matches(
+                    self.data, key, value, requested_at
+                ):
+                    confirmed.set()
+                else:
+                    confirmed.clear()
+
+            remove_listener = self.async_add_listener(confirm)
+            try:
+                async with asyncio.timeout(ICE_CONFIRM_TIMEOUT):
+                    try:
+                        await self.client.set_property(self.device_id, key, value)
+                    except InvalidAuth, RateLimited:
+                        raise
+                    except ApiError:
+                        await self.async_refresh()
+                    confirm()
+                    await confirmed.wait()
+                    return
+            except TimeoutError:
+                pass
+            finally:
+                remove_listener()
+        raise HomeAssistantError("The appliance did not confirm the requested ice setting.")
 
     async def async_set_ice_delay(
         self,

@@ -2,6 +2,7 @@
 
 DOMAIN = "subzero"
 CONTROL_CONFIRM_TIMEOUT = 5
+ICE_CONFIRM_TIMEOUT = 8
 RECONNECT_DELAY = 30
 MAX_RECONNECT_DELAY = 900
 MAX_EVENT_HISTORY = 256
@@ -60,6 +61,7 @@ SETPOINT_KEYS = {"ref_set_temp", "ref2_set_temp", "frz_set_temp", "crisp_set_tem
 WINE_SETPOINT_KEYS = {"wine_set_temp", "wine2_set_temp"}
 FRIDGE_MODE_KEYS = ("sabbath_on", "high_use_on", "short_vacation_on", "long_vacation_on")
 ICE_KEYS = ("ice_maker_on", "max_ice_on", "night_ice_on")
+ICE_MODES = {"Max ice": "max_ice_on", "Night ice": "night_ice_on"}
 ICE_DELAY_KEYS = {"delay_start_offset", "delay_duration", "delay_recurring"}
 HOOD_SWITCHES = {
     "delay_enabled": "Delayed shutoff",

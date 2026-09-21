@@ -148,8 +148,8 @@ async def test_air_purification_switch_confirms_from_push(hass, controls):
 @pytest.mark.parametrize(
     ("option", "writes"),
     [
-        ("Off", [("night_ice_on", False), ("ice_maker_on", False)]),
-        ("On", [("night_ice_on", False)]),
+        ("Off", [("max_ice_on", False), ("night_ice_on", False), ("ice_maker_on", False)]),
+        ("On", [("night_ice_on", False), ("ice_maker_on", True)]),
         ("Max ice", [("night_ice_on", False), ("max_ice_on", True)]),
         ("Night ice", []),
     ],
@@ -201,7 +201,10 @@ async def test_night_ice_from_off_leaves_ice_maker_power_alone(hass, controls):
         {"entity_id": "select.kitchen_ice_maker", "option": "Night ice"},
         blocking=True,
     )
-    controls.client.set_property.assert_awaited_once_with("test-fridge", "night_ice_on", True)
+    assert controls.client.set_property.await_args_list == [
+        call("test-fridge", "max_ice_on", False),
+        call("test-fridge", "night_ice_on", True),
+    ]
     assert hass.states.get("select.kitchen_ice_maker").state == "Night ice"
     assert hass.states.get("binary_sensor.kitchen_ice_maker_enabled").state == "off"
 
@@ -209,7 +212,7 @@ async def test_night_ice_from_off_leaves_ice_maker_power_alone(hass, controls):
 @pytest.mark.parametrize(
     ("option", "writes"),
     [
-        ("Off", [("night_ice_on", False)]),
+        ("Off", [("max_ice_on", False), ("night_ice_on", False), ("ice_maker_on", False)]),
         ("On", [("night_ice_on", False), ("ice_maker_on", True)]),
         ("Max ice", [("night_ice_on", False), ("max_ice_on", True)]),
     ],
@@ -427,7 +430,7 @@ async def test_failed_mode_change_preserves_partial_state(hass, controls):
         await original(device_id, key, value)
 
     controls.client.set_property.side_effect = write
-    with pytest.raises(HomeAssistantError, match="HTTP 503"):
+    with pytest.raises(HomeAssistantError, match="did not confirm"):
         await hass.services.async_call(
             "select",
             "select_option",
@@ -436,6 +439,8 @@ async def test_failed_mode_change_preserves_partial_state(hass, controls):
         )
     assert controls.client.set_property.await_args_list == [
         call("test-fridge", "night_ice_on", False),
+        call("test-fridge", "max_ice_on", True),
+        call("test-fridge", "max_ice_on", True),
         call("test-fridge", "max_ice_on", True),
     ]
     assert hass.states.get("select.kitchen_ice_maker").state == "On"

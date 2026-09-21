@@ -15,12 +15,14 @@ from .const import (
     FRIDGE_MODE_KEYS,
     HOOD_SENSITIVITY,
     ICE_KEYS,
+    ICE_MODES,
     MANUAL_COOK_MODES,
     WASH_CYCLES,
 )
 from .controls import (
     accent_light_options,
     enum_labels,
+    ice_mode,
     is_fridge,
     is_ice_maker,
     supports_control,
@@ -34,7 +36,6 @@ MODES = {
     "Short vacation": "short_vacation_on",
     "Long vacation": "long_vacation_on",
 }
-ICE_MODES = {"Max ice": "max_ice_on", "Night ice": "night_ice_on"}
 DESCRIPTIONS = (
     SelectEntityDescription(
         key="auto_sensivity", name="Automatic fan sensitivity", icon="mdi:fan-auto"
@@ -156,10 +157,7 @@ class SubZeroSelect(SubZeroEntity, SelectEntity):
                 (name for name, value in ENUM_OPTIONS[key].items() if data[key] == value), None
             )
         if self.entity_description.key == "ice_maker_mode":
-            active = [name for name, key in ICE_MODES.items() if data.get(key) is True]
-            if active:
-                return active[0] if len(active) == 1 else None
-            return "On" if data["ice_maker_on"] else "Off"
+            return ice_mode(data)
         active = [name for name, key in MODES.items() if data.get(key) is True]
         return active[0] if len(active) == 1 else "Normal" if not active else None
 
@@ -177,14 +175,8 @@ class SubZeroSelect(SubZeroEntity, SelectEntity):
         elif key in ENUM_OPTIONS:
             properties = {key: ENUM_OPTIONS[key][option]}
         elif key == "ice_maker_mode":
-            selected = ICE_MODES.get(option)
-            properties = {
-                k: False for k in control_keys(key, data) if k not in ("ice_maker_on", selected)
-            }
-            if option in ("On", "Off"):
-                properties["ice_maker_on"] = option == "On"
-            if selected is not None:
-                properties[selected] = True
+            await self.coordinator.async_set_ice_mode(option)
+            return
         else:
             selected = MODES.get(option)
             properties = {k: False for k in control_keys(key, data) if k != selected}

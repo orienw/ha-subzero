@@ -17,6 +17,7 @@ from .const import (
     HOOD_INTEGER_RANGES,
     HUMIDITY_LABELS,
     ICE_KEYS,
+    ICE_MODES,
     KITCHEN_TIMERS,
     LEGACY_ACCENT_LIGHT_OPTIONS,
     LEGACY_START_SERIES,
@@ -141,6 +142,43 @@ def appliance_datetime(value, data: dict) -> datetime | None:
         return parsed if parsed.tzinfo is not None else None
     except ValueError, TypeError:
         return None
+
+
+def ice_mode(data: dict) -> str | None:
+    keys = {key for key in ICE_KEYS if supports_control(data, key)}
+    if "ice_maker_on" not in keys or any(type(data[key]) is not bool for key in keys):
+        return None
+    active = [name for name, key in ICE_MODES.items() if key in keys and data[key]]
+    if active:
+        return active[0] if len(active) == 1 else None
+    return "On" if data["ice_maker_on"] else "Off"
+
+
+def ice_mode_properties(data: dict, mode: str) -> dict[str, bool]:
+    keys = {key for key in ICE_KEYS if supports_control(data, key)}
+    options = {"Off", "On", *(name for name, key in ICE_MODES.items() if key in keys)}
+    if "ice_maker_on" not in keys or mode not in options:
+        raise ServiceValidationError("The appliance does not support that ice mode.")
+    if any(type(data[key]) is not bool for key in keys):
+        raise ServiceValidationError("The ice maker mode is unknown.")
+    if mode == ice_mode(data):
+        return {}
+    if mode == "Off":
+        return {key: False for key in ("max_ice_on", "night_ice_on", "ice_maker_on") if key in keys}
+    if mode == "On":
+        return {
+            **{key: False for key in ("max_ice_on", "night_ice_on") if key in keys and data[key]},
+            "ice_maker_on": True,
+        }
+    if mode == "Max ice":
+        return {
+            **({"night_ice_on": False} if data.get("night_ice_on") is True else {}),
+            "max_ice_on": True,
+        }
+    return {
+        **({"max_ice_on": False} if "max_ice_on" in keys else {}),
+        "night_ice_on": True,
+    }
 
 
 def timer_minutes(data: dict, key: str) -> float | None:
