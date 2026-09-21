@@ -175,7 +175,7 @@ Selected appliances share account tokens and one cloud notification connection. 
 
 After an error, a reopened channel or an incoming state update triggers a fresh status read if no full push snapshot has restored the appliance. Failed recovery reads retry with increasing delays. An appliance that silently stops reporting may go unnoticed until a notification or a failed control request reveals it.
 
-Control changes are confirmed from appliance status, not from the command acknowledgement. Most settings make one status request if no push update confirms them. Ice-mode changes follow the app's ordered writes, including repeated values, with up to three attempts per property and an eight-second deadline per attempt. A command error prompts a status read before retrying; authentication and rate-limit errors stop immediately. Later writes stop if a setting cannot be confirmed.
+Control changes are confirmed from appliance status, not from the command acknowledgement. Property writes use up to three attempts, each with an eight-second deadline covering the request and confirmation. A command error or missing push confirmation prompts a status read; authentication and rate-limit errors stop immediately. Each retry rechecks whether the change is still allowed. Ice modes and remote starts preserve the app's ordered writes, including repeated values, and later writes stop if a setting cannot be confirmed. Kitchen-timer restarts require a fresh update or status read. Failed confirmation includes the last command error when one was reported.
 
 Sub-Zero does not document an API quota. Push updates keep requests low, but multiple appliances or unstable connections can still hit rate limits.
 

@@ -172,10 +172,7 @@ async def appliances(hass, tokens, request):
         if behavior["push"]:
             await updates.put((device_id, StateUpdate(properties, full=False)))
 
-    with (
-        patch("custom_components.subzero.SubZeroClient") as factory,
-        patch("custom_components.subzero.coordinator.CONTROL_CONFIRM_TIMEOUT", 0.02),
-    ):
+    with patch("custom_components.subzero.SubZeroClient") as factory:
         client = factory.return_value
         client.tokens = token_state(tokens)
         client.notification_stats = {
@@ -660,6 +657,45 @@ async def test_queued_start_rechecks_remote_ready(appliances):
     appliances.client.set_property.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    "device,key,ready,changed,message",
+    [
+        ("oven", "cav_unit_on", "cav_remote_ready", {"cav_remote_ready": False}, "Remote Ready"),
+        ("oven", "cav_unit_on", "cav_remote_ready", {"cav_door_ajar": True}, "door"),
+        ("dishwasher", "wash_cycle_on", "remote_ready", {"remote_ready": False}, "Remote Ready"),
+        ("dishwasher", "wash_cycle_on", "remote_ready", {"door_ajar": True}, "door"),
+    ],
+)
+async def test_start_retry_rechecks_interlocks(appliances, device, key, ready, changed, message):
+    await appliances.update(device, {ready: True})
+    coordinator = appliances.entry.runtime_data.coordinators[device]
+
+    async def write(device_id, key, value):
+        appliances.states[device_id].update(changed)
+        coordinator.apply_update(StateUpdate(changed, full=False))
+
+    appliances.client.set_property.side_effect = write
+    with pytest.raises(ServiceValidationError, match=message):
+        await coordinator.async_set_properties({key: True})
+    appliances.client.set_property.assert_awaited_once_with(device, key, True)
+
+
+@pytest.mark.parametrize("appliances", ["C"], indirect=True)
+async def test_forced_retry_validates_a_value_that_no_longer_matches(appliances):
+    await appliances.update("oven", {"cav_remote_ready": True})
+    coordinator = appliances.entry.runtime_data.coordinators["oven"]
+
+    async def write(device_id, key, value):
+        appliances.states[device_id][key] = 375
+        coordinator.apply_update(StateUpdate({key: 375}, full=False))
+        raise ApiError("Sub-Zero returned HTTP 503.")
+
+    appliances.client.set_property.side_effect = write
+    with pytest.raises(ServiceValidationError, match="Fahrenheit"):
+        await coordinator.async_set_properties({"cav_set_temp": 350}, force=True)
+    appliances.client.set_property.assert_awaited_once_with("oven", "cav_set_temp", 350)
+
+
 async def test_turning_off_an_armed_idle_oven_cancels_remote_ready(hass, appliances):
     await appliances.update("oven", {"cav_remote_ready": True})
     assert hass.states.get("climate.oven_oven").state == "off"
@@ -678,7 +714,7 @@ async def test_off_ack_without_canceling_remote_ready_is_not_success(hass, appli
             "climate", "turn_off", {"entity_id": "climate.oven_oven"}, blocking=True
         )
     assert appliances.states["oven"]["cav_remote_ready"] is True
-    assert appliances.client.set_property.await_count == 1
+    assert appliances.client.set_property.await_count == 3
 
 
 @pytest.mark.parametrize(
@@ -731,7 +767,7 @@ async def test_timer_ack_without_correct_end_time_is_not_success(
             blocking=True,
         )
     assert hass.states.get("number.oven_kitchen_timer_duration").state == str(previous_minutes)
-    assert appliances.client.set_property.await_count == 1
+    assert appliances.client.set_property.await_count == 3
 
 
 @pytest.mark.parametrize(
@@ -800,7 +836,9 @@ async def test_dishwasher_cancel_needs_confirmation_but_not_remote_ready(hass, a
                 "button", "press", {"entity_id": entity_id}, blocking=True
             )
         assert hass.states.get("binary_sensor.dishwasher_wash_cycle_active").state == "on"
-    appliances.client.set_property.assert_awaited_once_with("dishwasher", "wash_cycle_on", False)
+    assert appliances.client.set_property.await_args_list == [
+        call("dishwasher", "wash_cycle_on", False)
+    ] * (1 if accept else 3)
 
 
 async def test_dishwasher_modes_follow_capability_and_block_start_in_sabbath(hass, appliances):

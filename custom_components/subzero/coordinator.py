@@ -32,9 +32,9 @@ from .api import (
 from .auth import InvalidAuth
 from .const import (
     CONTROL_CONFIRM_TIMEOUT,
+    CONTROL_PUSH_TIMEOUT,
     DOMAIN,
     FAULT_METADATA_APPLIES_TO_BY_SERIES,
-    ICE_CONFIRM_TIMEOUT,
     ICE_DELAY_KEYS,
     KITCHEN_TIMERS,
     MAX_EVENT_HISTORY,
@@ -180,16 +180,14 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                     if not self.last_update_success:
                         raise ServiceValidationError("The appliance is unavailable.")
                     requested_at[key] = dt_util.utcnow()
-                    if key in changes or not control_matches(
-                        self.data, key, value, requested_at[key]
-                    ):
-                        validate_control_properties(self.data, unit, {key: value})
                     if (
                         force
                         or (key in KITCHEN_TIMERS and value > 0)
                         or not control_matches(self.data, key, value, requested_at[key])
                     ):
-                        await self._async_set_property(key, value, requested_at[key])
+                        requested_at[key] = await self._async_set_property(
+                            key, value, resend=key not in changes
+                        )
                 if not self.last_update_success or any(
                     not control_matches(self.data, key, value, requested_at[key])
                     for key, value in properties.items()
@@ -225,7 +223,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             properties = ice_mode_properties(self.data, mode)
             try:
                 for key, value in properties.items():
-                    await self._async_set_ice_property(key, value)
+                    await self._async_set_property(key, value)
             except InvalidAuth as error:
                 self.entry.async_start_reauth(self.hass)
                 raise HomeAssistantError("Sign in to Sub-Zero again to change settings.") from error
@@ -234,18 +232,21 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             if ice_mode(self.data) != mode:
                 raise HomeAssistantError("The appliance did not confirm the requested ice mode.")
 
-    async def _async_set_ice_property(self, key: str, value: bool) -> None:
+    async def _async_set_property(
+        self, key: str, value: bool | int, *, resend: bool = False
+    ) -> datetime:
         last_error = None
         for _ in range(3):
             if not self.last_update_success:
                 if last_error is not None:
                     break
                 raise ServiceValidationError("The appliance is unavailable.")
-            validate_control_properties(
-                self.data, self.device.get("temperature_unit"), {key: value}
-            )
-            confirmed = asyncio.Event()
             requested_at = dt_util.utcnow()
+            if not resend or not control_matches(self.data, key, value, requested_at):
+                validate_control_properties(
+                    self.data, self.device.get("temperature_unit"), {key: value}
+                )
+            confirmed = asyncio.Event()
 
             @callback
             def confirm() -> None:
@@ -258,7 +259,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
 
             remove_listener = self.async_add_listener(confirm)
             try:
-                async with asyncio.timeout(ICE_CONFIRM_TIMEOUT):
+                async with asyncio.timeout(CONTROL_CONFIRM_TIMEOUT):
                     try:
                         await self.client.set_property(self.device_id, key, value)
                     except InvalidAuth, RateLimited:
@@ -266,14 +267,21 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                     except ApiError as error:
                         last_error = error
                         await self.async_refresh()
+                    else:
+                        if key not in KITCHEN_TIMERS:
+                            confirm()
+                        try:
+                            await asyncio.wait_for(confirmed.wait(), CONTROL_PUSH_TIMEOUT)
+                        except TimeoutError:
+                            await self.async_refresh()
                     confirm()
                     await confirmed.wait()
-                    return
+                    return requested_at
             except TimeoutError:
                 pass
             finally:
                 remove_listener()
-        message = "The appliance did not confirm the requested ice setting."
+        message = "The appliance did not confirm the requested setting."
         if last_error is not None:
             message += f" Last command error: {last_error}"
         raise HomeAssistantError(message) from last_error
@@ -313,35 +321,6 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 await self.async_refresh()
                 raise HomeAssistantError(str(error)) from error
             await self.async_refresh()
-
-    async def _async_set_property(
-        self, key: str, value: bool | int, requested_at: datetime
-    ) -> None:
-        confirmed = asyncio.Event()
-
-        @callback
-        def confirm() -> None:
-            if self.last_update_success and control_matches(self.data, key, value, requested_at):
-                confirmed.set()
-            else:
-                confirmed.clear()
-
-        remove_listener = self.async_add_listener(confirm)
-        try:
-            await self.client.set_property(self.device_id, key, value)
-            if key not in KITCHEN_TIMERS:
-                # A value the appliance already reports needs no further echo,
-                # which is how the app treats repeated writes.
-                confirm()
-            try:
-                await asyncio.wait_for(confirmed.wait(), CONTROL_CONFIRM_TIMEOUT)
-            except TimeoutError:
-                await self.async_refresh()
-            confirm()
-            if not confirmed.is_set():
-                raise HomeAssistantError("The appliance did not confirm the requested setting.")
-        finally:
-            remove_listener()
 
     async def _async_update_data(self) -> dict:
         async with self._state_lock:

@@ -76,10 +76,7 @@ async def controls(hass, tokens, request):
         if behavior["push"]:
             await updates.put((device_id, StateUpdate(dict(properties), full=False)))
 
-    with (
-        patch("custom_components.subzero.SubZeroClient") as factory,
-        patch("custom_components.subzero.coordinator.CONTROL_CONFIRM_TIMEOUT", 0.02),
-    ):
+    with patch("custom_components.subzero.SubZeroClient") as factory:
         client = factory.return_value
         client.tokens = token_state(tokens)
         client.appliances = AsyncMock(
@@ -556,17 +553,17 @@ async def test_unconfirmed_write_reports_failure(hass, controls):
             "switch", "turn_off", {"entity_id": "switch.kitchen_air_purification"}, blocking=True
         )
     assert hass.states.get("switch.kitchen_air_purification").state == "on"
-    assert controls.client.set_property.await_count == 1
+    assert controls.client.set_property.await_count == 3
 
 
-async def test_failed_write_is_not_retried(hass, controls):
+async def test_failed_write_retries_and_preserves_the_error(hass, controls):
     controls.client.set_property.side_effect = ApiError("Could not connect to Sub-Zero.")
     with pytest.raises(HomeAssistantError, match="Could not connect"):
         await hass.services.async_call(
             "switch", "turn_off", {"entity_id": "switch.kitchen_air_purification"}, blocking=True
         )
     assert hass.states.get("switch.kitchen_air_purification").state == "on"
-    assert controls.client.set_property.await_count == 1
+    assert controls.client.set_property.await_count == 3
 
 
 async def test_expired_write_authentication_starts_reauthentication(hass, controls):

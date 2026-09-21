@@ -38,7 +38,8 @@ def tokens():
 @pytest.fixture(autouse=True)
 def fast_timeouts(monkeypatch):
     monkeypatch.setattr("custom_components.subzero.coordinator.INITIAL_STATE_TIMEOUT", 0)
-    monkeypatch.setattr("custom_components.subzero.coordinator.ICE_CONFIRM_TIMEOUT", 0.02)
+    monkeypatch.setattr("custom_components.subzero.coordinator.CONTROL_CONFIRM_TIMEOUT", 0.05)
+    monkeypatch.setattr("custom_components.subzero.coordinator.CONTROL_PUSH_TIMEOUT", 0.01)
 
 
 @pytest.fixture
@@ -81,10 +82,7 @@ async def cloud_appliance(hass, tokens, request, enable_custom_integrations):
         state["delay_active"] = False
         return dict(state)
 
-    with (
-        patch("custom_components.subzero.SubZeroClient") as factory,
-        patch("custom_components.subzero.coordinator.CONTROL_CONFIRM_TIMEOUT", 0.01),
-    ):
+    with patch("custom_components.subzero.SubZeroClient") as factory:
         client = factory.return_value
         client.tokens = token_state(tokens)
         client.push_connected = True

@@ -36,7 +36,7 @@ async def test_unconfirmed_step_retries_three_times_and_stops(cloud_appliance):
         call("appliance", "max_ice_on", False),
         *[call("appliance", "night_ice_on", False)] * 3,
     ]
-    assert client.state.await_count == reads
+    assert client.state.await_count == reads + 3
     assert cloud_appliance.coordinator.data["ice_maker_on"] is True
     assert failure.value.__cause__ is None
 
@@ -101,13 +101,19 @@ async def test_failed_refresh_preserves_the_command_error(cloud_appliance):
 
 
 @pytest.mark.parametrize("error", [InvalidAuth("Expired"), RateLimited(60)])
-async def test_authentication_and_rate_limits_stop_without_retry(hass, cloud_appliance, error):
+@pytest.mark.parametrize("control", ["mode", "property"])
+async def test_authentication_and_rate_limits_stop_without_retry(
+    hass, cloud_appliance, error, control
+):
     client = cloud_appliance.client
     reads = client.state.await_count
     client.set_property.side_effect = error
 
     with pytest.raises(HomeAssistantError):
-        await cloud_appliance.coordinator.async_set_ice_mode("Max ice")
+        if control == "mode":
+            await cloud_appliance.coordinator.async_set_ice_mode("Max ice")
+        else:
+            await cloud_appliance.coordinator.async_set_properties({"night_ice_on": False})
 
     client.set_property.assert_awaited_once_with("appliance", "night_ice_on", False)
     assert client.state.await_count == reads
@@ -170,7 +176,9 @@ async def test_changed_capabilities_stop_retries_or_later_steps(cloud_appliance,
     coordinator = cloud_appliance.coordinator
 
     async def write(device_id, key, value):
-        coordinator.apply_update(StateUpdate({key: value, changed_key: None}, full=False))
+        properties = {key: value, changed_key: None}
+        cloud_appliance.state.update(properties)
+        coordinator.apply_update(StateUpdate(properties, full=False))
 
     client.set_property.side_effect = write
     with pytest.raises(ServiceValidationError, match="on/off value"):
