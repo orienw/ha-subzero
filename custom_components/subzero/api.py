@@ -459,7 +459,7 @@ class SubZeroClient:
         return appliances
 
     async def _command(self, device_id: str, command: str, params: dict | None = None) -> dict:
-        if command not in {"get", "open_cloud_async", "set", "reset_air_filter"}:
+        if command not in {"get", "open_cloud_async", "set", "reset_air_filter", "exit_delay"}:
             raise ValueError("Unsupported appliance command")
         payload = {"cmd": command}
         if params is not None:
@@ -502,6 +502,36 @@ class SubZeroClient:
     async def reset_air_filter(self, device_id: str) -> None:
         response = await self._command(device_id, "reset_air_filter")
         _check_control_response(response, "Sub-Zero rejected the air filter reset.")
+
+    async def set_ice_delay(
+        self, device_id: str, duration: int, start_offset: int = 0, recurring: bool = False
+    ) -> None:
+        if (
+            type(duration) is not int
+            or duration not in range(0, 43201, 3600)
+            or type(start_offset) is not int
+            or not 0 <= start_offset < 86400
+            or type(recurring) is not bool
+        ):
+            raise ValueError("Unsupported ice delay")
+        properties = {"delay_duration": duration}
+        if duration:
+            properties = {
+                **({"delay_start_offset": start_offset} if start_offset else {}),
+                **properties,
+                "delay_recurring": recurring,
+            }
+        response = await self._command(device_id, "set", properties)
+        _check_control_response(response, "Sub-Zero rejected the ice delay.")
+
+    async def exit_ice_delay(self, device_id: str) -> dict:
+        response = await self._command(device_id, "exit_delay")
+        if _rejected(response):
+            raise ApiError("Sub-Zero rejected ending the ice delay.")
+        properties = _object(response.get("resp", response))
+        if _rejected(properties) or not isinstance(properties.get("appliance_model"), str):
+            raise ApiError("The appliance did not return an ice delay snapshot.")
+        return properties
 
     async def appliance_faults(self, device_id: str) -> list[ApplianceFault]:
         path = "/fault-notifications/v1/notifications/device/" + quote(device_id, safe="")

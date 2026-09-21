@@ -15,6 +15,7 @@ from .app_config import SUBSCRIPTION_KEY
 from .auth import InvalidAuth
 from .const import DISHWASHER_SWITCHES, DOMAIN
 from .coordinator import SubZeroAccount, SubZeroCoordinator, selected_devices
+from .services import async_setup_services
 
 PLATFORMS = [
     Platform.SENSOR,
@@ -26,6 +27,11 @@ PLATFORMS = [
     Platform.BUTTON,
 ]
 type SubZeroConfigEntry = ConfigEntry[SubZeroAccount]
+
+
+async def async_setup(hass: HomeAssistant, config: dict) -> bool:
+    async_setup_services(hass)
+    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: SubZeroConfigEntry) -> bool:

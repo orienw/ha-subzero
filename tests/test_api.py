@@ -1412,3 +1412,42 @@ async def test_fault_metadata_uses_the_last_item_and_ignores_failures(
         result = await api.SubZeroClient(session, "test-key", tokens).fault_metadata("ICE01", "nge")
     assert result == expected
     assert fault_server["requests"] == [{"code": "ICE01", "appliesTo": "nge"}]
+
+
+async def test_ice_delay_uses_one_batch_request(hass, control_server, tokens):
+    client = api.SubZeroClient(async_get_clientsession(hass), "test-key", tokens)
+    await client.set_ice_delay("test-fridge", 7200, 1800, True)
+    await client.set_ice_delay("test-fridge", 0)
+    await client.set_ice_delay("test-fridge", 3600)
+    assert [item["pload"] for item in control_server["requests"]] == [
+        {
+            "cmd": "set",
+            "params": {"delay_start_offset": 1800, "delay_duration": 7200, "delay_recurring": True},
+        },
+        {"cmd": "set", "params": {"delay_duration": 0}},
+        {"cmd": "set", "params": {"delay_duration": 3600, "delay_recurring": False}},
+    ]
+
+
+async def test_exit_delay_returns_snapshot(hass, control_server, tokens):
+    snapshot = {"appliance_model": "TEST-ICE", "delay_active": False, "delay_recurring": True}
+    control_server["response"] = {"resp": snapshot}
+    client = api.SubZeroClient(async_get_clientsession(hass), "test-key", tokens)
+    assert await client.exit_ice_delay("test-fridge") == snapshot
+    assert control_server["requests"][0]["pload"] == {"cmd": "exit_delay"}
+    control_server["response"] = {"resp": {"status": 1, **snapshot}}
+    with pytest.raises(api.ApiError):
+        await client.exit_ice_delay("test-fridge")
+
+
+@pytest.mark.parametrize(
+    "duration,offset,repeat",
+    [(True, 0, False), (60, 0, False), (3600, -1, False), (3600, 86400, False), (3600, 0, 1)],
+)
+async def test_invalid_ice_delay_never_sends(
+    hass, control_server, tokens, duration, offset, repeat
+):
+    client = api.SubZeroClient(async_get_clientsession(hass), "test-key", tokens)
+    with pytest.raises(ValueError):
+        await client.set_ice_delay("test-fridge", duration, offset, repeat)
+    assert not control_server["requests"]

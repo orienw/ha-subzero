@@ -21,6 +21,7 @@ from .controls import (
     accent_light_options,
     enum_labels,
     is_fridge,
+    is_ice_maker,
     supports_control,
     wash_settings_enabled,
 )
@@ -74,12 +75,16 @@ ENUM_OPTIONS = {
 
 def control_keys(key: str, data: dict) -> tuple[str, ...]:
     if key == "ice_maker_mode":
+        if is_ice_maker(data):
+            return ("ice_maker_on",) if "ice_maker_on" in data else ()
         return (
             tuple(k for k in ICE_KEYS if k in data)
             if is_fridge(data) and "ice_maker_on" in data
             else ()
         )
     if key == "operating_mode":
+        if is_ice_maker(data):
+            return ("sabbath_on",) if "sabbath_on" in data else ()
         return tuple(k for k in FRIDGE_MODE_KEYS if k in data) if is_fridge(data) else ()
     return (key,) if key in ENUM_OPTIONS and supports_control(data, key) else ()
 
@@ -101,9 +106,11 @@ class SubZeroSelect(SubZeroEntity, SelectEntity):
     def options(self) -> list[str]:
         data = self.coordinator.data
         if self.entity_description.key == "ice_maker_mode":
-            return ["Off", "On", *(name for name, key in ICE_MODES.items() if key in data)]
+            keys = control_keys("ice_maker_mode", data)
+            return ["Off", "On", *(name for name, key in ICE_MODES.items() if key in keys)]
         if self.entity_description.key == "operating_mode":
-            return ["Normal", *(name for name, key in MODES.items() if key in data)]
+            keys = control_keys("operating_mode", data)
+            return ["Normal", *(name for name, key in MODES.items() if key in keys)]
         key = self.entity_description.key
         if key.endswith("_cook_mode"):
             return [

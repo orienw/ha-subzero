@@ -28,6 +28,18 @@
       "reauth_successful": "Sub-Zero sign-in renewed."
     }
   },
+  "services": {
+    "schedule_ice_delay": {
+      "name": "Schedule ice delay",
+      "description": "Pause a dedicated ice maker for 1 to 12 hours, now or later today.",
+      "fields": {
+        "device_id": {"name": "Ice maker", "description": "The dedicated ice maker to pause."},
+        "duration": {"name": "Duration", "description": "Hours to pause ice production."},
+        "start_in": {"name": "Start in", "description": "Minutes until the pause begins. Zero starts now."},
+        "repeat": {"name": "Repeat daily", "description": "Repeat the pause every day."}
+      }
+    }
+  },
   "options": {
     "step": {
       "init": {

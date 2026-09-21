@@ -8,7 +8,9 @@ from homeassistant.helpers.entity import EntityDescription
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import SubZeroConfigEntry
+from .const import ICE_DELAY_KEYS
 from .controls import (
+    is_ice_maker,
     start_properties,
     supports_air_filter_reset,
     supports_control,
@@ -65,6 +67,22 @@ async def async_setup_entry(
         SubZeroAirFilterResetButton,
         lambda coordinator, description: supports_air_filter_reset(coordinator.data),
     )
+    async_setup_entities(
+        entry,
+        async_add_entities,
+        (
+            ButtonEntityDescription(
+                key="end_ice_delay", name="End current ice delay", icon="mdi:timer-off-outline"
+            ),
+            ButtonEntityDescription(
+                key="cancel_ice_delay", name="Cancel ice delay schedule", icon="mdi:calendar-remove"
+            ),
+        ),
+        SubZeroIceDelayButton,
+        lambda coordinator, description: (
+            is_ice_maker(coordinator.data) and ICE_DELAY_KEYS.issubset(coordinator.data)
+        ),
+    )
 
 
 class SubZeroStartButton(SubZeroEntity, ButtonEntity):
@@ -109,3 +127,21 @@ class SubZeroAirFilterResetButton(SubZeroEntity, ButtonEntity):
 
     async def async_press(self) -> None:
         await self.coordinator.async_reset_air_filter()
+
+
+class SubZeroIceDelayButton(SubZeroEntity, ButtonEntity):
+    @property
+    def available(self) -> bool:
+        data = self.coordinator.data
+        if not self.coordinator.last_update_success or not is_ice_maker(data):
+            return False
+        if not ICE_DELAY_KEYS.issubset(data):
+            return False
+        if self.entity_description.key == "end_ice_delay":
+            return data.get("delay_active") is True
+        return type(data.get("delay_duration")) is int and data["delay_duration"] > 0
+
+    async def async_press(self) -> None:
+        await self.coordinator.async_set_ice_delay(
+            end_current=self.entity_description.key == "end_ice_delay"
+        )

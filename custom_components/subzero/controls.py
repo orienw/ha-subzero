@@ -49,6 +49,11 @@ def is_fridge(data: dict) -> bool:
     return bool(SETPOINT_KEYS.intersection(data))
 
 
+def is_ice_maker(data: dict) -> bool:
+    parts = appliance_type(data)
+    return parts is not None and parts[1] == 21
+
+
 def accent_light_options(data: dict) -> dict[str, int]:
     parts = appliance_type(data)
     if parts is not None and parts[1] in {1, 5, 7}:
@@ -90,6 +95,8 @@ def supports_control(data: dict, key: str) -> bool:
         return f"{prefix}_active" in data and f"{prefix}_end_time" in data
     if key not in data:
         return False
+    if is_ice_maker(data) and key in {"ice_maker_on", "sabbath_on", "door_ajar_timeout"}:
+        return True
     if key.startswith(("cav_", "cav2_")):
         return key in WRITABLE_BOOLEAN_KEYS | WRITABLE_INTEGER_KEYS
     if key in {

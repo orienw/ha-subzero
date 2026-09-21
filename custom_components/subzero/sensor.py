@@ -26,16 +26,18 @@ from .api import fault_record
 from .const import (
     COOK_MODES,
     GOURMET_RECIPES,
+    ICE_CLEAN_STAGES,
     NETWORK_KEYS,
     OVEN_PREFIXES,
     WASH_CYCLES,
     WASH_STATUSES,
 )
-from .controls import appliance_datetime, is_finite_number
+from .controls import appliance_datetime, is_finite_number, is_ice_maker
 from .coordinator import SubZeroCoordinator, SubZeroFaultsCoordinator
 from .entity import SubZeroEntity, async_setup_entities
 
 ENUM_VALUES = {
+    "ice_maker_clean_stage": ICE_CLEAN_STAGES,
     "wash_cycle": WASH_CYCLES,
     "wash_status": WASH_STATUSES,
     **{
@@ -46,6 +48,13 @@ ENUM_VALUES = {
 }
 # Entities write state in this order within one update, and automations can observe it.
 DESCRIPTIONS = (
+    SensorEntityDescription(key="next_clean_cycles", name="Ice cycles until cleaning"),
+    SensorEntityDescription(
+        key="delay_duration",
+        name="Ice delay duration",
+        device_class=SensorDeviceClass.DURATION,
+        native_unit_of_measurement=UnitOfTime.SECONDS,
+    ),
     SensorEntityDescription(
         key="ref_set_temp",
         name="Refrigerator setpoint",
@@ -193,6 +202,7 @@ DESCRIPTIONS = (
             options=list(ENUM_VALUES[key].values()),
         )
         for key, name in (
+            ("ice_maker_clean_stage", "Ice maker cleaning stage"),
             ("wash_cycle", "Wash cycle"),
             ("wash_status", "Wash status"),
             ("cav_cook_mode", "Cooking mode"),
@@ -204,6 +214,9 @@ DESCRIPTIONS = (
     *(
         SensorEntityDescription(key=key, name=name, device_class=SensorDeviceClass.TIMESTAMP)
         for key, name in (
+            ("delay_start_time", "Ice delay start"),
+            ("delay_end_time", "Ice delay end"),
+            ("next_clean_time", "Ice maker next cleaning"),
             ("max_ice_start_time", "Max ice start"),
             ("max_ice_end_time", "Max ice end"),
             ("high_use_start_time", "High use start"),
@@ -261,6 +274,22 @@ async def async_setup_entry(
         SubZeroActiveFaultsSensor(coordinator, entry.runtime_data.fault_coordinators[device_id])
         for device_id, coordinator in entry.runtime_data.coordinators.items()
     )
+    async_setup_entities(
+        entry,
+        async_add_entities,
+        (
+            SensorEntityDescription(
+                key="ice_maker_status",
+                name="Ice maker status",
+                device_class=SensorDeviceClass.ENUM,
+                options=["Disabled", "Delayed", "On", "Off"],
+            ),
+        ),
+        SubZeroIceStatusSensor,
+        lambda coordinator, description: (
+            is_ice_maker(coordinator.data) and "ice_maker_on" in coordinator.data
+        ),
+    )
 
 
 class SubZeroSensor(SubZeroEntity, SensorEntity):
@@ -305,6 +334,23 @@ class SubZeroSensor(SubZeroEntity, SensorEntity):
             ):
                 return None
         return value
+
+
+class SubZeroIceStatusSensor(SubZeroEntity, SensorEntity):
+    @property
+    def available(self) -> bool:
+        return self.coordinator.last_update_success and is_ice_maker(self.coordinator.data)
+
+    @property
+    def native_value(self) -> str | None:
+        data = self.coordinator.data
+        if data.get("failsafe_on") is True or data.get("winterize_on") is True:
+            return "Disabled"
+        if data.get("delay_active") is True:
+            return "Delayed"
+        if type(data.get("ice_maker_on")) is bool:
+            return "On" if data["ice_maker_on"] else "Off"
+        return None
 
 
 class SubZeroActiveFaultsSensor(CoordinatorEntity[SubZeroFaultsCoordinator], SensorEntity):

@@ -2,7 +2,7 @@
 
 <img src="custom_components/subzero/brand/icon.png" alt="Sub-Zero integration icon" width="80">
 
-A custom integration for connected Sub-Zero refrigerators and freezers, Wolf ovens, and Cove dishwashers, installed through HACS.
+A custom integration for connected Sub-Zero refrigerators, freezers, wine storage, and ice makers, Wolf ovens, and Cove dishwashers, installed through HACS.
 
 Sign in with your Sub-Zero Group Owner email and password directly in Home Assistant. Appliances are monitored and controlled over Sub-Zero's cloud service using their existing Wi-Fi connections. Bluetooth is not required.
 
@@ -85,6 +85,14 @@ Refrigerator temperatures on the primary tested model are **configured setpoints
 
 Wine storage units expose setpoint controls from 40–65°F, climate entities, display temperatures, and door status for each reported wine zone.
 
+## Sub-Zero dedicated ice makers
+
+Dedicated ice makers provide an On/Off ice control, Normal/Sabbath mode, and door-open delay setting. Status includes the door, water filter, delay schedule, cleaning stage, next cleaning, and fault or winterization flags when reported.
+
+Use the **Sub-Zero: Schedule ice delay** action to pause production for 1–12 hours. Choose the ice maker, how many minutes from now to begin (zero starts immediately), and whether to repeat daily. The settings are sent together and the appliance status is refreshed.
+
+**End current ice delay** resumes production without removing a repeating schedule. **Cancel ice delay schedule** removes the scheduled delay. Cleaning steps must be performed at the appliance; cleaning sensors only report progress.
+
 ## Wolf ovens
 
 Each reported oven cavity has its own entities. First-cavity entity IDs are preserved from earlier releases; a second cavity uses names prefixed with **Lower oven**.
@@ -141,7 +149,7 @@ Enable debug logging for `custom_components.subzero` to record channel-open atte
 
 ## Compatibility
 
-**Sub-Zero CL4850UFDID is the primary tested appliance.** Cloud status and push snapshots have also been tested with Wolf SO3050PMSP. The additional fridge features, oven controls, second-cavity support, and Cove entities are covered by automated tests using simulated appliance responses and have not yet been verified against physical appliances.
+**Sub-Zero CL4850UFDID is the primary tested appliance.** Cloud status and push snapshots have also been tested with Wolf SO3050PMSP. The additional fridge features, dedicated ice makers, oven controls, second-cavity support, and Cove entities are covered by automated tests using simulated appliance responses and have not yet been verified against physical appliances.
 
 Other models can be added if the cloud service returns their status. Their entities depend on which recognized properties they report.
 

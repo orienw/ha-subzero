@@ -14,6 +14,27 @@ from .entity import SubZeroEntity, async_setup_entities
 # Entities write state in this order within one update, and automations can observe it.
 DESCRIPTIONS = (
     BinarySensorEntityDescription(
+        key="ice_door_ajar", name="Ice maker door", device_class=BinarySensorDeviceClass.DOOR
+    ),
+    BinarySensorEntityDescription(key="water_filter_inserted", name="Water filter inserted"),
+    BinarySensorEntityDescription(key="delay_active", name="Ice delay active"),
+    BinarySensorEntityDescription(key="delay_recurring", name="Ice delay repeats daily"),
+    BinarySensorEntityDescription(
+        key="failsafe_on", name="Ice maker failsafe", device_class=BinarySensorDeviceClass.PROBLEM
+    ),
+    BinarySensorEntityDescription(key="winterize_on", name="Winterized"),
+    BinarySensorEntityDescription(key="ice_maker_clean_on", name="Ice maker cleaning"),
+    BinarySensorEntityDescription(
+        key="clean_soon_on",
+        name="Ice maker cleaning due soon",
+        device_class=BinarySensorDeviceClass.PROBLEM,
+    ),
+    BinarySensorEntityDescription(
+        key="clean_now_on",
+        name="Ice maker cleaning due",
+        device_class=BinarySensorDeviceClass.PROBLEM,
+    ),
+    BinarySensorEntityDescription(
         key="ref_door_ajar", name="Refrigerator door", device_class=BinarySensorDeviceClass.DOOR
     ),
     BinarySensorEntityDescription(

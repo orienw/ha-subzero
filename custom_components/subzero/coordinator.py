@@ -31,6 +31,7 @@ from .const import (
     CONTROL_CONFIRM_TIMEOUT,
     DOMAIN,
     FAULT_METADATA_APPLIES_TO_BY_SERIES,
+    ICE_DELAY_KEYS,
     KITCHEN_TIMERS,
     MAX_RECONNECT_DELAY,
     NETWORK_KEYS,
@@ -41,6 +42,7 @@ from .controls import (
     appliance_type,
     control_matches,
     is_dishwasher,
+    is_ice_maker,
     is_oven,
     supports_air_filter_reset,
     validate_control_properties,
@@ -167,6 +169,43 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 raise HomeAssistantError(
                     "Sign in to Sub-Zero again to reset the air filter."
                 ) from error
+            except ApiError as error:
+                raise HomeAssistantError(str(error)) from error
+            await self.async_refresh()
+
+    async def async_set_ice_delay(
+        self,
+        duration: int = 0,
+        start_offset: int = 0,
+        recurring: bool = False,
+        *,
+        end_current: bool = False,
+    ) -> None:
+        async with self._command_lock:
+            if not self.last_update_success:
+                raise ServiceValidationError("The appliance is unavailable.")
+            if not is_ice_maker(self.data) or not ICE_DELAY_KEYS.issubset(self.data):
+                raise ServiceValidationError("The appliance does not report ice delay settings.")
+            if (
+                type(duration) is not int
+                or duration not in range(0, 43201, 3600)
+                or type(start_offset) is not int
+                or not 0 <= start_offset < 86400
+                or type(recurring) is not bool
+            ):
+                raise ServiceValidationError("Enter a delay of 1 to 12 hours within the next day.")
+            if end_current and self.data.get("delay_active") is not True:
+                raise ServiceValidationError("There is no active ice delay to end.")
+            try:
+                if end_current:
+                    await self.client.exit_ice_delay(self.device_id)
+                else:
+                    await self.client.set_ice_delay(
+                        self.device_id, duration, start_offset, recurring
+                    )
+            except InvalidAuth as error:
+                self.entry.async_start_reauth(self.hass)
+                raise HomeAssistantError("Sign in to Sub-Zero again to change settings.") from error
             except ApiError as error:
                 raise HomeAssistantError(str(error)) from error
             await self.async_refresh()

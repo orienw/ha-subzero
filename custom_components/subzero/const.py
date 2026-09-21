@@ -9,6 +9,26 @@ SETPOINT_KEYS = {"ref_set_temp", "ref2_set_temp", "frz_set_temp", "crisp_set_tem
 WINE_SETPOINT_KEYS = {"wine_set_temp", "wine2_set_temp"}
 FRIDGE_MODE_KEYS = ("sabbath_on", "high_use_on", "short_vacation_on", "long_vacation_on")
 ICE_KEYS = ("ice_maker_on", "max_ice_on", "night_ice_on")
+ICE_DELAY_KEYS = {"delay_start_offset", "delay_duration", "delay_recurring"}
+ICE_CLEAN_STAGES = {
+    0: "Off",
+    50: "Not cleaning",
+    51: "Empty bin",
+    52: "Manually clean",
+    53: "Add descaler",
+    60: "Descale fill",
+    61: "Descale clean",
+    62: "Descale flush",
+    63: "Descale rinse",
+    64: "Sanitize fill",
+    65: "Add sanitizer",
+    66: "Sanitize clean",
+    67: "Sanitize flush",
+    68: "Sanitize rinse",
+    73: "Cleaning reset flush",
+    74: "Cleaning reset rinse",
+    80: "Cleaning complete",
+}
 FRIDGE_ENUM_OPTIONS = {
     "crisp_temp_mode": {"Automatic": 1, "Manual": 0},
     "humidity_control": {"Normal": 1, "Enhanced": 2},
@@ -249,6 +269,10 @@ FAULT_METADATA_APPLIES_TO_BY_SERIES = {
     23: "pvii",
 }
 SENSOR_KEYS = {
+    "ice_maker_clean_stage",
+    "next_clean_cycles",
+    "delay_duration",
+    "delay_start_offset",
     *SETPOINT_KEYS,
     *WINE_SETPOINT_KEYS,
     "ref_display_temp",
@@ -272,6 +296,15 @@ SENSOR_KEYS = {
     *NETWORK_KEYS,
 }
 BINARY_KEYS = {
+    "ice_door_ajar",
+    "water_filter_inserted",
+    "delay_active",
+    "delay_recurring",
+    "failsafe_on",
+    "winterize_on",
+    "ice_maker_clean_on",
+    "clean_soon_on",
+    "clean_now_on",
     "ref_door_ajar",
     "ref2_door_ajar",
     "frz_door_ajar",
@@ -315,6 +348,9 @@ BINARY_KEYS = {
     *DISHWASHER_SWITCHES,
 }
 TIMESTAMP_KEYS = {
+    "delay_start_time",
+    "delay_end_time",
+    "next_clean_time",
     "max_ice_start_time",
     "max_ice_end_time",
     "high_use_start_time",

@@ -1,0 +1,28 @@
+schedule_ice_delay:
+  fields:
+    device_id:
+      required: true
+      selector:
+        device:
+          integration: subzero
+    duration:
+      required: true
+      selector:
+        number:
+          min: 1
+          max: 12
+          step: 1
+          unit_of_measurement: h
+    start_in:
+      default: 0
+      selector:
+        number:
+          min: 0
+          max: 1439
+          step: 1
+          unit_of_measurement: min
+          mode: box
+    repeat:
+      default: false
+      selector:
+        boolean:
