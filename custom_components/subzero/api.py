@@ -551,8 +551,8 @@ class SubZeroClient:
         if _rejected(response):
             raise ApiError("Sub-Zero rejected ending the ice delay.")
         properties = _object(response.get("resp", response))
-        if _rejected(properties) or not isinstance(properties.get("appliance_model"), str):
-            raise ApiError("The appliance did not return an ice delay snapshot.")
+        if _rejected(properties):
+            raise ApiError("Sub-Zero rejected ending the ice delay.")
         return properties
 
     async def appliance_faults(self, device_id: str) -> list[ApplianceFault]:

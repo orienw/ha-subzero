@@ -303,7 +303,10 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             except InvalidAuth as error:
                 self.entry.async_start_reauth(self.hass)
                 raise HomeAssistantError("Sign in to Sub-Zero again to change settings.") from error
+            except RateLimited as error:
+                raise HomeAssistantError(str(error)) from error
             except ApiError as error:
+                await self.async_refresh()
                 raise HomeAssistantError(str(error)) from error
             await self.async_refresh()
 

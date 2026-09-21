@@ -3,7 +3,8 @@
 import pytest
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 
-from custom_components.subzero.api import ApiError
+from custom_components.subzero.api import ApiError, RateLimited
+from custom_components.subzero.auth import InvalidAuth
 from custom_components.subzero.const import DOMAIN
 from custom_components.subzero.controls import is_ice_maker
 
@@ -105,6 +106,39 @@ async def test_delay_rejection_does_not_change_reported_state(hass, cloud_applia
     with pytest.raises(ServiceValidationError, match="no active"):
         await cloud_appliance.coordinator.async_set_ice_delay(end_current=True)
     cloud_appliance.client.exit_ice_delay.assert_not_called()
+
+
+@pytest.mark.parametrize("error", [None, ApiError("Sub-Zero returned HTTP 503.")])
+async def test_ending_delay_refreshes_after_acknowledgment_or_command_error(
+    hass, cloud_appliance, error
+):
+    await cloud_appliance.update({"delay_active": True, "delay_duration": 3600})
+    reads = cloud_appliance.client.state.await_count
+
+    async def exit_delay(device_id):
+        cloud_appliance.state["delay_active"] = False
+        if error is not None:
+            raise error
+        return {"status": 0}
+
+    cloud_appliance.client.exit_ice_delay.side_effect = exit_delay
+    if error is None:
+        await cloud_appliance.coordinator.async_set_ice_delay(end_current=True)
+    else:
+        with pytest.raises(HomeAssistantError, match="HTTP 503"):
+            await cloud_appliance.coordinator.async_set_ice_delay(end_current=True)
+    assert cloud_appliance.client.state.await_count == reads + 1
+    assert hass.states.get("binary_sensor.kitchen_ice_delay_active").state == "off"
+
+
+@pytest.mark.parametrize("error", [InvalidAuth("Expired"), RateLimited(60)])
+async def test_ending_delay_stops_on_authentication_or_rate_limit(cloud_appliance, error):
+    await cloud_appliance.update({"delay_active": True, "delay_duration": 3600})
+    reads = cloud_appliance.client.state.await_count
+    cloud_appliance.client.exit_ice_delay.side_effect = error
+    with pytest.raises(HomeAssistantError):
+        await cloud_appliance.coordinator.async_set_ice_delay(end_current=True)
+    assert cloud_appliance.client.state.await_count == reads
 
 
 async def test_ice_capabilities_are_checked_again_before_writing(hass, cloud_appliance):

@@ -1441,6 +1441,35 @@ async def test_exit_delay_returns_snapshot(hass, control_server, tokens):
 
 
 @pytest.mark.parametrize(
+    "response",
+    [
+        {"status": 0},
+        {"resp": {"status": 0}},
+        {"resp": {"pload": {"status": 0}}},
+        {"resp": {"delay_active": False}},
+    ],
+)
+async def test_exit_delay_accepts_acknowledgments_and_partial_state(
+    hass, control_server, tokens, response
+):
+    control_server["response"] = response
+    client = api.SubZeroClient(async_get_clientsession(hass), "test-key", tokens)
+    await client.exit_ice_delay("test-fridge")
+    assert control_server["requests"][0]["pload"] == {"cmd": "exit_delay"}
+
+
+@pytest.mark.parametrize(
+    "response",
+    [{"status": 1}, {"resp": {"status": 1}}, {"resp": {"pload": {"status": 1}}}],
+)
+async def test_exit_delay_keeps_explicit_rejections(hass, control_server, tokens, response):
+    control_server["response"] = response
+    client = api.SubZeroClient(async_get_clientsession(hass), "test-key", tokens)
+    with pytest.raises(api.ApiError, match="rejected ending"):
+        await client.exit_ice_delay("test-fridge")
+
+
+@pytest.mark.parametrize(
     "duration,offset,repeat",
     [(True, 0, False), (60, 0, False), (3600, -1, False), (3600, 86400, False), (3600, 0, 1)],
 )
