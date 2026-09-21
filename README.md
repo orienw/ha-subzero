@@ -151,6 +151,8 @@ The event entity keeps its last occurrence when the connection drops. Events fou
 
 Startup history is not replayed. While the integration is loaded, repeated notifications and reconnect history are deduplicated, including when the appliance resets its sequence counter. Events from before the integration loaded are ignored; events that occur while Home Assistant is stopped do not trigger automations on startup. Timestamps must include an offset or use the appliance clock's reported offset.
 
+Replay protection relies on the appliance clock. A clock five minutes behind Home Assistant can suppress the first five minutes of live events after a reload. If the clock moves backward, events can also be ignored until it catches up with the retained history cutoff.
+
 ## Diagnostics
 
 Wi-Fi signal strength is enabled by default. Uptime, IP address, MAC address, and live reporting mode are diagnostic sensors disabled by default. Enable them from the entity settings when needed.

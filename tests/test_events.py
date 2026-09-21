@@ -80,6 +80,28 @@ async def test_startup_and_stale_history_never_fire(hass, cloud_appliance):
     assert hass.states.get("event.kitchen_appliance_event").state == last
 
 
+async def test_slow_appliance_clock_must_catch_up_to_startup_cutoff(hass, cloud_appliance, freezer):
+    started = dt_util.utcnow()
+    for sequence, elapsed, expected in [(1, 0, None), (2, 6, "oven_preheated")]:
+        freezer.move_to(started + timedelta(minutes=elapsed))
+        payload = record(sequence, timestamp=dt_util.utcnow() - timedelta(minutes=5))
+        parsed = parse_notification(
+            {
+                "type": 1,
+                "target": "ConnectedApplianceMessage",
+                "arguments": [
+                    {"DeviceId": "appliance", "Payload": {"api.async_channel": {"pload": payload}}}
+                ],
+            },
+            "test-owner",
+            ["appliance"],
+        )
+        cloud_appliance.coordinator.apply_update(parsed[1])
+        await hass.async_block_till_done()
+        event = hass.states.get("event.kitchen_appliance_event")
+        assert event.attributes["event_type"] == expected
+
+
 async def test_reconnect_history_delivers_new_events_once(hass, cloud_appliance):
     events = async_capture_events(hass, "state_changed")
     cloud_appliance.coordinator.async_set_update_error(ApiError("Disconnected"))
