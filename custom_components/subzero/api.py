@@ -233,6 +233,17 @@ def _check_control_response(response: dict, message: str) -> None:
         raise ApiError(message)
 
 
+def validate_ice_delay(duration: int, start_offset: int, recurring: bool) -> None:
+    if (
+        type(duration) is not int
+        or duration not in range(0, 43201, 3600)
+        or type(start_offset) is not int
+        or not 0 <= start_offset < 86400
+        or type(recurring) is not bool
+    ):
+        raise ValueError("Enter a delay of 1 to 12 hours within the next day.")
+
+
 def notification_records(properties: dict) -> list[dict]:
     records = [properties] if "notif_seq" in properties else properties.get("notifs")
     if not isinstance(records, list):
@@ -528,14 +539,7 @@ class SubZeroClient:
     async def set_ice_delay(
         self, device_id: str, duration: int, start_offset: int = 0, recurring: bool = False
     ) -> None:
-        if (
-            type(duration) is not int
-            or duration not in range(0, 43201, 3600)
-            or type(start_offset) is not int
-            or not 0 <= start_offset < 86400
-            or type(recurring) is not bool
-        ):
-            raise ValueError("Unsupported ice delay")
+        validate_ice_delay(duration, start_offset, recurring)
         properties = {"delay_duration": duration}
         if duration:
             properties = {

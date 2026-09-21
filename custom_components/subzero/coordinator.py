@@ -27,6 +27,7 @@ from .api import (
     StateUpdate,
     SubZeroClient,
     notification_records,
+    validate_ice_delay,
 )
 from .auth import InvalidAuth
 from .const import (
@@ -283,14 +284,10 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 raise ServiceValidationError("The appliance is unavailable.")
             if not is_ice_maker(self.data) or not ICE_DELAY_KEYS.issubset(self.data):
                 raise ServiceValidationError("The appliance does not report ice delay settings.")
-            if (
-                type(duration) is not int
-                or duration not in range(0, 43201, 3600)
-                or type(start_offset) is not int
-                or not 0 <= start_offset < 86400
-                or type(recurring) is not bool
-            ):
-                raise ServiceValidationError("Enter a delay of 1 to 12 hours within the next day.")
+            try:
+                validate_ice_delay(duration, start_offset, recurring)
+            except ValueError as error:
+                raise ServiceValidationError(str(error)) from error
             if end_current and self.data.get("delay_active") is not True:
                 raise ServiceValidationError("There is no active ice delay to end.")
             try:
