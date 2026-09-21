@@ -54,6 +54,9 @@ class SubZeroFan(SubZeroEntity, FanEntity):
         return speed * 25 if type(speed) is int and 0 <= speed <= 4 else None
 
     async def async_set_percentage(self, percentage: int) -> None:
+        if percentage == 0:
+            await self.async_turn_off()
+            return
         await self.coordinator.async_set_properties({"fan_speed": math.ceil(percentage / 25)})
 
     async def async_turn_on(self, percentage=None, preset_mode=None, **kwargs) -> None:

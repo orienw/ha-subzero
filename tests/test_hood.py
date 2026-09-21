@@ -63,6 +63,15 @@ async def test_fan_services_use_four_speeds_and_separate_power(hass, cloud_appli
     assert hass.states.get("fan.kitchen_fan").state == "off"
 
 
+async def test_zero_fan_percentage_turns_off_power(hass, cloud_appliance):
+    await cloud_appliance.update({"fan_on": True, "fan_speed": 3})
+    await hass.services.async_call(
+        "fan", "set_percentage", {"entity_id": "fan.kitchen_fan", "percentage": 0}, blocking=True
+    )
+    cloud_appliance.client.set_property.assert_awaited_once_with("appliance", "fan_on", False)
+    assert hass.states.get("fan.kitchen_fan").state == "off"
+
+
 async def test_task_light_uses_percent_and_color_level(hass, cloud_appliance):
     await hass.services.async_call(
         "light",
