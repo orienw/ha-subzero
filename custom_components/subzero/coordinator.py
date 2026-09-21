@@ -42,6 +42,7 @@ from .controls import (
     appliance_type,
     control_matches,
     is_dishwasher,
+    is_hood,
     is_ice_maker,
     is_oven,
     supports_air_filter_reset,
@@ -103,7 +104,11 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             identifiers={(DOMAIN, self.device_id)},
             name=self.device["name"],
             manufacturer=(
-                "Cove" if is_dishwasher(self.data) else "Wolf" if is_oven(self.data) else "Sub-Zero"
+                "Cove"
+                if is_dishwasher(self.data)
+                else "Wolf"
+                if is_oven(self.data) or is_hood(self.data)
+                else "Sub-Zero"
             ),
             model=self.data.get("appliance_model"),
             sw_version=version.get("fw") if isinstance(version, dict) else None,

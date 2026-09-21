@@ -10,6 +10,21 @@ WINE_SETPOINT_KEYS = {"wine_set_temp", "wine2_set_temp"}
 FRIDGE_MODE_KEYS = ("sabbath_on", "high_use_on", "short_vacation_on", "long_vacation_on")
 ICE_KEYS = ("ice_maker_on", "max_ice_on", "night_ice_on")
 ICE_DELAY_KEYS = {"delay_start_offset", "delay_duration", "delay_recurring"}
+HOOD_SWITCHES = {
+    "delay_enabled": "Delayed shutoff",
+    "key_tone_on": "Button tones",
+    "user_lock_on": "Control lock",
+}
+HOOD_BOOLEAN_KEYS = {"fan_on", "light_on", *HOOD_SWITCHES}
+HOOD_INTEGER_RANGES = {
+    "fan_speed": (0, 4),
+    "light_percent": (5, 100),
+    "color_level": (0, 100),
+    "halo_max_percent": (0, 30),
+    "auto_sensivity": (-1, 2),
+    "delay_off_duration": (0, 719 * 60000),
+}
+HOOD_SENSITIVITY = {"Off": -1, "Low": 0, "Medium": 1, "High": 2}
 ICE_CLEAN_STAGES = {
     0: "Off",
     50: "Not cleaning",
@@ -212,6 +227,7 @@ WASH_STATUSES = {
 }
 
 WRITABLE_BOOLEAN_KEYS = {
+    *HOOD_BOOLEAN_KEYS,
     *FRIDGE_MODE_KEYS,
     *ICE_KEYS,
     "air_filter_on",
@@ -221,6 +237,7 @@ WRITABLE_BOOLEAN_KEYS = {
     "wash_cycle_on",
 }
 WRITABLE_INTEGER_KEYS = {
+    *HOOD_INTEGER_RANGES,
     *SETPOINT_KEYS,
     *WINE_SETPOINT_KEYS,
     *FRIDGE_ENUM_OPTIONS,
@@ -269,6 +286,8 @@ FAULT_METADATA_APPLIES_TO_BY_SERIES = {
     23: "pvii",
 }
 SENSOR_KEYS = {
+    "filter_count",
+    "filter_max_count",
     "ice_maker_clean_stage",
     "next_clean_cycles",
     "delay_duration",
@@ -296,6 +315,7 @@ SENSOR_KEYS = {
     *NETWORK_KEYS,
 }
 BINARY_KEYS = {
+    *HOOD_BOOLEAN_KEYS,
     "ice_door_ajar",
     "water_filter_inserted",
     "delay_active",

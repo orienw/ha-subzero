@@ -13,6 +13,8 @@ from .const import (
     DOOR_AJAR_TIMEOUTS,
     FRIDGE_ENUM_OPTIONS,
     FRIDGE_MODE_KEYS,
+    HOOD_BOOLEAN_KEYS,
+    HOOD_INTEGER_RANGES,
     HUMIDITY_LABELS,
     ICE_KEYS,
     KITCHEN_TIMERS,
@@ -52,6 +54,11 @@ def is_fridge(data: dict) -> bool:
 def is_ice_maker(data: dict) -> bool:
     parts = appliance_type(data)
     return parts is not None and parts[1] == 21
+
+
+def is_hood(data: dict) -> bool:
+    parts = appliance_type(data)
+    return parts is not None and parts[1] == 23
 
 
 def accent_light_options(data: dict) -> dict[str, int]:
@@ -95,6 +102,8 @@ def supports_control(data: dict, key: str) -> bool:
         return f"{prefix}_active" in data and f"{prefix}_end_time" in data
     if key not in data:
         return False
+    if key in HOOD_BOOLEAN_KEYS or key in HOOD_INTEGER_RANGES:
+        return is_hood(data)
     if is_ice_maker(data) and key in {"ice_maker_on", "sabbath_on", "door_ajar_timeout"}:
         return True
     if key.startswith(("cav_", "cav2_")):
@@ -274,6 +283,16 @@ def validate_control_properties(data: dict, temperature_unit: str | None, proper
         if key in WRITABLE_BOOLEAN_KEYS:
             if type(value) is not bool or type(data[key]) is not bool:
                 raise ServiceValidationError("The setting requires an on/off value.")
+        elif key in HOOD_INTEGER_RANGES:
+            lower, upper = HOOD_INTEGER_RANGES[key]
+            if type(value) is not int or not lower <= value <= upper:
+                raise ServiceValidationError("The setting is outside the hood's range.")
+            if type(data[key]) is not int:
+                raise ServiceValidationError("The current hood setting is unknown.")
+            if key == "halo_max_percent" and value not in {0, 30}:
+                raise ServiceValidationError("Halo lighting supports only on or off.")
+            if key == "delay_off_duration" and value % 60000:
+                raise ServiceValidationError("Enter a whole number of minutes.")
         elif key in FRIDGE_ENUM_OPTIONS:
             accent = key == "accent_light_level"
             values = (accent_light_options(data) if accent else FRIDGE_ENUM_OPTIONS[key]).values()

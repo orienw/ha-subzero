@@ -17,6 +17,16 @@ from .controls import is_finite_number, supports_control, temperature_range, tim
 from .entity import SubZeroEntity, async_setup_entities
 
 DESCRIPTIONS = (
+    NumberEntityDescription(
+        key="delay_off_duration",
+        name="Delayed shutoff duration",
+        icon="mdi:timer-outline",
+        mode=NumberMode.BOX,
+        native_min_value=0,
+        native_max_value=719,
+        native_step=1,
+        native_unit_of_measurement=UnitOfTime.MINUTES,
+    ),
     *(
         NumberEntityDescription(
             key=key,
@@ -90,6 +100,8 @@ class SubZeroNumber(SubZeroEntity, NumberEntity):
         if self.entity_description.key in KITCHEN_TIMERS:
             return timer_minutes(self.coordinator.data, self.entity_description.key)
         value = self.coordinator.data.get(self.entity_description.key)
+        if self.entity_description.key == "delay_off_duration":
+            return value / 60000 if type(value) is int else None
         if self.entity_description.key.endswith("_probe_set_temp") and value == 0:
             return None
         return value if is_finite_number(value) else None
@@ -118,6 +130,8 @@ class SubZeroNumber(SubZeroEntity, NumberEntity):
             return False
         if key in KITCHEN_TIMERS:
             return type(data.get(f"{KITCHEN_TIMERS[key]}_active")) is bool
+        if key == "delay_off_duration":
+            return type(data[key]) is int and 0 <= data[key] <= 719 * 60000
         if not is_finite_number(data.get(key)):
             return False
         if temperature_range(key, data) is None:
@@ -134,4 +148,7 @@ class SubZeroNumber(SubZeroEntity, NumberEntity):
     async def async_set_native_value(self, value: float) -> None:
         if not is_finite_number(value):
             raise ServiceValidationError("Enter a valid number.")
-        await self.coordinator.async_set_properties({self.entity_description.key: round(value)})
+        key = self.entity_description.key
+        await self.coordinator.async_set_properties(
+            {key: round(value) * 60000 if key == "delay_off_duration" else round(value)}
+        )

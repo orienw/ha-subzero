@@ -2,7 +2,7 @@
 
 <img src="custom_components/subzero/brand/icon.png" alt="Sub-Zero integration icon" width="80">
 
-A custom integration for connected Sub-Zero refrigerators, freezers, wine storage, and ice makers, Wolf ovens, and Cove dishwashers, installed through HACS.
+A custom integration for connected Sub-Zero refrigerators, freezers, wine storage, and ice makers, Wolf ovens and hoods, and Cove dishwashers, installed through HACS.
 
 Sign in with your Sub-Zero Group Owner email and password directly in Home Assistant. Appliances are monitored and controlled over Sub-Zero's cloud service using their existing Wi-Fi connections. Bluetooth is not required.
 
@@ -120,6 +120,12 @@ Oven temperature fields that report zero while idle show as unknown; probe readi
 
 Gourmet program sensors report the appliance's recipe code as a name. Code 0 shows None; unrecognized codes show as unknown. Select and start Gourmet programs at the oven.
 
+## Wolf hoods
+
+Hoods provide a fan entity with four speeds and a task-light entity with brightness and white-temperature controls, when reported. Brightness ranges from 5–100%, and white temperature from 2700–5000 K.
+
+Other controls include halo lighting, automatic fan sensitivity (Off, Low, Medium, High), delayed shutoff with a 0–719 minute duration, button tones, and the control lock. Filter usage and allowance are reported as durations. Reset the hood filter counter at the appliance.
+
 ## Cove dishwashers
 
 | Type | Features |
@@ -149,7 +155,7 @@ Enable debug logging for `custom_components.subzero` to record channel-open atte
 
 ## Compatibility
 
-**Sub-Zero CL4850UFDID is the primary tested appliance.** Cloud status and push snapshots have also been tested with Wolf SO3050PMSP. The additional fridge features, dedicated ice makers, oven controls, second-cavity support, and Cove entities are covered by automated tests using simulated appliance responses and have not yet been verified against physical appliances.
+**Sub-Zero CL4850UFDID is the primary tested appliance.** Cloud status and push snapshots have also been tested with Wolf SO3050PMSP. The additional fridge features, dedicated ice makers, hoods, oven controls, second-cavity support, and Cove entities are covered by automated tests using simulated appliance responses and have not yet been verified against physical appliances.
 
 Other models can be added if the cloud service returns their status. Their entities depend on which recognized properties they report.
 

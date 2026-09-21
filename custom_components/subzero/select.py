@@ -13,6 +13,7 @@ from .const import (
     DOOR_AJAR_TIMEOUTS,
     FRIDGE_ENUM_OPTIONS,
     FRIDGE_MODE_KEYS,
+    HOOD_SENSITIVITY,
     ICE_KEYS,
     MANUAL_COOK_MODES,
     WASH_CYCLES,
@@ -35,6 +36,9 @@ MODES = {
 }
 ICE_MODES = {"Max ice": "max_ice_on", "Night ice": "night_ice_on"}
 DESCRIPTIONS = (
+    SelectEntityDescription(
+        key="auto_sensivity", name="Automatic fan sensitivity", icon="mdi:fan-auto"
+    ),
     SelectEntityDescription(key="ice_maker_mode", name="Ice maker", icon="mdi:ice-pop"),
     SelectEntityDescription(key="operating_mode", name="Mode", icon="mdi:fridge-outline"),
     SelectEntityDescription(
@@ -60,6 +64,7 @@ DESCRIPTIONS = (
     ),
 )
 ENUM_OPTIONS = {
+    "auto_sensivity": HOOD_SENSITIVITY,
     **FRIDGE_ENUM_OPTIONS,
     "cav_cook_mode": COOK_MODES,
     "cav2_cook_mode": COOK_MODES,

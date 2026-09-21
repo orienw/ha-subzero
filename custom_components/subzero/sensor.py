@@ -48,6 +48,18 @@ ENUM_VALUES = {
 }
 # Entities write state in this order within one update, and automations can observe it.
 DESCRIPTIONS = (
+    *(
+        SensorEntityDescription(
+            key=key,
+            name=name,
+            device_class=SensorDeviceClass.DURATION,
+            native_unit_of_measurement=UnitOfTime.SECONDS,
+        )
+        for key, name in (
+            ("filter_count", "Hood filter usage"),
+            ("filter_max_count", "Hood filter allowance"),
+        )
+    ),
     SensorEntityDescription(key="next_clean_cycles", name="Ice cycles until cleaning"),
     SensorEntityDescription(
         key="delay_duration",
