@@ -4,6 +4,7 @@ import asyncio
 import logging
 import random
 import time
+from collections.abc import Callable
 from datetime import datetime, timedelta
 
 from homeassistant.config_entries import ConfigEntry
@@ -25,6 +26,7 @@ from .api import (
     RateLimited,
     StateUpdate,
     SubZeroClient,
+    notification_records,
 )
 from .auth import InvalidAuth
 from .const import (
@@ -33,12 +35,14 @@ from .const import (
     FAULT_METADATA_APPLIES_TO_BY_SERIES,
     ICE_DELAY_KEYS,
     KITCHEN_TIMERS,
+    MAX_EVENT_HISTORY,
     MAX_RECONNECT_DELAY,
     NETWORK_KEYS,
     RECONNECT_DELAY,
     STATE_KEYS,
 )
 from .controls import (
+    appliance_datetime,
     appliance_type,
     control_matches,
     is_dishwasher,
@@ -96,6 +100,38 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self._read_updates: dict | None = None
         self._read_error: Exception | None = None
         self._channel_error: ApiError | None = None
+        self._event_cutoff = dt_util.utcnow()
+        self._event_ids: set[tuple[datetime, int, int]] = set()
+        self._event_listeners: list[Callable[[dict], None]] = []
+
+    @callback
+    def async_add_event_listener(self, listener: Callable[[dict], None]) -> Callable[[], None]:
+        self._event_listeners.append(listener)
+        return lambda: self._event_listeners.remove(listener)
+
+    @callback
+    def _process_events(self, properties: dict) -> None:
+        events = []
+        for record in notification_records(properties):
+            timestamp = appliance_datetime(record["timestamp"], {**self.data, **properties})
+            if timestamp is not None:
+                events.append((timestamp, record["notif_seq"], record["notif_type"]))
+        for identity in sorted(events):
+            timestamp, sequence, code = identity
+            if timestamp < self._event_cutoff or identity in self._event_ids:
+                continue
+            self._event_ids.add(identity)
+            if len(self._event_ids) > MAX_EVENT_HISTORY:
+                oldest = min(self._event_ids)
+                self._event_ids.remove(oldest)
+                self._event_cutoff = max(self._event_cutoff, oldest[0] + timedelta(microseconds=1))
+            event = {
+                "code": code,
+                "sequence": sequence,
+                "appliance_timestamp": timestamp.isoformat(),
+            }
+            for listener in self._event_listeners:
+                listener(event)
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -259,6 +295,9 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 if error := self._read_error or self._channel_error:
                     raise error
                 self.unrecognized_keys.update(data.keys() - STATE_KEYS)
+                if "notifs" in data:
+                    data = {**data, "notifs": notification_records(data)}
+                    self._process_events(data)
                 model = self._read_updates.get("appliance_model")
                 if isinstance(model, str) and model and model != data.get("appliance_model"):
                     data = {}
@@ -305,6 +344,9 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
     def apply_update(self, update: StateUpdate) -> None:
         self.unrecognized_keys.update(update.properties.keys() - STATE_KEYS)
         properties = {key: value for key, value in update.properties.items() if key in STATE_KEYS}
+        if "notifs" in properties:
+            properties["notifs"] = notification_records(properties)
+            self._process_events(properties)
         if properties:
             self._read_error = None
             self._channel_error = None

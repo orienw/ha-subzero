@@ -107,6 +107,7 @@ async def test_reported_properties_drive_entity_discovery(hass, loaded):
     registry = er.async_get(hass)
     entities = er.async_entries_for_config_entry(registry, entry.entry_id)
     assert {entity.unique_id for entity in entities} == {
+        "test-fridge_appliance_event",
         "test-fridge_ref_set_temp",
         "test-fridge_ref_door_ajar",
         "test-fridge_live_reporting_mode",
@@ -1084,7 +1085,7 @@ async def test_oven_entities_follow_the_reported_snapshot(hass, oven_loaded):
     entities = er.async_entries_for_device(
         er.async_get(hass), device.id, include_disabled_entities=True
     )
-    assert len(entities) == 25
+    assert len(entities) == 26
     assert {entity.unique_id for entity in entities if entity.disabled_by is not None} == {
         "test-oven_live_reporting_mode",
     }

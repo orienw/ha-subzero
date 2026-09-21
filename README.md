@@ -143,6 +143,12 @@ Selecting a cycle does not start it. To enable remote starting, hold ENTER on th
 
 Unknown wash cycle/status codes show as unknown. The integration sends only supported option properties; the appliance enforces which options apply to its selected cycle.
 
+## Appliance events
+
+Each appliance has an **Appliance event** entity for automations. It reports events such as oven preheat, probe targets, timer completion, dishwasher cycles, door alerts, and maintenance notifications. Its attributes include the event type, numeric code, sequence, and appliance timestamp. Unrecognized codes use the `unknown` event type and keep their numeric code.
+
+Startup history is not replayed. While the integration is loaded, repeated notifications and reconnect history are deduplicated, including when the appliance resets its sequence counter. Events from before the integration loaded are ignored; events that occur while Home Assistant is stopped do not trigger automations on startup. Timestamps must include an offset or use the appliance clock's reported offset.
+
 ## Diagnostics
 
 Wi-Fi signal strength is enabled by default. Uptime, IP address, MAC address, and live reporting mode are diagnostic sensors disabled by default. Enable them from the entity settings when needed.

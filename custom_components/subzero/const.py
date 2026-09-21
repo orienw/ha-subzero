@@ -4,6 +4,57 @@ DOMAIN = "subzero"
 CONTROL_CONFIRM_TIMEOUT = 5
 RECONNECT_DELAY = 30
 MAX_RECONNECT_DELAY = 900
+MAX_EVENT_HISTORY = 256
+NOTIFICATION_TYPES = {
+    0: "unknown",
+    101: "refrigerator_door_ajar",
+    102: "freezer_door_ajar",
+    103: "wine_door_ajar",
+    104: "wine_setpoint_changed",
+    105: "refrigerator_service_required",
+    106: "refrigerator_setpoint_changed",
+    107: "freezer_setpoint_changed",
+    108: "water_filter_expired",
+    109: "air_filter_expired",
+    112: "wine_temperature_alert",
+    113: "ice_maker_door_ajar",
+    114: "ice_cleaning_required",
+    115: "ice_cleaning_due_soon",
+    116: "ice_cleaning_add_descaler",
+    117: "ice_cleaning_add_sanitizer",
+    118: "ice_cleaning_cancelled",
+    119: "ice_cleaning_complete",
+    201: "oven_preheated",
+    202: "lower_oven_preheated",
+    203: "oven_probe_connected",
+    204: "lower_oven_probe_connected",
+    205: "oven_probe_target_reached",
+    206: "lower_oven_probe_target_reached",
+    207: "kitchen_timer_complete",
+    208: "kitchen_timer_2_complete",
+    209: "kitchen_timer_under_one_minute",
+    210: "kitchen_timer_2_under_one_minute",
+    211: "oven_cooking_timer_complete",
+    212: "lower_oven_cooking_timer_complete",
+    213: "oven_cooking_timer_under_one_minute",
+    214: "lower_oven_cooking_timer_under_one_minute",
+    215: "oven_probe_within_ten_degrees",
+    216: "lower_oven_probe_within_ten_degrees",
+    217: "oven_service_required",
+    218: "oven_door_ajar",
+    219: "lower_oven_door_ajar",
+    220: "oven_self_clean_complete",
+    221: "lower_oven_self_clean_complete",
+    301: "dishwasher_started",
+    302: "dishwasher_complete",
+    303: "softener_salt_low",
+    304: "rinse_aid_low",
+    305: "dishwasher_service_required",
+    306: "dishwasher_paused",
+    307: "dishwasher_cancelled",
+    400: "fault_notification",
+    401: "feedback_notification",
+}
 
 SETPOINT_KEYS = {"ref_set_temp", "ref2_set_temp", "frz_set_temp", "crisp_set_temp"}
 WINE_SETPOINT_KEYS = {"wine_set_temp", "wine2_set_temp"}
@@ -390,5 +441,5 @@ STATE_KEYS = (
     | BINARY_KEYS
     | TIMESTAMP_KEYS
     | WRITABLE_INTEGER_KEYS
-    | {"appliance_model", "appliance_type", "version", "time"}
+    | {"appliance_model", "appliance_type", "version", "time", "notifs"}
 )

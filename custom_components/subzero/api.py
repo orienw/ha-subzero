@@ -233,6 +233,20 @@ def _check_control_response(response: dict, message: str) -> None:
         raise ApiError(message)
 
 
+def notification_records(properties: dict) -> list[dict]:
+    records = [properties] if "notif_seq" in properties else properties.get("notifs")
+    if not isinstance(records, list):
+        return []
+    return [
+        {key: record[key] for key in ("notif_seq", "notif_type", "timestamp")}
+        for record in records
+        if isinstance(record, dict)
+        and type(record.get("notif_seq")) is int
+        and type(record.get("notif_type")) is int
+        and isinstance(record.get("timestamp"), str)
+    ]
+
+
 def parse_notification(
     event: dict, user_id: str, device_ids: list[str]
 ) -> tuple[str, StateUpdate | None] | None:
@@ -284,6 +298,14 @@ def parse_notification(
         wrapper,
         sorted(properties),
     )
+    if "notif_seq" in properties:
+        records = notification_records(properties)
+        properties = {
+            key: value
+            for key, value in properties.items()
+            if key not in {"notif_seq", "notif_type", "timestamp"}
+        }
+        properties["notifs"] = records
     if not properties or (wrapper == "root" and properties.keys().isdisjoint(STATE_KEYS)):
         return device_id, None
     model = properties.get("appliance_model")

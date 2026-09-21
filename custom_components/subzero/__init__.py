@@ -27,6 +27,7 @@ PLATFORMS = [
     Platform.BUTTON,
     Platform.FAN,
     Platform.LIGHT,
+    Platform.EVENT,
 ]
 type SubZeroConfigEntry = ConfigEntry[SubZeroAccount]
 
