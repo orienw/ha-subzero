@@ -98,6 +98,27 @@ async def test_status_reads_deliver_only_new_history(hass, cloud_appliance):
     assert [item.attributes["code"] for item in event_changes(events)] == [108, 109]
 
 
+@pytest.mark.parametrize("push_connected", [False, True])
+async def test_recovery_delivers_every_event_before_reconnect(
+    hass, cloud_appliance, push_connected
+):
+    client = cloud_appliance.client
+    coordinator = cloud_appliance.coordinator
+    client.push_connected = push_connected
+    coordinator.async_set_update_error(ApiError("Disconnected"))
+    events = async_capture_events(hass, "state_changed")
+    cloud_appliance.state["notifs"] = [record(1, 201), record(2, 202)]
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    assert [item.attributes["code"] for item in event_changes(events)] == [201, 202]
+
+    client.push_connected = True
+    coordinator.async_update_listeners()
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    assert [item.attributes["code"] for item in event_changes(events)] == [201, 202]
+
+
 async def test_unknown_codes_remain_numeric_and_metadata_is_filtered(hass, cloud_appliance):
     payload = {**record(1, 111), "private_account": "do-not-expose"}
     await cloud_appliance.update({"notifs": [payload]})

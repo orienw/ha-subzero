@@ -30,7 +30,7 @@ async def async_setup_entry(
 class SubZeroEvent(SubZeroEntity, EventEntity):
     @property
     def available(self) -> bool:
-        return self.coordinator.client.push_connected
+        return True
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
