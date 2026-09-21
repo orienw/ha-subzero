@@ -235,8 +235,11 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 raise HomeAssistantError("The appliance did not confirm the requested ice mode.")
 
     async def _async_set_ice_property(self, key: str, value: bool) -> None:
+        last_error = None
         for _ in range(3):
             if not self.last_update_success:
+                if last_error is not None:
+                    break
                 raise ServiceValidationError("The appliance is unavailable.")
             validate_control_properties(
                 self.data, self.device.get("temperature_unit"), {key: value}
@@ -260,7 +263,8 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                         await self.client.set_property(self.device_id, key, value)
                     except InvalidAuth, RateLimited:
                         raise
-                    except ApiError:
+                    except ApiError as error:
+                        last_error = error
                         await self.async_refresh()
                     confirm()
                     await confirmed.wait()
@@ -269,7 +273,10 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 pass
             finally:
                 remove_listener()
-        raise HomeAssistantError("The appliance did not confirm the requested ice setting.")
+        message = "The appliance did not confirm the requested ice setting."
+        if last_error is not None:
+            message += f" Last command error: {last_error}"
+        raise HomeAssistantError(message) from last_error
 
     async def async_set_ice_delay(
         self,

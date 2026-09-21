@@ -430,7 +430,7 @@ async def test_failed_mode_change_preserves_partial_state(hass, controls):
         await original(device_id, key, value)
 
     controls.client.set_property.side_effect = write
-    with pytest.raises(HomeAssistantError, match="did not confirm"):
+    with pytest.raises(HomeAssistantError, match="HTTP 503"):
         await hass.services.async_call(
             "select",
             "select_option",

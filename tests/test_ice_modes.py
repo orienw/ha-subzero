@@ -29,7 +29,7 @@ async def test_unconfirmed_step_retries_three_times_and_stops(cloud_appliance):
     client.set_property.side_effect = None
     reads = client.state.await_count
 
-    with pytest.raises(HomeAssistantError, match="did not confirm"):
+    with pytest.raises(HomeAssistantError, match="did not confirm") as failure:
         await cloud_appliance.coordinator.async_set_ice_mode("Off")
 
     assert client.set_property.await_args_list == [
@@ -38,6 +38,7 @@ async def test_unconfirmed_step_retries_three_times_and_stops(cloud_appliance):
     ]
     assert client.state.await_count == reads
     assert cloud_appliance.coordinator.data["ice_maker_on"] is True
+    assert failure.value.__cause__ is None
 
 
 async def test_successful_retry_continues_with_the_next_step(cloud_appliance):
@@ -81,11 +82,22 @@ async def test_error_without_state_change_exhausts_retries(cloud_appliance):
     reads = client.state.await_count
     client.set_property.side_effect = ApiError("Sub-Zero returned HTTP 503.")
 
-    with pytest.raises(HomeAssistantError, match="did not confirm"):
+    with pytest.raises(HomeAssistantError, match="HTTP 503") as failure:
         await cloud_appliance.coordinator.async_set_ice_mode("Max ice")
 
     assert client.set_property.await_args_list == [call("appliance", "night_ice_on", False)] * 3
     assert client.state.await_count == reads + 3
+    assert failure.value.__cause__ is client.set_property.side_effect
+
+
+async def test_failed_refresh_preserves_the_command_error(cloud_appliance):
+    client = cloud_appliance.client
+    client.set_property.side_effect = ApiError("Sub-Zero returned HTTP 503.")
+    client.state.side_effect = ApiError("Status read failed.")
+    with pytest.raises(HomeAssistantError, match="HTTP 503") as failure:
+        await cloud_appliance.coordinator.async_set_ice_mode("Max ice")
+    assert failure.value.__cause__ is client.set_property.side_effect
+    client.set_property.assert_awaited_once_with("appliance", "night_ice_on", False)
 
 
 @pytest.mark.parametrize("error", [InvalidAuth("Expired"), RateLimited(60)])
