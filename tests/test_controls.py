@@ -493,19 +493,32 @@ async def test_invalid_temperatures_do_not_reach_the_api(hass, controls, entity,
     controls.client.set_property.assert_not_called()
 
 
-async def test_celsius_display_converts_to_a_whole_fahrenheit_setpoint(hass, controls):
+@pytest.mark.parametrize("controls", ["F", "C"], indirect=True)
+@pytest.mark.parametrize(
+    ("entity", "key", "celsius", "fahrenheit"),
+    [
+        ("refrigerator", "ref_set_temp", 1.2, 34),
+        ("refrigerator", "ref_set_temp", 4, 39),
+        ("refrigerator", "ref_set_temp", 5.5, 42),
+        ("freezer", "frz_set_temp", -20, -4),
+    ],
+)
+async def test_celsius_display_converts_to_a_whole_fahrenheit_setpoint(
+    hass, controls, entity, key, celsius, fahrenheit
+):
     hass.config.units = METRIC_SYSTEM
     await hass.services.async_call(
         "number",
         "set_value",
-        {"entity_id": "number.kitchen_refrigerator_setpoint", "value": 4},
+        {"entity_id": f"number.kitchen_{entity}_setpoint", "value": celsius},
         blocking=True,
     )
-    controls.client.set_property.assert_awaited_once_with("test-fridge", "ref_set_temp", 39)
+    controls.client.set_property.assert_awaited_once_with("test-fridge", key, fahrenheit)
+    assert type(controls.client.set_property.call_args.args[2]) is int
 
 
-@pytest.mark.parametrize("controls", ["C", None], indirect=True)
-async def test_unknown_native_temperature_units_keep_other_controls(hass, controls):
+@pytest.mark.parametrize("controls", ["K", None], indirect=True)
+async def test_unknown_temperature_units_keep_other_controls(hass, controls):
     assert hass.states.get("number.kitchen_refrigerator_setpoint") is None
     assert hass.states.get("number.kitchen_freezer_setpoint") is None
     assert hass.states.get("number.kitchen_crisper_setpoint") is None

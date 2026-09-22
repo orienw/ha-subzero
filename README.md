@@ -30,7 +30,7 @@ For manual installation, copy `custom_components/subzero` into your Home Assista
 
 Entities are created only for recognized properties that each appliance reports, at setup and as new properties appear in push updates. There is no model allowlist.
 
-Temperature entities require the appliance to be set to Fahrenheit in the Sub-Zero app. Setpoints are sent as whole degrees Fahrenheit, and Home Assistant converts readings and inputs to your preferred display unit. Appliance units are read at startup and on reload, falling back to the last saved unit if the appliance list is temporarily unavailable. After changing the unit in the app, reload the integration. Appliances set to other units keep all of their non-temperature entities.
+Celsius and Fahrenheit appliance settings are supported. Home Assistant displays temperatures and accepts setpoints in your preferred unit. Setpoints use whole-degree Fahrenheit precision, so Celsius requests may be rounded. Appliance units are read at startup and on reload, falling back to the last saved unit if the appliance list is temporarily unavailable. Appliances with unknown units keep all of their non-temperature entities.
 
 Timestamp sensors require an explicit timezone offset, either in the timestamp or in the appliance clock, and otherwise show as unknown.
 

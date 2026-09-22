@@ -278,7 +278,7 @@ async def async_setup_entry(
             (description.key == "live_reporting_mode" or description.key in coordinator.data)
             and (
                 description.device_class != SensorDeviceClass.TEMPERATURE
-                or coordinator.device.get("temperature_unit") == "F"
+                or coordinator.device.get("temperature_unit") in ("F", "C")
             )
         ),
     )

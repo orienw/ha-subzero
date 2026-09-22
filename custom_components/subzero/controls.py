@@ -370,8 +370,8 @@ def validate_control_properties(data: dict, temperature_unit: str | None, proper
             if value in MANUAL_COOK_MODES and data[key] != value:
                 raise ServiceValidationError("Start this cooking mode at the oven's control panel.")
         else:
-            if temperature_unit != "F":
-                raise ServiceValidationError("Temperature controls require Fahrenheit in the app.")
+            if temperature_unit not in ("F", "C"):
+                raise ServiceValidationError("The appliance's temperature unit is unknown.")
             if not is_finite_number(data[key]):
                 raise ServiceValidationError("The current appliance temperature is unknown.")
             bounds = temperature_range(key, data)

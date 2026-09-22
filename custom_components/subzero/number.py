@@ -87,7 +87,7 @@ async def async_setup_entry(
         lambda coordinator, description: (
             (
                 description.device_class != NumberDeviceClass.TEMPERATURE
-                or coordinator.device.get("temperature_unit") == "F"
+                or coordinator.device.get("temperature_unit") in ("F", "C")
             )
             and supports_control(coordinator.data, description.key)
         ),

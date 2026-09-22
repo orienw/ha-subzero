@@ -39,8 +39,13 @@ pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
 
 
 @pytest.fixture
-async def appliances(hass, tokens, request):
-    hass.config.units = US_CUSTOMARY_SYSTEM
+def unit_system():
+    return US_CUSTOMARY_SYSTEM
+
+
+@pytest.fixture
+async def appliances(hass, tokens, request, unit_system):
+    hass.config.units = unit_system
     unit = getattr(request, "param", "F")
     entry = MockConfigEntry(
         domain=DOMAIN,
@@ -327,6 +332,7 @@ async def test_extra_refrigeration_zones_follow_reported_properties(hass, applia
         )
 
 
+@pytest.mark.parametrize("appliances", ["F", "C"], indirect=True)
 async def test_wine_display_temperatures_survive_snapshots_and_updates(hass, appliances):
     await appliances.update(
         "fridge",
@@ -466,6 +472,7 @@ async def test_start_resends_reported_values_without_change_checks(hass, applian
         ("cav2", "number.oven_lower_oven_probe_target_temperature"),
     ],
 )
+@pytest.mark.parametrize("appliances", ["F", "C"], indirect=True)
 async def test_probe_target_requires_connected_probe_and_ready_cavity(
     hass, appliances, prefix, entity_id
 ):
@@ -680,7 +687,7 @@ async def test_start_retry_rechecks_interlocks(appliances, device, key, ready, c
     appliances.client.set_property.assert_awaited_once_with(device, key, True)
 
 
-@pytest.mark.parametrize("appliances", ["C"], indirect=True)
+@pytest.mark.parametrize("appliances", [None], indirect=True)
 async def test_forced_retry_validates_a_value_that_no_longer_matches(appliances):
     await appliances.update("oven", {"cav_remote_ready": True})
     coordinator = appliances.entry.runtime_data.coordinators["oven"]
@@ -691,7 +698,7 @@ async def test_forced_retry_validates_a_value_that_no_longer_matches(appliances)
         raise ApiError("Sub-Zero returned HTTP 503.")
 
     appliances.client.set_property.side_effect = write
-    with pytest.raises(ServiceValidationError, match="Fahrenheit"):
+    with pytest.raises(ServiceValidationError, match="temperature unit"):
         await coordinator.async_set_properties({"cav_set_temp": 350}, force=True)
     appliances.client.set_property.assert_awaited_once_with("oven", "cav_set_temp", 350)
 
@@ -1023,8 +1030,8 @@ async def test_full_snapshot_marks_missing_controls_unavailable(hass, appliances
     assert hass.states.get("sensor.dishwasher_wash_status").state == "Idle"
 
 
-@pytest.mark.parametrize("appliances", ["C", None], indirect=True)
-async def test_non_fahrenheit_units_omit_temperature_entities(hass, appliances):
+@pytest.mark.parametrize("appliances", ["K", None], indirect=True)
+async def test_unknown_units_omit_temperature_entities(hass, appliances):
     assert hass.states.get("climate.oven_oven") is None
     assert hass.states.get("climate.fridge_refrigerator") is None
     assert hass.states.get("number.oven_probe_target_temperature") is None
@@ -1033,6 +1040,7 @@ async def test_non_fahrenheit_units_omit_temperature_entities(hass, appliances):
     assert hass.states.get("switch.dishwasher_heated_dry").state == "off"
 
 
+@pytest.mark.parametrize("appliances", ["F", "C"], indirect=True)
 async def test_climate_writes_convert_celsius_to_fahrenheit(hass, appliances):
     hass.config.units = METRIC_SYSTEM
     await appliances.update("oven", {"cav_unit_on": True})
@@ -1043,6 +1051,42 @@ async def test_climate_writes_convert_celsius_to_fahrenheit(hass, appliances):
         blocking=True,
     )
     appliances.client.set_property.assert_awaited_once_with("oven", "cav_set_temp", 392)
+
+
+@pytest.mark.parametrize("appliances", ["F", "C"], indirect=True)
+@pytest.mark.parametrize("unit_system", [METRIC_SYSTEM])
+async def test_temperature_readings_and_limits_follow_home_assistant_units(hass, appliances):
+    temperature = hass.states.get("sensor.fridge_refrigerator_display_temperature")
+    assert float(temperature.state) == pytest.approx((37 - 32) / 1.8)
+    assert temperature.attributes["unit_of_measurement"] == "°C"
+    fridge = hass.states.get("climate.fridge_refrigerator")
+    assert fridge.attributes["current_temperature"] == pytest.approx(2.8)
+    assert fridge.attributes["temperature"] == pytest.approx(3.3)
+    freezer = hass.states.get("climate.fridge_freezer")
+    assert freezer.attributes["temperature"] == pytest.approx(-17.8)
+    oven = hass.states.get("climate.oven_oven")
+    assert oven.attributes["current_temperature"] == pytest.approx(23.9)
+    assert oven.attributes["temperature"] == pytest.approx(176.7)
+
+    await appliances.update("oven", {"cav_unit_on": True, "cav_cook_mode": 12})
+    oven = hass.states.get("climate.oven_oven")
+    assert oven.attributes["min_temp"] == pytest.approx(60)
+    assert oven.attributes["max_temp"] == pytest.approx(93.3)
+    await hass.services.async_call(
+        "climate",
+        "set_temperature",
+        {"entity_id": oven.entity_id, "temperature": 60},
+        blocking=True,
+    )
+    appliances.client.set_property.assert_awaited_once_with("oven", "cav_set_temp", 140)
+    with pytest.raises(ServiceValidationError):
+        await hass.services.async_call(
+            "climate",
+            "set_temperature",
+            {"entity_id": oven.entity_id, "temperature": 94},
+            blocking=True,
+        )
+    assert appliances.client.set_property.await_count == 1
 
 
 async def test_diagnostics_omit_private_values(hass, appliances):
@@ -1552,7 +1596,7 @@ async def test_null_setpoint_disables_controls_but_not_the_sensor(hass, applianc
 @pytest.mark.parametrize(
     ("appliances", "update", "message"),
     [
-        ("C", {"cav_set_temp": 375}, "Fahrenheit"),
+        (None, {"cav_set_temp": 375}, "temperature unit"),
         ("F", {"cav_cook_mode": 10, "cav_set_temp": 150}, "range"),
     ],
     indirect=["appliances"],

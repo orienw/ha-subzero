@@ -34,7 +34,7 @@ async def async_setup_entry(
         DESCRIPTIONS,
         SubZeroClimate,
         lambda coordinator, description: (
-            coordinator.device.get("temperature_unit") == "F"
+            coordinator.device.get("temperature_unit") in ("F", "C")
             and supports_control(coordinator.data, description.key)
             and (
                 not description.key.startswith("cav")

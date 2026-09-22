@@ -366,8 +366,8 @@ async def test_unload_closes_push_listener(hass, loaded):
     assert disconnected.is_set()
 
 
-@pytest.mark.parametrize("loaded", ["C", None], indirect=True)
-async def test_celsius_or_unknown_units_skip_temperature_entities(hass, loaded):
+@pytest.mark.parametrize("loaded", ["K", None], indirect=True)
+async def test_unknown_units_skip_temperature_entities(hass, loaded):
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
     assert hass.states.get("sensor.kitchen_refrigerator_setpoint") is None
 
@@ -396,7 +396,7 @@ async def test_reload_refreshes_saved_units(hass, loaded, options):
         "name": "Kitchen",
         "temperature_unit": "C",
     }
-    assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "unavailable"
+    assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "38"
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
 
     client.appliances.side_effect = ApiError("Temporarily unavailable")
@@ -405,7 +405,7 @@ async def test_reload_refreshes_saved_units(hass, loaded, options):
     assert entry.state is ConfigEntryState.LOADED
     assert client.appliances.await_count == 3
     assert entry.runtime_data.coordinators["test-fridge"].device["temperature_unit"] == "C"
-    assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "unavailable"
+    assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "38"
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
 
     client.appliances.side_effect = None
@@ -467,7 +467,7 @@ async def test_units_are_saved_even_if_status_fails(hass, loaded):
     await hass.async_block_till_done()
     assert entry.state is ConfigEntryState.LOADED
     assert entry.runtime_data.coordinators["test-fridge"].device["temperature_unit"] == "C"
-    assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "unavailable"
+    assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "38"
 
 
 @pytest.mark.parametrize("loaded", ["F", "C", None], indirect=True)
@@ -485,7 +485,7 @@ async def test_appliance_list_outage_uses_cached_units(hass, loaded, caplog):
     client.state.assert_awaited_once_with("test-fridge")
     assert entry.runtime_data.coordinators["test-fridge"].device["temperature_unit"] == unit
     temperature = hass.states.get("sensor.kitchen_refrigerator_setpoint")
-    if unit == "F":
+    if unit in ("F", "C"):
         assert temperature.state == "38"
     else:
         assert temperature is None
