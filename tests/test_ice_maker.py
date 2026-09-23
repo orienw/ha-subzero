@@ -1,6 +1,7 @@
 """Dedicated ice-maker discovery, scheduling, and read-only cleaning state."""
 
 import pytest
+import voluptuous as vol
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 
 from custom_components.subzero.api import ApiError, RateLimited
@@ -161,12 +162,26 @@ async def test_invalid_delays_never_write(cloud_appliance, duration, offset, rep
     cloud_appliance.client.set_ice_delay.assert_not_called()
 
 
-async def test_schedule_service_rejects_boolean_duration(hass, cloud_appliance):
-    with pytest.raises(ServiceValidationError):
+@pytest.mark.parametrize(("duration", "start_in"), [(3.0, "5"), ("3", 5.0)])
+async def test_schedule_service_accepts_whole_numbers_from_templates(
+    hass, cloud_appliance, duration, start_in
+):
+    await hass.services.async_call(
+        DOMAIN,
+        "schedule_ice_delay",
+        {"device_id": cloud_appliance.device_id, "duration": duration, "start_in": start_in},
+        blocking=True,
+    )
+    cloud_appliance.client.set_ice_delay.assert_awaited_once_with("appliance", 10800, 300, False)
+
+
+@pytest.mark.parametrize("duration", [True, 1.5, "soon", None])
+async def test_schedule_service_rejects_other_durations(hass, cloud_appliance, duration):
+    with pytest.raises(vol.Invalid):
         await hass.services.async_call(
             DOMAIN,
             "schedule_ice_delay",
-            {"device_id": cloud_appliance.device_id, "duration": True},
+            {"device_id": cloud_appliance.device_id, "duration": duration},
             blocking=True,
         )
     cloud_appliance.client.set_ice_delay.assert_not_called()
