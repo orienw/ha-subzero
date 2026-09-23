@@ -129,8 +129,13 @@ async def test_halo_is_a_switch_with_the_app_on_value(hass, cloud_appliance):
     cloud_appliance.client.set_property.assert_awaited_once_with(
         "appliance", "halo_max_percent", 30
     )
-    await cloud_appliance.update({"halo_max_percent": 60})
+    await cloud_appliance.update({"halo_max_percent": 15})
     assert hass.states.get("switch.kitchen_halo_light").state == "on"
+    await hass.services.async_call(
+        "switch", "turn_on", {"entity_id": "switch.kitchen_halo_light"}, blocking=True
+    )
+    assert cloud_appliance.client.set_property.await_count == 1
+    assert cloud_appliance.state["halo_max_percent"] == 15
     await hass.services.async_call(
         "switch", "turn_off", {"entity_id": "switch.kitchen_halo_light"}, blocking=True
     )
