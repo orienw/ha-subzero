@@ -4,7 +4,10 @@ import asyncio
 from unittest.mock import call
 
 import pytest
+from homeassistant.core import Context
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.script import Script
 
 from custom_components.subzero.api import ApiError, RateLimited, StateUpdate
 from custom_components.subzero.auth import InvalidAuth
@@ -230,6 +233,89 @@ async def test_cancellation_removes_listener_and_stops_writing(cloud_appliance):
     client.set_property.assert_awaited_once_with("appliance", "night_ice_on", False)
     assert len(coordinator._listeners) == listeners
     assert not coordinator._command_lock.locked()
+
+
+@pytest.mark.parametrize("control", ["mode", "property"])
+@pytest.mark.parametrize("error", [None, ApiError("Status read failed.")])
+async def test_cancelled_command_leaves_status_read_running(cloud_appliance, control, error):
+    client = cloud_appliance.client
+    coordinator = cloud_appliance.coordinator
+    listeners = len(coordinator._listeners)
+    entered = asyncio.get_running_loop().create_future()
+    finish = asyncio.Event()
+
+    async def write(device_id, key, value):
+        cloud_appliance.state[key] = value
+
+    async def read(device_id):
+        entered.set_result(asyncio.current_task())
+        await finish.wait()
+        if error is not None:
+            raise error
+        return dict(cloud_appliance.state)
+
+    client.set_property.side_effect = write
+    client.state.side_effect = read
+    pending = asyncio.create_task(
+        coordinator.async_set_ice_mode("Max ice")
+        if control == "mode"
+        else coordinator.async_set_properties({"night_ice_on": False, "max_ice_on": True})
+    )
+    refresh = await asyncio.wait_for(entered, 1)
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+
+    assert coordinator.last_update_success
+    assert not refresh.done()
+    assert len(coordinator._listeners) == listeners
+    assert not coordinator._command_lock.locked()
+    finish.set()
+    await refresh
+
+    client.set_property.assert_awaited_once_with("appliance", "night_ice_on", False)
+    assert coordinator.last_update_success is (error is None)
+    if error is None:
+        assert coordinator.data["night_ice_on"] is False
+        assert coordinator.data["max_ice_on"] is False
+    else:
+        assert str(coordinator.last_exception) == "Status read failed."
+
+
+async def test_script_stop_preserves_status_read_until_unload(hass, cloud_appliance):
+    client = cloud_appliance.client
+    entered = asyncio.get_running_loop().create_future()
+
+    async def read(device_id):
+        entered.set_result(asyncio.current_task())
+        await asyncio.Event().wait()
+
+    client.set_property.side_effect = None
+    client.state.side_effect = read
+    script = Script(
+        hass,
+        cv.SCRIPT_SCHEMA(
+            [
+                {
+                    "action": "select.select_option",
+                    "data": {"entity_id": "select.kitchen_ice_maker", "option": "Max ice"},
+                }
+            ]
+        ),
+        "Change ice mode",
+        "automation",
+    )
+    pending = asyncio.create_task(script.async_run(context=Context()))
+    refresh = await asyncio.wait_for(entered, 1)
+    await asyncio.wait_for(script.async_stop(), 1)
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    assert cloud_appliance.coordinator.last_update_success
+    assert not refresh.done()
+
+    assert await hass.config_entries.async_unload(cloud_appliance.entry.entry_id)
+    assert refresh.cancelled()
+    client.set_property.assert_awaited_once_with("appliance", "night_ice_on", False)
 
 
 @pytest.mark.parametrize("changed_key", ["night_ice_on", "max_ice_on"])

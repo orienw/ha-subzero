@@ -257,6 +257,31 @@ async def test_air_filter_reset_keeps_reported_life_until_it_changes(hass, appli
     assert hass.states.get(entity_id).state == "unavailable"
 
 
+async def test_cancelled_filter_reset_still_refreshes_status(hass, appliances):
+    await appliances.update("fridge", {"air_filter_pct_remaining": 10})
+    coordinator = appliances.entry.runtime_data.coordinators["fridge"]
+    entered = asyncio.get_running_loop().create_future()
+    finish = asyncio.Event()
+
+    async def read(device_id):
+        entered.set_result(asyncio.current_task())
+        await finish.wait()
+        return {**appliances.states[device_id], "air_filter_pct_remaining": 100}
+
+    appliances.client.state.side_effect = read
+    pending = asyncio.create_task(coordinator.async_reset_air_filter())
+    refresh = await asyncio.wait_for(entered, 1)
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+
+    assert coordinator.last_update_success
+    finish.set()
+    await refresh
+    assert hass.states.get("sensor.fridge_air_filter_remaining").state == "100"
+    appliances.client.reset_air_filter.assert_awaited_once_with("fridge")
+
+
 @pytest.mark.parametrize("error", [ApiError("Reset rejected"), InvalidAuth("Sign in again")])
 async def test_air_filter_reset_reports_errors(hass, appliances, error):
     await appliances.update("fridge", {"air_filter_pct_remaining": 10})

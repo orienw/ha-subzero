@@ -1,5 +1,7 @@
 """Dedicated ice-maker discovery, scheduling, and read-only cleaning state."""
 
+import asyncio
+
 import pytest
 import voluptuous as vol
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
@@ -130,6 +132,37 @@ async def test_ending_delay_refreshes_after_acknowledgment_or_command_error(
             await cloud_appliance.coordinator.async_set_ice_delay(end_current=True)
     assert cloud_appliance.client.state.await_count == reads + 1
     assert hass.states.get("binary_sensor.kitchen_ice_delay_active").state == "off"
+
+
+@pytest.mark.parametrize("error", [None, ApiError("Sub-Zero returned HTTP 503.")])
+async def test_cancelled_ice_delay_still_refreshes_status(hass, cloud_appliance, error):
+    coordinator = cloud_appliance.coordinator
+    entered = asyncio.get_running_loop().create_future()
+    finish = asyncio.Event()
+
+    async def delay(device_id, duration, start_offset, recurring):
+        cloud_appliance.state["delay_duration"] = duration
+        if error is not None:
+            raise error
+
+    async def read(device_id):
+        entered.set_result(asyncio.current_task())
+        await finish.wait()
+        return dict(cloud_appliance.state)
+
+    cloud_appliance.client.set_ice_delay.side_effect = delay
+    cloud_appliance.client.state.side_effect = read
+    pending = asyncio.create_task(coordinator.async_set_ice_delay(3600))
+    refresh = await asyncio.wait_for(entered, 1)
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+
+    assert coordinator.last_update_success
+    finish.set()
+    await refresh
+    assert hass.states.get("sensor.kitchen_ice_delay_duration").state == "3600"
+    cloud_appliance.client.set_ice_delay.assert_awaited_once_with("appliance", 3600, 0, False)
 
 
 @pytest.mark.parametrize("error", [InvalidAuth("Expired"), RateLimited(60)])
