@@ -198,6 +198,18 @@ async def test_missing_hood_features_are_not_advertised(hass, cloud_appliance):
     cloud_appliance.client.set_property.assert_not_called()
 
 
+async def test_fan_without_speed_control_turns_on_when_given_a_speed(hass, cloud_appliance):
+    await cloud_appliance.update(
+        {"appliance_model": "BASIC-HOOD", "appliance_type": "23.255.255", "fan_on": False},
+        full=True,
+    )
+    await hass.services.async_call(
+        "fan", "turn_on", {"entity_id": "fan.kitchen_fan", "percentage": 50}, blocking=True
+    )
+    cloud_appliance.client.set_property.assert_awaited_once_with("appliance", "fan_on", True)
+    assert hass.states.get("fan.kitchen_fan").state == "on"
+
+
 @pytest.mark.parametrize(
     "key,value",
     [

@@ -61,7 +61,7 @@ class SubZeroFan(SubZeroEntity, FanEntity):
             await self.async_turn_off()
             return
         properties = {}
-        if percentage is not None:
+        if percentage is not None and FanEntityFeature.SET_SPEED in self.supported_features:
             properties["fan_speed"] = math.ceil(percentage / 25)
         properties["fan_on"] = True
         await self.coordinator.async_set_properties(properties)
