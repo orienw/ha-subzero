@@ -122,7 +122,7 @@ Gourmet program sensors report the appliance's recipe code as a name. Code 0 sho
 
 ## Wolf hoods
 
-Hoods provide a fan entity with four speeds and a task-light entity with brightness and white-temperature controls, when reported. Brightness ranges from 5–100%, and white temperature from 2700–5000 K.
+Hoods provide a fan entity with four speeds and a task-light entity with brightness and white-temperature controls, when reported. Brightness ranges from 5–100%, and white temperature from 2700–5000 K. Requests outside these ranges use the nearest limit.
 
 Other controls include halo lighting, automatic fan sensitivity (Off, Low, Medium, High), delayed shutoff with a 0–719 minute duration, button tones, and the control lock. Filter usage and allowance are reported as durations. Reset the hood filter counter at the appliance.
 

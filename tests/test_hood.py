@@ -106,6 +106,22 @@ async def test_task_light_uses_percent_and_color_level(hass, cloud_appliance):
     assert hass.states.get("light.kitchen_task_light").state == "off"
 
 
+@pytest.mark.parametrize(("kelvin", "level"), [(2200, 0), (6500, 100)])
+async def test_task_light_limits_white_temperature_to_its_range(
+    hass, cloud_appliance, kelvin, level
+):
+    await hass.services.async_call(
+        "light",
+        "turn_on",
+        {"entity_id": "light.kitchen_task_light", "color_temp_kelvin": kelvin},
+        blocking=True,
+    )
+    assert cloud_appliance.client.set_property.await_args_list == [
+        call("appliance", "color_level", level),
+        call("appliance", "light_on", True),
+    ]
+
+
 async def test_halo_is_a_switch_with_the_app_on_value(hass, cloud_appliance):
     await hass.services.async_call(
         "switch", "turn_on", {"entity_id": "switch.kitchen_halo_light"}, blocking=True

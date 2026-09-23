@@ -70,7 +70,11 @@ class SubZeroLight(SubZeroEntity, LightEntity):
         if ATTR_BRIGHTNESS in kwargs:
             properties["light_percent"] = max(5, round(kwargs[ATTR_BRIGHTNESS] * 100 / 255))
         if ATTR_COLOR_TEMP_KELVIN in kwargs:
-            properties["color_level"] = round((kwargs[ATTR_COLOR_TEMP_KELVIN] - 2700) / 23)
+            kelvin = min(
+                max(kwargs[ATTR_COLOR_TEMP_KELVIN], self.min_color_temp_kelvin),
+                self.max_color_temp_kelvin,
+            )
+            properties["color_level"] = round((kelvin - 2700) / 23)
         properties["light_on"] = True
         await self.coordinator.async_set_properties(properties)
 
