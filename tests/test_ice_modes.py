@@ -148,6 +148,68 @@ async def test_confirmation_deadline_includes_request_time(cloud_appliance):
     assert len(coordinator._listeners) == listeners
 
 
+async def test_request_cut_off_by_the_deadline_is_confirmed_by_reading_state(cloud_appliance):
+    client = cloud_appliance.client
+    reads = client.state.await_count
+
+    async def write(device_id, key, value):
+        cloud_appliance.state[key] = value
+        await asyncio.Event().wait()
+
+    client.set_property.side_effect = write
+    await cloud_appliance.coordinator.async_set_properties({"night_ice_on": False})
+
+    client.set_property.assert_awaited_once_with("appliance", "night_ice_on", False)
+    assert client.state.await_count == reads + 1
+
+
+async def test_push_during_a_slow_request_confirms_without_resending(cloud_appliance):
+    client = cloud_appliance.client
+    coordinator = cloud_appliance.coordinator
+    reads = client.state.await_count
+
+    async def write(device_id, key, value):
+        cloud_appliance.state[key] = value
+        coordinator.apply_update(StateUpdate({key: value}, full=False))
+        await asyncio.Event().wait()
+
+    client.set_property.side_effect = write
+    await coordinator.async_set_properties({"night_ice_on": False})
+
+    client.set_property.assert_awaited_once_with("appliance", "night_ice_on", False)
+    assert client.state.await_count == reads
+
+
+async def test_status_read_may_outlast_the_confirmation_deadline(cloud_appliance):
+    client = cloud_appliance.client
+    coordinator = cloud_appliance.coordinator
+
+    async def write(device_id, key, value):
+        cloud_appliance.state[key] = value
+
+    async def read(device_id):
+        await asyncio.sleep(0.1)
+        return dict(cloud_appliance.state)
+
+    client.set_property.side_effect = write
+    client.state.side_effect = read
+    await coordinator.async_set_properties({"night_ice_on": False})
+
+    client.set_property.assert_awaited_once_with("appliance", "night_ice_on", False)
+    assert coordinator.last_update_success
+
+
+async def test_failed_status_read_reports_an_unconfirmed_setting(cloud_appliance):
+    client = cloud_appliance.client
+    client.set_property.side_effect = None
+    client.state.side_effect = ApiError("Status read failed.")
+
+    with pytest.raises(HomeAssistantError, match="did not confirm"):
+        await cloud_appliance.coordinator.async_set_properties({"night_ice_on": False})
+
+    client.set_property.assert_awaited_once_with("appliance", "night_ice_on", False)
+
+
 async def test_cancellation_removes_listener_and_stops_writing(cloud_appliance):
     client = cloud_appliance.client
     coordinator = cloud_appliance.coordinator

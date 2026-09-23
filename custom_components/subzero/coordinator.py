@@ -236,9 +236,9 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self, key: str, value: bool | int, *, resend: bool = False
     ) -> datetime:
         last_error = None
-        for _ in range(3):
+        for attempt in range(3):
             if not self.last_update_success:
-                if last_error is not None:
+                if attempt:
                     break
                 raise ServiceValidationError("The appliance is unavailable.")
             requested_at = dt_util.utcnow()
@@ -259,26 +259,27 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
 
             remove_listener = self.async_add_listener(confirm)
             try:
-                async with asyncio.timeout(CONTROL_CONFIRM_TIMEOUT):
-                    try:
-                        await self.client.set_property(self.device_id, key, value)
-                    except InvalidAuth, RateLimited:
-                        raise
-                    except ApiError as error:
-                        last_error = error
-                        await self.async_refresh()
-                    else:
-                        if key not in KITCHEN_TIMERS:
-                            confirm()
+                try:
+                    async with asyncio.timeout(CONTROL_CONFIRM_TIMEOUT):
                         try:
+                            await self.client.set_property(self.device_id, key, value)
+                        except InvalidAuth, RateLimited:
+                            raise
+                        except ApiError as error:
+                            last_error = error
+                        else:
+                            if key not in KITCHEN_TIMERS:
+                                confirm()
                             await asyncio.wait_for(confirmed.wait(), CONTROL_PUSH_TIMEOUT)
-                        except TimeoutError:
-                            await self.async_refresh()
+                except TimeoutError:
+                    pass
+                if not confirmed.is_set():
+                    # A status read cancelled by the deadline would leave the
+                    # appliance marked as failed, so it runs afterwards.
+                    await self.async_refresh()
                     confirm()
-                    await confirmed.wait()
+                if confirmed.is_set():
                     return requested_at
-            except TimeoutError:
-                pass
             finally:
                 remove_listener()
         message = "The appliance did not confirm the requested setting."
