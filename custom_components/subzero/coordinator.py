@@ -53,6 +53,7 @@ from .controls import (
     is_hood,
     is_ice_maker,
     is_oven,
+    start_properties,
     supports_air_filter_reset,
     validate_control_properties,
 )
@@ -168,43 +169,54 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         which is how the app starts ovens and dishwashers. A value the appliance
         already reports is re-sent as is, without the checks a change needs.
         """
-        properties = dict(properties)
-        unit = self.device.get("temperature_unit")
         async with self._command_lock:
-            if not self.last_update_success:
-                raise ServiceValidationError("The appliance is unavailable.")
-            now = dt_util.utcnow()
-            changes = {
-                key: value
-                for key, value in properties.items()
-                if not (force and control_matches(self.data, key, value, now))
-            }
-            if changes or not force:
-                validate_control_properties(self.data, unit, changes)
-            requested_at = {}
-            try:
-                for key, value in properties.items():
-                    if not self.last_update_success:
-                        raise ServiceValidationError("The appliance is unavailable.")
-                    requested_at[key] = dt_util.utcnow()
-                    if (
-                        force
-                        or (key in KITCHEN_TIMERS and value > 0)
-                        or not control_matches(self.data, key, value, requested_at[key])
-                    ):
-                        requested_at[key] = await self._async_set_property(
-                            key, value, resend=key not in changes
-                        )
-                if not self.last_update_success or any(
-                    not control_matches(self.data, key, value, requested_at[key])
-                    for key, value in properties.items()
+            await self._async_write(dict(properties), force=force)
+
+    async def async_start(self, key: str, temperature: int | None = None) -> None:
+        """Start with the app's writes, from the state left by earlier commands."""
+        async with self._command_lock:
+            if self.data.get(key) is True:
+                prefix = key.removesuffix("_unit_on")
+                properties = {} if temperature is None else {f"{prefix}_set_temp": temperature}
+                await self._async_write({**properties, key: True})
+            else:
+                await self._async_write(start_properties(self.data, key, temperature), force=True)
+
+    async def _async_write(self, properties: dict, *, force: bool = False) -> None:
+        if not self.last_update_success:
+            raise ServiceValidationError("The appliance is unavailable.")
+        now = dt_util.utcnow()
+        changes = {
+            key: value
+            for key, value in properties.items()
+            if not (force and control_matches(self.data, key, value, now))
+        }
+        if changes or not force:
+            validate_control_properties(self.data, self.device.get("temperature_unit"), changes)
+        requested_at = {}
+        try:
+            for key, value in properties.items():
+                if not self.last_update_success:
+                    raise ServiceValidationError("The appliance is unavailable.")
+                requested_at[key] = dt_util.utcnow()
+                if (
+                    force
+                    or (key in KITCHEN_TIMERS and value > 0)
+                    or not control_matches(self.data, key, value, requested_at[key])
                 ):
-                    raise HomeAssistantError("The appliance did not confirm the requested setting.")
-            except InvalidAuth as error:
-                self.entry.async_start_reauth(self.hass)
-                raise HomeAssistantError("Sign in to Sub-Zero again to change settings.") from error
-            except ApiError as error:
-                raise HomeAssistantError(str(error)) from error
+                    requested_at[key] = await self._async_set_property(
+                        key, value, resend=key not in changes
+                    )
+            if not self.last_update_success or any(
+                not control_matches(self.data, key, value, requested_at[key])
+                for key, value in properties.items()
+            ):
+                raise HomeAssistantError("The appliance did not confirm the requested setting.")
+        except InvalidAuth as error:
+            self.entry.async_start_reauth(self.hass)
+            raise HomeAssistantError("Sign in to Sub-Zero again to change settings.") from error
+        except ApiError as error:
+            raise HomeAssistantError(str(error)) from error
 
     async def async_reset_air_filter(self) -> None:
         async with self._command_lock:

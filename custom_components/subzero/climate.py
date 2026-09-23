@@ -8,7 +8,7 @@ from homeassistant.helpers.entity import EntityDescription
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import SubZeroConfigEntry
-from .controls import is_finite_number, start_properties, supports_control, temperature_range
+from .controls import is_finite_number, supports_control, temperature_range
 from .entity import SubZeroEntity, async_setup_entities
 
 DESCRIPTIONS = tuple(
@@ -118,12 +118,12 @@ class SubZeroClimate(SubZeroEntity, ClimateEntity):
         mode = kwargs.get("hvac_mode")
         if mode is not None and mode not in self.hvac_modes:
             raise ServiceValidationError("The appliance does not support that mode.")
-        properties = {self.entity_description.key: round(value)}
-        if self._oven and mode == HVACMode.HEAT and not self._running:
-            await self._async_start(round(value))
+        if self._oven and mode == HVACMode.HEAT:
+            await self.coordinator.async_start(f"{self._prefix}_unit_on", round(value))
             return
+        properties = {self.entity_description.key: round(value)}
         if self._oven and mode is not None:
-            properties[f"{self._prefix}_unit_on"] = mode == HVACMode.HEAT
+            properties[f"{self._prefix}_unit_on"] = False
         await self.coordinator.async_set_properties(properties)
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
@@ -131,22 +131,10 @@ class SubZeroClimate(SubZeroEntity, ClimateEntity):
             raise ServiceValidationError("The appliance does not support that mode.")
         if not self._oven:
             return
-        if hvac_mode == HVACMode.HEAT and not self._running:
-            await self._async_start()
+        if hvac_mode == HVACMode.HEAT:
+            await self.coordinator.async_start(f"{self._prefix}_unit_on")
             return
-        await self.coordinator.async_set_properties(
-            {f"{self._prefix}_unit_on": hvac_mode == HVACMode.HEAT}
-        )
-
-    @property
-    def _running(self) -> bool:
-        return self.coordinator.data.get(f"{self._prefix}_unit_on") is True
-
-    async def _async_start(self, temperature: int | None = None) -> None:
-        await self.coordinator.async_set_properties(
-            start_properties(self.coordinator.data, f"{self._prefix}_unit_on", temperature),
-            force=True,
-        )
+        await self.coordinator.async_set_properties({f"{self._prefix}_unit_on": False})
 
     async def async_turn_on(self) -> None:
         await self.async_set_hvac_mode(HVACMode.HEAT)

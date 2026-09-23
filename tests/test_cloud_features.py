@@ -690,6 +690,33 @@ async def test_queued_start_rechecks_remote_ready(appliances):
 
 
 @pytest.mark.parametrize(
+    "temperature,changed,writes",
+    [
+        (
+            None,
+            {"cav_cook_mode": 5},
+            [("cav_cook_mode", 5), ("cav_unit_on", True), ("cav_set_temp", 350)],
+        ),
+        (None, {"cav_unit_on": True}, []),
+        (400, {"cav_unit_on": True}, [("cav_set_temp", 400)]),
+    ],
+)
+async def test_queued_start_uses_state_after_previous_command(
+    appliances, temperature, changed, writes
+):
+    await appliances.update("oven", {"appliance_type": "17.15.1.3", "cav_remote_ready": True})
+    coordinator = appliances.entry.runtime_data.coordinators["oven"]
+    async with coordinator._command_lock:
+        task = asyncio.create_task(coordinator.async_start("cav_unit_on", temperature))
+        await asyncio.sleep(0)
+        await appliances.update("oven", changed)
+    await task
+    assert appliances.client.set_property.await_args_list == [
+        call("oven", key, value) for key, value in writes
+    ]
+
+
+@pytest.mark.parametrize(
     "device,key,ready,changed,message",
     [
         ("oven", "cav_unit_on", "cav_remote_ready", {"cav_remote_ready": False}, "Remote Ready"),

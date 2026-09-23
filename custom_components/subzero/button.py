@@ -11,7 +11,6 @@ from . import SubZeroConfigEntry
 from .const import ICE_DELAY_KEYS
 from .controls import (
     is_ice_maker,
-    start_properties,
     supports_air_filter_reset,
     supports_control,
     validate_remote_start,
@@ -99,9 +98,8 @@ class SubZeroStartButton(SubZeroEntity, ButtonEntity):
         return supports_control(data, key)
 
     async def async_press(self) -> None:
-        key = self.entity_description.key.removeprefix("remote_start_")
-        await self.coordinator.async_set_properties(
-            start_properties(self.coordinator.data, key), force=True
+        await self.coordinator.async_start(
+            self.entity_description.key.removeprefix("remote_start_")
         )
 
 
