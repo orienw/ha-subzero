@@ -1,5 +1,6 @@
 """Hood controls through Home Assistant fan, light, and setting services."""
 
+import asyncio
 from unittest.mock import call
 
 import pytest
@@ -142,6 +143,18 @@ async def test_halo_is_a_switch_with_the_app_on_value(hass, cloud_appliance):
     assert cloud_appliance.client.set_property.await_args == call(
         "appliance", "halo_max_percent", 0
     )
+
+
+async def test_queued_halo_turn_on_keeps_a_level_reported_meanwhile(cloud_appliance):
+    coordinator = cloud_appliance.coordinator
+    async with coordinator._command_lock:
+        pending = asyncio.create_task(coordinator.async_set_properties({"halo_max_percent": 30}))
+        await asyncio.sleep(0)
+        await cloud_appliance.update({"halo_max_percent": 15})
+    await pending
+
+    cloud_appliance.client.set_property.assert_not_called()
+    assert coordinator.data["halo_max_percent"] == 15
 
 
 async def test_hood_settings_convert_delay_and_off_sensitivity(hass, cloud_appliance):

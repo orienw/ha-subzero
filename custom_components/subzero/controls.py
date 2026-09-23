@@ -202,6 +202,9 @@ def control_matches(data: dict, key: str, value: bool | int, requested_at: datet
             and value in ACCENT_LIGHT_LABELS
             and ACCENT_LIGHT_LABELS.get(data[key]) == ACCENT_LIGHT_LABELS[value]
         )
+    if key == "halo_max_percent" and value:
+        # The app treats any nonzero halo level as on.
+        return type(data.get(key)) is int and data[key] != 0
     if key not in KITCHEN_TIMERS:
         if key.endswith("_unit_on") and value is False:
             ready = key.replace("unit_on", "remote_ready")

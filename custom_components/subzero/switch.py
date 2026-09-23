@@ -72,9 +72,7 @@ class SubZeroHaloSwitch(SubZeroSwitch):
         return value != 0 if type(value) is int else None
 
     async def async_turn_on(self, **kwargs) -> None:
-        # The app writes its on level only when the halo is off.
-        if not self.is_on:
-            await self.coordinator.async_set_properties({"halo_max_percent": 30})
+        await self.coordinator.async_set_properties({"halo_max_percent": 30})
 
     async def async_turn_off(self, **kwargs) -> None:
         await self.coordinator.async_set_properties({"halo_max_percent": 0})
