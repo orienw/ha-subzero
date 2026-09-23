@@ -72,6 +72,19 @@ async def test_zero_fan_percentage_turns_off_power(hass, cloud_appliance):
     assert hass.states.get("fan.kitchen_fan").state == "off"
 
 
+@pytest.mark.parametrize(
+    ("service", "data"), [("set_percentage", {"percentage": 25}), ("increase_speed", {})]
+)
+async def test_speed_changes_turn_on_an_off_fan(hass, cloud_appliance, service, data):
+    await hass.services.async_call(
+        "fan", service, {"entity_id": "fan.kitchen_fan", **data}, blocking=True
+    )
+    cloud_appliance.client.set_property.assert_awaited_once_with("appliance", "fan_on", True)
+    fan = hass.states.get("fan.kitchen_fan")
+    assert fan.state == "on"
+    assert fan.attributes["percentage"] == 25
+
+
 async def test_task_light_uses_percent_and_color_level(hass, cloud_appliance):
     await hass.services.async_call(
         "light",
