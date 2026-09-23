@@ -107,6 +107,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self._event_cutoff = dt_util.utcnow()
         self._event_ids: set[tuple[datetime, int, int]] = set()
         self._event_listeners: list[Callable[[dict], None]] = []
+        self._history_seen = False
 
     @callback
     def async_add_event_listener(self, listener: Callable[[dict], None]) -> Callable[[], None]:
@@ -114,7 +115,11 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         return lambda: self._event_listeners.remove(listener)
 
     @callback
-    def _process_events(self, properties: dict) -> None:
+    def _process_events(self, properties: dict, *, history: bool) -> None:
+        # The first snapshot or status read only sets the baseline, so an
+        # appliance clock running ahead cannot replay events from before loading.
+        deliver = self._history_seen or not history
+        self._history_seen |= history
         events = []
         for record in notification_records(properties):
             timestamp = appliance_datetime(record["timestamp"], {**self.data, **properties})
@@ -129,6 +134,8 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 oldest = min(self._event_ids)
                 self._event_ids.remove(oldest)
                 self._event_cutoff = max(self._event_cutoff, oldest[0] + timedelta(microseconds=1))
+            if not deliver:
+                continue
             event = {
                 "code": code,
                 "sequence": sequence,
@@ -340,7 +347,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 self.unrecognized_keys.update(data.keys() - STATE_KEYS)
                 if "notifs" in data:
                     data = {**data, "notifs": notification_records(data)}
-                    self._process_events(data)
+                    self._process_events(data, history=True)
                 model = self._read_updates.get("appliance_model")
                 if isinstance(model, str) and model and model != data.get("appliance_model"):
                     data = {}
@@ -389,7 +396,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         properties = {key: value for key, value in update.properties.items() if key in STATE_KEYS}
         if "notifs" in properties:
             properties["notifs"] = notification_records(properties)
-            self._process_events(properties)
+            self._process_events(properties, history=update.full)
         if properties:
             self._read_error = None
             self._channel_error = None

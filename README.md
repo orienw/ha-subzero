@@ -149,7 +149,7 @@ Each appliance has an **Appliance event** entity for automations. It reports eve
 
 The event entity keeps its last occurrence when the connection drops. Events found during a status read are delivered immediately, including while the push connection is recovering.
 
-Startup history is not replayed. While the integration is loaded, repeated notifications and reconnect history are deduplicated, including when the appliance resets its sequence counter. Events from before the integration loaded are ignored; events that occur while Home Assistant is stopped do not trigger automations on startup. Timestamps must include an offset or use the appliance clock's reported offset.
+Startup history is not replayed. The first snapshot or status read after loading only sets a baseline, so events reported while the integration starts do not fire, even when the appliance clock runs ahead. While the integration is loaded, repeated notifications and reconnect history are deduplicated, including when the appliance resets its sequence counter. Events from before the integration loaded are ignored; events that occur while Home Assistant is stopped do not trigger automations on startup. Timestamps must include an offset or use the appliance clock's reported offset.
 
 Replay protection relies on the appliance clock. A clock five minutes behind Home Assistant can suppress the first five minutes of live events after a reload. If the clock moves backward, events can also be ignored until it catches up with the retained history cutoff.
 
