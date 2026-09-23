@@ -8,6 +8,7 @@ from homeassistant.core import Context
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.script import Script
+from homeassistant.setup import async_setup_component
 
 from custom_components.subzero.api import ApiError, RateLimited, StateUpdate
 from custom_components.subzero.auth import InvalidAuth
@@ -316,6 +317,44 @@ async def test_script_stop_preserves_status_read_until_unload(hass, cloud_applia
     assert await hass.config_entries.async_unload(cloud_appliance.entry.entry_id)
     assert refresh.cancelled()
     client.set_property.assert_awaited_once_with("appliance", "night_ice_on", False)
+
+
+async def test_script_stop_during_entity_update_finishes_the_status_read(hass, cloud_appliance):
+    assert await async_setup_component(hass, "homeassistant", {})
+    entered = asyncio.get_running_loop().create_future()
+    finish = asyncio.Event()
+
+    async def read(device_id):
+        entered.set_result(asyncio.current_task())
+        await finish.wait()
+        return {**cloud_appliance.state, "night_ice_on": False}
+
+    cloud_appliance.client.state.side_effect = read
+    script = Script(
+        hass,
+        cv.SCRIPT_SCHEMA(
+            [
+                {
+                    "action": "homeassistant.update_entity",
+                    "target": {"entity_id": "select.kitchen_ice_maker"},
+                }
+            ]
+        ),
+        "Refresh ice maker",
+        "automation",
+    )
+    pending = asyncio.create_task(script.async_run(context=Context()))
+    refresh = await asyncio.wait_for(entered, 1)
+    await asyncio.wait_for(script.async_stop(), 1)
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    assert cloud_appliance.coordinator.last_update_success
+
+    finish.set()
+    await refresh
+    await hass.async_block_till_done()
+    assert cloud_appliance.coordinator.last_update_success
+    assert hass.states.get("select.kitchen_ice_maker").state == "On"
 
 
 @pytest.mark.parametrize("changed_key", ["night_ice_on", "max_ice_on"])

@@ -221,7 +221,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 ) from error
             except ApiError as error:
                 raise HomeAssistantError(str(error)) from error
-            await self._async_refresh_after_command()
+            await self.async_refresh()
 
     async def async_set_ice_mode(self, mode: str) -> None:
         async with self._command_lock:
@@ -283,7 +283,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 if not confirmed.is_set():
                     # A status read cancelled by the deadline would leave the
                     # appliance marked as failed, so it runs afterwards.
-                    await self._async_refresh_after_command()
+                    await self.async_refresh()
                     confirm()
                 if confirmed.is_set():
                     return requested_at
@@ -326,15 +326,23 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             except RateLimited as error:
                 raise HomeAssistantError(str(error)) from error
             except ApiError as error:
-                await self._async_refresh_after_command()
+                await self.async_refresh()
                 raise HomeAssistantError(str(error)) from error
-            await self._async_refresh_after_command()
+            await self.async_refresh()
 
-    async def _async_refresh_after_command(self) -> None:
-        """Finish reading status even if the calling command is cancelled."""
+    async def async_refresh(self) -> None:
+        """Finish reading status even if the caller is cancelled."""
         await asyncio.shield(
             self.entry.async_create_background_task(
-                self.hass, self.async_refresh(), "Sub-Zero status after command"
+                self.hass, super().async_refresh(), "Sub-Zero status read"
+            )
+        )
+
+    async def async_request_refresh(self) -> None:
+        """Finish a requested status read even if the caller is cancelled."""
+        await asyncio.shield(
+            self.entry.async_create_background_task(
+                self.hass, super().async_request_refresh(), "Sub-Zero status request"
             )
         )
 
