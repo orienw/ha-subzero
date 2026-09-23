@@ -270,7 +270,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                     async with asyncio.timeout(CONTROL_CONFIRM_TIMEOUT):
                         try:
                             await self.client.set_property(self.device_id, key, value)
-                        except InvalidAuth, RateLimited:
+                        except RateLimited:
                             raise
                         except ApiError as error:
                             last_error = error
