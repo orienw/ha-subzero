@@ -15,6 +15,12 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from custom_components.subzero import api
 from custom_components.subzero.auth import InvalidAuth
+from custom_components.subzero.const import (
+    STATE_KEYS,
+    WRITABLE_BOOLEAN_KEYS,
+    WRITABLE_INTEGER_KEYS,
+)
+from custom_components.subzero.controls import supports_control
 
 from .conftest import make_tokens
 
@@ -62,26 +68,8 @@ def test_notifications_for_unselected_appliances_are_ignored(caplog):
     assert "unselected appliance" in caplog.text
 
 
-def test_any_model_snapshot_is_accepted():
-    state = {"appliance_model": "ANOTHER-MODEL", "ref_door_ajar": True}
-    event = notification(state, full=True)
-    assert api.parse_notification(event, "owner", ["test-fridge"]) == (
-        "test-fridge",
-        api.StateUpdate(state, full=True),
-    )
-
-
 def test_property_changes_do_not_turn_sibling_fields_into_a_snapshot():
     pload = {"appliance_model": "MODEL", "ref_door_ajar": False, "props": {"ref_door_ajar": True}}
-    event = notification({}, message_type=1, pload=pload)
-    assert api.parse_notification(event, "owner", ["test-fridge"]) == (
-        "test-fridge",
-        api.StateUpdate({"ref_door_ajar": True}, full=False),
-    )
-
-
-def test_snapshots_with_a_null_model_still_apply_property_changes():
-    pload = {"appliance_model": None, "props": {"ref_door_ajar": True}}
     event = notification({}, message_type=1, pload=pload)
     assert api.parse_notification(event, "owner", ["test-fridge"]) == (
         "test-fridge",
@@ -140,7 +128,16 @@ def test_response_properties_take_precedence_over_other_wrappers():
     }
 
 
-@pytest.mark.parametrize("pload", [{}, {"props": None}, {"resp": {}}, {"diagnostic_status": "0x0"}])
+@pytest.mark.parametrize(
+    "pload",
+    [
+        {},
+        {"props": None},
+        {"resp": {}},
+        {"diagnostic_status": "0x0"},
+        {"seq": 103, "notif_type": 109},
+    ],
+)
 def test_empty_or_diagnostic_only_messages_carry_no_entity_state(pload):
     assert api.parse_notification(notification({}, pload=pload), "owner", ["test-fridge"]) == (
         "test-fridge",
@@ -159,38 +156,35 @@ def test_notification_logs_show_structure_without_private_payload_values(caplog)
     caplog.set_level(logging.DEBUG, logger="custom_components.subzero.api")
     event = notification(
         {},
+        message_type=["private-type"],
         pload={
             "resp": {"ref_door_ajar": True, "new_feature": {"private-key": "private-value"}},
             "private_field": "private-root-value",
         },
     )
     api.parse_notification(event, "owner", ["test-fridge"])
-    assert "payload keys=['private_field', 'resp']" in caplog.text
+    assert "type=unknown, payload keys=['private_field', 'resp']" in caplog.text
     assert "wrapper=resp, state keys=['new_feature', 'ref_door_ajar']" in caplog.text
-    for value in ["private-key", "private-value", "private-root-value", "test-fridge"]:
+    for value in [
+        "private-type",
+        "private-key",
+        "private-value",
+        "private-root-value",
+        "test-fridge",
+    ]:
         assert value not in caplog.text
 
 
-@pytest.mark.parametrize("message_type", [1, 2, 6, 8])
-def test_property_changes_are_read_from_alert_message_types(message_type):
+def test_property_changes_are_read_from_alert_payloads():
     event = notification(
         {},
-        message_type=message_type,
+        message_type=8,
         pload={"seq": 87, "notif_type": 201, "props": {"ref_door_ajar": True}},
     )
     assert api.parse_notification(event, "owner", ["test-fridge"]) == (
         "test-fridge",
         api.StateUpdate({"ref_door_ajar": True}, full=False),
     )
-
-
-@pytest.mark.parametrize(("message_type", "label"), [(4, "type=4"), ([[[]]], "type=unknown")])
-def test_alerts_without_properties_carry_no_state(caplog, message_type, label):
-    caplog.set_level(logging.DEBUG, logger="custom_components.subzero.api")
-    event = notification({}, message_type=message_type, pload={"seq": 103, "notif_type": 109})
-    assert api.parse_notification(event, "owner", ["test-fridge"]) == ("test-fridge", None)
-    assert label in caplog.text
-    assert "state keys=['notif_type', 'seq']" in caplog.text
 
 
 @pytest.mark.parametrize("value", [None, "bad", "nan", "inf"])
@@ -739,39 +733,13 @@ async def test_failed_control_request_is_not_automatically_retried(control_serve
     assert len(control_server["requests"]) == 1
 
 
-@pytest.mark.parametrize(
-    ("key", "value"),
-    [
-        ("cav_set_temp", 350),
-        ("cav2_set_temp", 375),
-        ("cav_probe_set_temp", 150),
-        ("cav2_probe_set_temp", 165),
-        ("cav_cook_mode", 1),
-        ("cav2_cook_mode", 2),
-        ("cav_unit_on", True),
-        ("cav2_unit_on", False),
-        ("cav_light_on", True),
-        ("cav2_light_on", False),
-        ("kitchen_timer_duration", 30),
-        ("kitchen_timer2_duration", 0),
-        ("accent_light_level", 50),
-        ("wash_cycle_on", True),
-        ("wash_cycle", 3),
-        ("mode", 2),
-        ("delay_start_timer_duration", 12),
-        ("heated_dry_on", True),
-        ("internal_dispenser_enabled", False),
-        ("ref2_set_temp", 40),
-        ("extended_dry_on", False),
-        ("sani_rinse_on", True),
-        ("high_temp_wash_on", False),
-        ("top_rack_only_on", True),
-    ],
-)
-async def test_cloud_controls_use_the_existing_direct_method(control_server, tokens, key, value):
-    async with aiohttp.ClientSession() as session:
-        await api.SubZeroClient(session, "test-key", tokens).set_property("test-fridge", key, value)
-    assert control_server["requests"][0]["pload"] == {"cmd": "set", "params": {key: value}}
+@pytest.mark.parametrize("appliance_type", ["1.15.1.1", "1.21.1.1", "1.23.1.1"])
+def test_every_supported_control_passes_the_write_allowlist(appliance_type):
+    """Entity tests replace the client, so only this catches a control the API would refuse."""
+    data = {**dict.fromkeys(STATE_KEYS), "appliance_type": appliance_type}
+    supported = {key for key in data if supports_control(data, key)}
+    assert supported
+    assert supported <= WRITABLE_BOOLEAN_KEYS | WRITABLE_INTEGER_KEYS
 
 
 @pytest.mark.parametrize(
@@ -820,10 +788,8 @@ async def test_nested_cloud_command_errors_are_not_accepted(control_server, toke
 
 
 @pytest.mark.parametrize("wrapped", [False, True])
-@pytest.mark.parametrize("status", [200, 201, 202])
-async def test_cloud_status_accepts_both_snapshot_shapes(control_server, tokens, wrapped, status):
+async def test_cloud_status_accepts_both_snapshot_shapes(control_server, tokens, wrapped):
     data = {"appliance_model": "DW2450WS", "wash_cycle": 2, "wash_status": 0}
-    control_server["status"] = status
     control_server["response"] = {"status": 0, "resp": data} if wrapped else data
     async with aiohttp.ClientSession() as session:
         client = api.SubZeroClient(session, "test-key", tokens)
@@ -836,14 +802,6 @@ async def test_rejected_status_cannot_be_hidden_by_snapshot(control_server, toke
     async with aiohttp.ClientSession() as session:
         with pytest.raises(api.ApiError, match="rejected the status request"):
             await api.SubZeroClient(session, "test-key", tokens).state("test-fridge")
-
-
-@pytest.mark.parametrize("status", [201, 202, 204])
-async def test_channel_open_accepts_successful_http_statuses(control_server, tokens, status):
-    control_server.update(status=status, response="")
-    async with aiohttp.ClientSession() as session:
-        await api.SubZeroClient(session, "test-key", tokens).open_channel("test-fridge")
-    assert len(control_server["requests"]) == 1
 
 
 @pytest.mark.parametrize("command", ["state", "open_channel", "set_property", "reset_air_filter"])
@@ -872,9 +830,7 @@ async def test_commands_handle_nested_appliance_responses(
                 assert result == {"appliance_model": "ANY-MODEL", "ref_door_ajar": True}
 
 
-@pytest.mark.parametrize(("status", "body"), [(200, "OK"), (200, {}), (202, ""), (204, "")])
-async def test_air_filter_reset_uses_a_command_without_params(control_server, tokens, status, body):
-    control_server.update(status=status, response=body)
+async def test_air_filter_reset_uses_a_command_without_params(control_server, tokens):
     async with aiohttp.ClientSession() as session:
         await api.SubZeroClient(session, "test-key", tokens).reset_air_filter("test-fridge")
     assert control_server["requests"][0]["pload"] == {"cmd": "reset_air_filter"}

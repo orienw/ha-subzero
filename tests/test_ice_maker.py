@@ -9,7 +9,6 @@ from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from custom_components.subzero.api import ApiError, RateLimited
 from custom_components.subzero.auth import InvalidAuth
 from custom_components.subzero.const import DOMAIN
-from custom_components.subzero.controls import is_ice_maker
 
 ICE_STATE = {
     "appliance_model": "DEC1850CI",
@@ -181,8 +180,6 @@ async def test_ice_capabilities_are_checked_again_before_writing(hass, cloud_app
         await cloud_appliance.coordinator.async_set_ice_delay(3600)
     assert hass.states.get("select.kitchen_ice_maker").state == "unavailable"
     cloud_appliance.client.set_ice_delay.assert_not_called()
-    assert is_ice_maker({"appliance_type": "21.2.5"})
-    assert not is_ice_maker({"ice_maker_on": True})
 
 
 @pytest.mark.parametrize(

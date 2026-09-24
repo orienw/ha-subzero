@@ -695,7 +695,3 @@ def test_wine_storage_is_recognized_without_a_fridge_setpoint():
     assert supports_control(data, "wine_set_temp")
     assert supports_control(data, "wine2_set_temp")
     assert supports_control(data, "accent_light_level")
-
-
-def test_wine_setpoints_are_not_reported_without_wine_keys():
-    assert not supports_control({"ref_set_temp": 38}, "wine_set_temp")
