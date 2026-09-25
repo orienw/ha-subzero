@@ -306,6 +306,8 @@ WRITABLE_INTEGER_KEYS = {
     "door_ajar_timeout",
 }
 NETWORK_KEYS = {"ipv4_addr", "device_wlan_id"}
+# Kept out of diagnostics and logs.
+PRIVATE_KEYS = {*NETWORK_KEYS, "appliance_serial"}
 FAULT_SEVERITIES = {
     0: "undefined",
     1: "low",
@@ -443,5 +445,5 @@ STATE_KEYS = (
     | BINARY_KEYS
     | TIMESTAMP_KEYS
     | WRITABLE_INTEGER_KEYS
-    | {"appliance_model", "appliance_type", "version", "time", "notifs"}
+    | {"appliance_model", "appliance_serial", "appliance_type", "version", "time", "notifs"}
 )

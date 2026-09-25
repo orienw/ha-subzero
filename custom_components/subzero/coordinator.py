@@ -39,7 +39,7 @@ from .const import (
     KITCHEN_TIMERS,
     MAX_EVENT_HISTORY,
     MAX_RECONNECT_DELAY,
-    NETWORK_KEYS,
+    PRIVATE_KEYS,
     RECONNECT_DELAY,
     STATE_KEYS,
 )
@@ -94,8 +94,6 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self.entry = entry
         self.device_id = device_id
         self.device = dict(device)
-        # Kept out of state so diagnostics never include it.
-        self.serial_number: str | None = None
         self.unrecognized_keys: set[str] = set()
         self.push_stats: dict[str, int | str | None] = {
             "snapshots": 0,
@@ -150,6 +148,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
     @property
     def device_info(self) -> DeviceInfo:
         version = self.data.get("version")
+        serial = self.data.get("appliance_serial")
         return DeviceInfo(
             identifiers={(DOMAIN, self.device_id)},
             name=self.device["name"],
@@ -161,7 +160,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 else "Sub-Zero"
             ),
             model=self.data.get("appliance_model"),
-            serial_number=self.serial_number,
+            serial_number=serial if isinstance(serial, str) else None,
             sw_version=version.get("fw") if isinstance(version, dict) else None,
         )
 
@@ -376,8 +375,6 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 if error := self._read_error or self._channel_error:
                     raise error
                 self.unrecognized_keys.update(data.keys() - STATE_KEYS)
-                if isinstance(serial := data.get("appliance_serial"), str) and serial:
-                    self.serial_number = serial
                 if "notifs" in data:
                     data = {**data, "notifs": notification_records(data)}
                     self._process_events(data, history=True)
@@ -426,8 +423,6 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
     @callback
     def apply_update(self, update: StateUpdate) -> None:
         self.unrecognized_keys.update(update.properties.keys() - STATE_KEYS)
-        if isinstance(serial := update.properties.get("appliance_serial"), str) and serial:
-            self.serial_number = serial
         properties = {key: value for key, value in update.properties.items() if key in STATE_KEYS}
         if "notifs" in properties:
             properties["notifs"] = notification_records(properties)
@@ -450,7 +445,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             {
                 key: value
                 for key, value in properties.items()
-                if key not in NETWORK_KEYS and not isinstance(value, dict | list)
+                if key not in PRIVATE_KEYS and not isinstance(value, dict | list)
             },
         )
         if not self.last_update_success and not update.full:

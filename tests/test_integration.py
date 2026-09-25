@@ -117,7 +117,6 @@ async def test_reported_properties_drive_entity_discovery(hass, loaded):
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
     coordinator = entry.runtime_data.coordinators["test-fridge"]
     assert "ap_ssid" not in coordinator.data
-    assert "appliance_serial" not in coordinator.data
     device = dr.async_get(hass).async_get_device_by_identifier(
         (DOMAIN, "test-fridge"), entry.entry_id
     )
@@ -191,6 +190,44 @@ async def test_startup_read_keeps_newer_push_state(hass, loaded):
     assert entry.state is ConfigEntryState.LOADED
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
     assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "38"
+
+
+async def test_serial_follows_newer_push_state(hass, loaded):
+    entry, client, _, _, _ = loaded
+    connected = asyncio.Event()
+    delivered = asyncio.Event()
+    updates = asyncio.Queue()
+
+    async def watch(device_ids):
+        connected.set()
+        while True:
+            yield "test-fridge", await updates.get()
+            delivered.set()
+
+    async def state(device_id):
+        assert connected.is_set()
+        await updates.put(
+            StateUpdate(
+                {"appliance_model": "PUSHED-MODEL", "appliance_serial": "pushed-serial"},
+                full=True,
+            )
+        )
+        await delivered.wait()
+        return {"appliance_model": "ANOTHER-MODEL", "appliance_serial": "read-serial"}
+
+    client.watch = watch
+    client.state.side_effect = state
+    await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    registry = dr.async_get(hass)
+    device = registry.async_get_device_by_identifier((DOMAIN, "test-fridge"), entry.entry_id)
+    assert (device.model, device.serial_number) == ("PUSHED-MODEL", "pushed-serial")
+    await updates.put(StateUpdate({"appliance_serial": "later-serial"}, full=False))
+    await hass.async_block_till_done()
+    assert registry.async_get(device.id).serial_number == "later-serial"
+    await updates.put(StateUpdate({"appliance_model": "REPLACED-MODEL"}, full=True))
+    await hass.async_block_till_done()
+    assert registry.async_get(device.id).serial_number is None
 
 
 async def test_startup_push_survives_a_pending_status_read_failure(hass, loaded):

@@ -6,7 +6,7 @@ from homeassistant.helpers.device_registry import DeviceEntry
 
 from . import SubZeroConfigEntry
 from .api import fault_record
-from .const import DOMAIN, NETWORK_KEYS
+from .const import DOMAIN, PRIVATE_KEYS
 from .coordinator import SubZeroCoordinator, SubZeroFaultsCoordinator
 
 
@@ -23,7 +23,7 @@ def appliance_diagnostics(
         "temperature_unit": coordinator.device.get("temperature_unit"),
         "push": dict(coordinator.push_stats),
         "unrecognized_state_keys": sorted(coordinator.unrecognized_keys),
-        "state": async_redact_data(coordinator.data, NETWORK_KEYS),
+        "state": async_redact_data(coordinator.data, PRIVATE_KEYS),
         "faults": records,
     }
 

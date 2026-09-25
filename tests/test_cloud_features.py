@@ -1167,7 +1167,6 @@ async def test_diagnostics_list_unrecognized_keys_without_values(hass, appliance
     result = await async_get_device_diagnostics(hass, appliances.entry, device)
     assert result["unrecognized_state_keys"] == [
         "ap_ssid",
-        "appliance_serial",
         "new_push_feature",
         "new_read_feature",
         "new_snapshot_feature",
