@@ -136,7 +136,7 @@ Other controls include halo lighting, automatic fan sensitivity (Off, Low, Mediu
 | Status | Door, Remote Ready, rinse aid low, softener salt low, service required |
 | Options | Heated dry, Extended dry, High temperature wash, Sanitize rinse, Top rack only |
 | Delay start | Off or 1–12 hours, active status and reported start/end times |
-| Start | Start wash cycle button, available when Remote Ready is enabled; sends the selected cycle and delay before the start command, as the app does |
+| Start | Start wash cycle button, available when Remote Ready is enabled; starts with the cycle and delay currently set on the dishwasher |
 | Cancel | Cancel wash cycle button, available while a cycle is active |
 
 Selecting a cycle does not start it. To enable remote starting, hold ENTER on the dishwasher for five seconds, then close the door within four seconds. Opening the door cancels Remote Ready. See [Cove's Remote Ready guide](https://www.subzero-wolf.com/assistance/answers/cove/dishwasher/cove-dishwasher-remote-ready-feature).
