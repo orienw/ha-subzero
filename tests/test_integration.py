@@ -118,6 +118,10 @@ async def test_reported_properties_drive_entity_discovery(hass, loaded):
     coordinator = entry.runtime_data.coordinators["test-fridge"]
     assert "ap_ssid" not in coordinator.data
     assert "appliance_serial" not in coordinator.data
+    device = dr.async_get(hass).async_get_device_by_identifier(
+        (DOMAIN, "test-fridge"), entry.entry_id
+    )
+    assert device.serial_number == "private-serial"
     assert coordinator.update_interval is None
     assert entry.version == 2
     assert entry.unique_id == "test-fridge"
