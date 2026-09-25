@@ -261,12 +261,9 @@ def validate_remote_start(data: dict, key: str) -> None:
 def start_properties(data: dict, key: str, temperature: int | None = None) -> dict:
     """The app's remote-start writes, in its order, from the configured settings."""
     if key == "wash_cycle_on":
-        properties = {}
-        if data.get("wash_cycle") in WASH_CYCLES and data["wash_cycle"] != 0:
-            properties["wash_cycle"] = data["wash_cycle"]
-        if type(data.get("delay_start_timer_duration")) is int:
-            properties["delay_start_timer_duration"] = data["delay_start_timer_duration"]
-        return {**properties, key: True}
+        # The app sends the cycle, delay, and options only when they were
+        # changed in its start dialog; here they are written when changed.
+        return {key: True}
     prefix = key.removesuffix("_unit_on")
     parts = appliance_type(data)
     if parts is not None and parts[1] in LEGACY_START_SERIES:

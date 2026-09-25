@@ -418,14 +418,7 @@ async def test_remote_start_consumes_remote_ready(hass, appliances, device, key,
     await appliances.update(device, {ready: True})
     assert hass.states.get(entity_id).state != "unavailable"
     await hass.services.async_call("button", "press", {"entity_id": entity_id}, blocking=True)
-    expected = [call(device, key, True)]
-    if device == "dishwasher":
-        expected = [
-            call(device, "wash_cycle", 2),
-            call(device, "delay_start_timer_duration", 0),
-            call(device, "wash_cycle_on", True),
-        ]
-    assert appliances.client.set_property.await_args_list == expected
+    assert appliances.client.set_property.await_args_list == [call(device, key, True)]
     assert coordinator.data[key] is True
     assert coordinator.data[ready] is False
     assert hass.states.get(entity_id).state == "unavailable"
@@ -464,18 +457,6 @@ async def test_newer_oven_series_start_with_the_app_write_sequence(hass, applian
         blocking=True,
     )
     appliances.client.set_property.assert_awaited_once_with("oven", "cav2_set_temp", 425)
-
-
-async def test_start_resends_reported_values_without_change_checks(hass, appliances):
-    await appliances.update("dishwasher", {"remote_ready": True, "wash_status": 7})
-    await hass.services.async_call(
-        "button", "press", {"entity_id": "button.dishwasher_start_wash_cycle"}, blocking=True
-    )
-    assert appliances.client.set_property.await_args_list == [
-        call("dishwasher", "wash_cycle", 2),
-        call("dishwasher", "delay_start_timer_duration", 0),
-        call("dishwasher", "wash_cycle_on", True),
-    ]
 
 
 @pytest.mark.parametrize(

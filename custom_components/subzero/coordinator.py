@@ -169,8 +169,8 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         """Serialize writes and confirm their result from appliance state.
 
         Forced writes go out even when the appliance already reports the value,
-        which is how the app starts ovens and dishwashers. A value the appliance
-        already reports is re-sent as is, without the checks a change needs.
+        which is how the app starts ovens. A value the appliance already reports
+        is re-sent as is, without the checks a change needs.
         """
         async with self._command_lock:
             await self._async_write(dict(properties), force=force)
