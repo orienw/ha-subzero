@@ -17,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        homeassistant: ['2026.8.0', '2026.9.0']
+        homeassistant: ['2026.8.0', '2026.9.0', '2026.10.0']
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
