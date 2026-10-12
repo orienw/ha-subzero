@@ -350,6 +350,9 @@ class SubZeroClient:
             "invalid": 0,
             "last_received": None,
         }
+        # Any message from a selected appliance, including ones without state, shows
+        # that its update channel is still delivering.
+        self.last_messages: dict[str, str] = {}
 
     @property
     def _api_token(self) -> str:
@@ -718,6 +721,8 @@ class SubZeroClient:
                                 self.notification_stats["invalid"] += 1
                                 _LOGGER.debug("Skipping invalid appliance notification: %s", error)
                                 continue
+                            if parsed is not None:
+                                self.last_messages[parsed[0]] = datetime.now(UTC).isoformat()
                             if parsed is None or parsed[1] is None:
                                 self.notification_stats["ignored"] += 1
                                 continue

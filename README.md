@@ -88,7 +88,7 @@ Ice-maker settings and operating modes report their on/off state alongside their
 
 Refrigerator temperatures on the primary tested model are **configured setpoints**. The integration does not infer a measured temperature from a setpoint. A negative water filter capacity indicates usage beyond the reported filter capacity.
 
-Wine storage units expose setpoint controls from 40–65°F, climate entities, display temperatures, and door status for each reported wine zone. They also get the **Mode** control with the operating modes the app offers for their type, such as Sabbath.
+Wine storage units expose setpoint controls from 40–65°F, climate entities, display temperatures, and door status for each reported wine zone. Units with two zones name them **Upper wine** and **Lower wine**, as the app does; a door is named by zone only when each zone has its own. They also get the **Mode** control with the operating modes the app offers for their type, such as Sabbath.
 
 ## Sub-Zero dedicated ice makers
 
@@ -100,13 +100,13 @@ Use the **Sub-Zero: Schedule ice delay** action to pause production for 1–12 h
 
 ## Wolf ovens
 
-Each reported oven cavity has its own entities. First-cavity entity IDs are preserved from earlier releases; a second cavity uses names prefixed with **Lower oven**.
+Each reported oven cavity has its own entities. First-cavity entity IDs are preserved from earlier releases; a second cavity uses names prefixed with **Lower oven**. Ranges with two ovens use the app's **Right oven** and **Left oven** names instead. When a second cavity or wine zone is first reported after the first one's entities exist, the first one's entities are renamed. Renaming keeps existing entity IDs.
 
 | Type | Available properties |
 | --- | --- |
-| Temperatures | Measured oven and probe temperatures, oven and probe setpoints |
-| Status | Door, cooking, preheated, remote ready, probe in use, probe target reached, Gourmet mode |
-| Timers | Cooking timer active or complete, both kitchen timers active or complete, reported start/end times |
+| Temperatures | Measured oven and probe temperatures, oven and probe setpoints, broil level (Low, Medium, High) while broiling |
+| Status | Door, cooking, preheated, remote ready, probe in use, probe within 10° of target, probe target reached, Gourmet mode |
+| Timers | Cooking timer active, under one minute, or complete; both kitchen timers active, under one minute, or complete; reported start/end times |
 | Cooking mode | Recognized mode name and whether the appliance permits mode changes |
 | Gourmet program | Named program reported by each cavity, such as Baked potato or Fresh pizza |
 | Shared status | Sabbath mode, service required, Wi-Fi signal strength |
@@ -121,7 +121,7 @@ Controls include:
 
 Enable **Remote Ready at the oven before each remote start**. Opening a door cancels it. Broil, Convection broil, Proof, Self clean, and Gourmet must be started at the appliance. Those restrictions also apply to automations. See [Wolf's Remote Ready guide](https://www.subzero-wolf.com/assistance/answers/wolf/m-series-oven/sub-zero-group-owners-app---set-up-remote-access).
 
-Oven temperature fields that report zero while idle show as unknown; probe readings also show as unknown when the probe is not in use. Unknown cooking-mode codes show as unknown and cannot be selected.
+Oven temperature fields that report zero while idle show as unknown; probe readings also show as unknown when the probe is not in use or reports 1, the app's no-reading value. The broil level follows the Broil setpoint: below 400°F is Low, 400–499°F Medium, and 500°F or more High. Unknown cooking-mode codes show as unknown and cannot be selected.
 
 Gourmet program sensors report the appliance's recipe code as a name. Code 0 shows None, and so does a cavity that reports Gourmet mode off; unrecognized codes show as unknown. Select and start Gourmet programs at the oven.
 
@@ -160,11 +160,11 @@ Replay protection relies on the appliance clock. A clock five minutes behind Hom
 
 ## Diagnostics
 
-Wi-Fi signal strength is enabled by default. Uptime, IP address, MAC address, and live reporting mode are diagnostic sensors disabled by default. Enable them from the entity settings when needed.
+Wi-Fi signal strength is enabled by default. Uptime, IP address, MAC address, and live reporting mode are diagnostic sensors disabled by default. Enable them from the entity settings when needed. Appliances cut their uptime to eight characters, so from 100 hours it is accurate to ten seconds, and from 1,000 hours to the minute.
 
 Download diagnostics from the integration or individual device page. Downloads use the cached appliance state and omit account credentials, appliance names, serial numbers, and network identifiers. They also list unrecognized state key names, without their values.
 
-Integration diagnostics count appliance notifications received, ignored, or invalid since the last reload. Heartbeats are excluded from the received count. Each appliance also records parsed snapshots and updates, with the time of the last one. These counts help distinguish incoming messages from a connection that only receives heartbeats; they do not prove every state change was received or applied.
+Integration diagnostics count appliance notifications received, ignored, or invalid since the last reload. Heartbeats are excluded from the received count. Each appliance also records parsed snapshots and updates, with the time of the last one, and the time of the last message from its update channel, including messages without state. These counts help distinguish incoming messages from a connection that only receives heartbeats; they do not prove every state change was received or applied.
 
 Enable debug logging for `custom_components.subzero` to record channel-open attempts, notification types and payload key names, and parsed state updates. State values exclude network identifiers and nested objects.
 

@@ -91,7 +91,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             hass,
             _LOGGER,
             config_entry=entry,
-            name=DOMAIN,
+            name=f"{DOMAIN} {device['name']}",
         )
         self.client = client
         self.data = {}
@@ -153,11 +153,14 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
 
     @property
     def device_info(self) -> DeviceInfo:
+        info = DeviceInfo(identifiers={(DOMAIN, self.device_id)}, name=self.device["name"])
+        if not self.data.get("appliance_model"):
+            # Until the appliance reports, keep the details the registry saved from
+            # its last status rather than clearing them.
+            return info
         version = self.data.get("version")
         serial = self.data.get("appliance_serial")
-        return DeviceInfo(
-            identifiers={(DOMAIN, self.device_id)},
-            name=self.device["name"],
+        info.update(
             manufacturer=(
                 "Cove"
                 if is_dishwasher(self.data)
@@ -165,10 +168,11 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 if is_oven(self.data) or is_hood(self.data)
                 else "Sub-Zero"
             ),
-            model=self.data.get("appliance_model"),
+            model=self.data["appliance_model"],
             serial_number=serial if isinstance(serial, str) else None,
             sw_version=version.get("fw") if isinstance(version, dict) else None,
         )
+        return info
 
     @asynccontextmanager
     async def _command(self) -> AsyncIterator[None]:
@@ -554,7 +558,7 @@ class SubZeroFaultsCoordinator(DataUpdateCoordinator[list[ApplianceFault]]):
             hass,
             _LOGGER,
             config_entry=entry,
-            name=f"{DOMAIN} faults",
+            name=f"{DOMAIN} {appliance.device['name']} faults",
             update_interval=timedelta(minutes=30),
         )
         self.client = client

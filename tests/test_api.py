@@ -1186,6 +1186,21 @@ async def test_notification_counts_include_dropped_messages_but_not_heartbeats(n
     assert client.notification_stats["ignored"] == 2
     assert client.notification_stats["invalid"] == 2
     assert client.notification_stats["last_received"] is not None
+    assert set(client.last_messages) == {"test-fridge"}
+
+
+async def test_messages_without_state_still_show_channel_activity(notification_stream):
+    client, stream, frames, _ = notification_stream
+    frames.append(
+        json.dumps(notification({}, device="test-oven", pload={"diagnostic_status": "0x0"}))
+        + api.SEPARATOR
+        + json.dumps(notification({"ref_door_ajar": True}))
+        + api.SEPARATOR
+    )
+    async with asyncio.timeout(5):
+        assert (await anext(stream))[0] == "test-fridge"
+    assert set(client.last_messages) == {"test-fridge", "test-oven"}
+    assert client.notification_stats["ignored"] == 1
 
 
 @pytest.mark.parametrize(

@@ -21,7 +21,10 @@ def appliance_diagnostics(
     return {
         "available": coordinator.last_update_success,
         "temperature_unit": coordinator.device.get("temperature_unit"),
-        "push": dict(coordinator.push_stats),
+        "push": {
+            **coordinator.push_stats,
+            "last_channel_message": coordinator.client.last_messages.get(coordinator.device_id),
+        },
         "unrecognized_state_keys": sorted(coordinator.unrecognized_keys),
         "state": async_redact_data(coordinator.data, PRIVATE_KEYS),
         "faults": records,

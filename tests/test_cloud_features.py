@@ -31,7 +31,7 @@ from custom_components.subzero.diagnostics import (
     async_get_device_diagnostics,
 )
 from custom_components.subzero.sensor import DESCRIPTIONS as SENSOR_DESCRIPTIONS
-from custom_components.subzero.sensor import SubZeroSensor
+from custom_components.subzero.sensor import SubZeroSensor, uptime_seconds
 
 pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
 
@@ -187,6 +187,7 @@ async def appliances(hass, tokens, request, unit_system):
             "invalid": 0,
             "last_received": None,
         }
+        client.last_messages = {}
         client.appliances = AsyncMock(
             return_value=[
                 Appliance(device_id, device["name"], unit)
@@ -343,7 +344,7 @@ async def test_extra_refrigeration_zones_follow_reported_properties(hass, applia
     assert state.attributes["max_temp"] == 45
     assert hass.states.get("sensor.fridge_crisper_display_temperature").state == "37"
     assert hass.states.get("binary_sensor.fridge_refrigerator_drawer_door").state == "off"
-    assert hass.states.get("binary_sensor.fridge_wine_storage_door_2").state == "on"
+    assert hass.states.get("binary_sensor.fridge_lower_wine_storage_door").state == "on"
     await hass.services.async_call(
         "number",
         "set_value",
@@ -371,14 +372,14 @@ async def test_wine_display_temperatures_survive_snapshots_and_updates(hass, app
         },
         full=True,
     )
-    assert hass.states.get("climate.fridge_wine").attributes["current_temperature"] == 54
-    assert hass.states.get("climate.fridge_wine_2").attributes["current_temperature"] == 44
-    assert hass.states.get("sensor.fridge_wine_display_temperature").state == "54"
-    assert hass.states.get("sensor.fridge_wine_display_temperature_2").state == "44"
+    assert hass.states.get("climate.fridge_upper_wine").attributes["current_temperature"] == 54
+    assert hass.states.get("climate.fridge_lower_wine").attributes["current_temperature"] == 44
+    assert hass.states.get("sensor.fridge_upper_wine_display_temperature").state == "54"
+    assert hass.states.get("sensor.fridge_lower_wine_display_temperature").state == "44"
 
     await appliances.update("fridge", {"wine_display_temp": 55, "wine2_display_temp": 45})
-    assert hass.states.get("climate.fridge_wine").attributes["current_temperature"] == 55
-    assert hass.states.get("climate.fridge_wine_2").attributes["current_temperature"] == 45
+    assert hass.states.get("climate.fridge_upper_wine").attributes["current_temperature"] == 55
+    assert hass.states.get("climate.fridge_lower_wine").attributes["current_temperature"] == 45
     appliances.client.set_property.assert_not_awaited()
 
 
@@ -1346,6 +1347,60 @@ async def test_unrecognized_gourmet_recipe_codes_are_unknown(hass, appliances, v
     assert hass.states.get("sensor.oven_gourmet_program").state == "unknown"
 
 
+async def test_oven_probe_and_timer_warnings_become_binary_sensors(hass, appliances):
+    warnings = {
+        "cav_probe_within_10deg": ("binary_sensor.oven_probe_within_10deg_of_target", True),
+        "cav2_probe_within_10deg": (
+            "binary_sensor.oven_lower_oven_probe_within_10deg_of_target",
+            False,
+        ),
+        "cav_cook_timer_within_1min": ("binary_sensor.oven_cooking_timer_under_one_minute", False),
+        "cav2_cook_timer_within_1min": (
+            "binary_sensor.oven_lower_oven_cooking_timer_under_one_minute",
+            True,
+        ),
+        "kitchen_timer_within_1min": ("binary_sensor.oven_kitchen_timer_under_one_minute", True),
+        "kitchen_timer2_within_1min": (
+            "binary_sensor.oven_kitchen_timer_2_under_one_minute",
+            False,
+        ),
+    }
+    assert all(hass.states.get(entity_id) is None for entity_id, _ in warnings.values())
+    await appliances.update("oven", {key: value for key, (_, value) in warnings.items()})
+    for entity_id, value in warnings.values():
+        assert hass.states.get(entity_id).state == ("on" if value else "off")
+    coordinator = appliances.entry.runtime_data.coordinators["oven"]
+    assert coordinator.unrecognized_keys.isdisjoint(warnings)
+
+
+async def test_appliance_without_a_status_keeps_its_device_details(hass, appliances):
+    entry = appliances.entry
+    registry = dr.async_get(hass)
+
+    def oven():
+        device = registry.async_get_device_by_identifier((DOMAIN, "oven"), entry.entry_id)
+        return device.manufacturer, device.model
+
+    assert oven() == ("Wolf", "DO30PM")
+
+    def state(device_id):
+        if device_id == "oven":
+            raise ApiError("Sub-Zero returned HTTP 503.")
+        return dict(appliances.states[device_id])
+
+    appliances.client.state.side_effect = state
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert not entry.runtime_data.coordinators["oven"].data
+    assert oven() == ("Wolf", "DO30PM")
+
+
+async def test_coordinators_are_named_for_their_appliance(hass, appliances):
+    account = appliances.entry.runtime_data
+    assert account.coordinators["oven"].name == "subzero Oven"
+    assert account.fault_coordinators["oven"].name == "subzero Oven faults"
+
+
 async def test_unknown_enum_values_do_not_become_known_modes(hass, appliances):
     await appliances.update(
         "dishwasher", {"wash_cycle": True, "wash_status": 900, "delay_start_timer_duration": 13}
@@ -1702,19 +1757,49 @@ async def test_optional_entities_report_native_values(appliances):
     assert reporting.native_value == "Disconnected"
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("99:59:47", 99 * 3600 + 59 * 60 + 47),
+        ("435:53:58", 435 * 3600 + 53 * 60 + 58),
+        # Appliances cut uptime to eight characters, dropping its last digits.
+        ("387:52:1", 387 * 3600 + 52 * 60 + 10),
+        ("1000:00:", 1000 * 3600),
+        ("10000:05", 10000 * 3600 + 5 * 60),
+        ("1:2:3", 3723),
+        ("12:60:00", None),
+        ("12:00:60", None),
+        ("-1:00:00", None),
+        ("12:00", None),
+        ("12345678", None),
+        ("", None),
+    ],
+)
+def test_uptime_reads_values_cut_to_eight_characters(value, expected):
+    assert uptime_seconds(value) == expected
+
+
 async def test_diagnostics_count_push_updates(hass, appliances):
     device = dr.async_get(hass).async_get_device_by_identifier(
         (DOMAIN, "fridge"), appliances.entry.entry_id
     )
+    initial = {
+        "snapshots": 0,
+        "updates": 0,
+        "last_received": None,
+        "last_channel_message": None,
+    }
     before = await async_get_device_diagnostics(hass, appliances.entry, device)
-    assert before["push"] == {"snapshots": 0, "updates": 0, "last_received": None}
+    assert before["push"] == initial
+    appliances.client.last_messages["fridge"] = "2026-10-04T12:00:00+00:00"
     await appliances.update("fridge", {"ref_door_ajar": True})
     await appliances.update("fridge", {"appliance_model": "TEST-MODEL"}, full=True)
     result = await async_get_device_diagnostics(hass, appliances.entry, device)
     assert result["push"]["snapshots"] == 1
     assert result["push"]["updates"] == 1
     assert dt_util.parse_datetime(result["push"]["last_received"]) <= dt_util.utcnow()
-    assert before["push"] == {"snapshots": 0, "updates": 0, "last_received": None}
+    assert result["push"]["last_channel_message"] == "2026-10-04T12:00:00+00:00"
+    assert before["push"] == initial
 
 
 async def test_device_diagnostics_select_only_the_requested_appliance(hass, appliances):

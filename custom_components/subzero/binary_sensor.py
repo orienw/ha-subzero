@@ -87,10 +87,20 @@ DESCRIPTIONS = (
     BinarySensorEntityDescription(key="cav_remote_ready", name="Remote ready", icon="mdi:remote"),
     BinarySensorEntityDescription(key="cav_probe_on", name="Probe in use", icon="mdi:thermometer"),
     BinarySensorEntityDescription(
+        key="cav_probe_within_10deg",
+        name="Probe within 10° of target",
+        icon="mdi:thermometer-chevron-up",
+    ),
+    BinarySensorEntityDescription(
         key="cav_probe_at_set_temp", name="Probe target reached", icon="mdi:thermometer-check"
     ),
     BinarySensorEntityDescription(
         key="cav_gourmet_mode_on", name="Gourmet mode", icon="mdi:chef-hat"
+    ),
+    BinarySensorEntityDescription(
+        key="cav_cook_timer_within_1min",
+        name="Cooking timer under one minute",
+        icon="mdi:timer-alert-outline",
     ),
     BinarySensorEntityDescription(
         key="cav_cook_timer_complete", name="Cooking timer complete", icon="mdi:timer-check-outline"
@@ -99,10 +109,20 @@ DESCRIPTIONS = (
         key="kitchen_timer_active", name="Kitchen timer active", icon="mdi:timer-outline"
     ),
     BinarySensorEntityDescription(
+        key="kitchen_timer_within_1min",
+        name="Kitchen timer under one minute",
+        icon="mdi:timer-alert-outline",
+    ),
+    BinarySensorEntityDescription(
         key="kitchen_timer_complete", name="Kitchen timer complete", icon="mdi:timer-check-outline"
     ),
     BinarySensorEntityDescription(
         key="kitchen_timer2_active", name="Kitchen timer 2 active", icon="mdi:timer-outline"
+    ),
+    BinarySensorEntityDescription(
+        key="kitchen_timer2_within_1min",
+        name="Kitchen timer 2 under one minute",
+        icon="mdi:timer-alert-outline",
     ),
     BinarySensorEntityDescription(
         key="kitchen_timer2_complete",
@@ -129,12 +149,22 @@ DESCRIPTIONS = (
         key="cav2_probe_on", name="Lower oven probe in use", icon="mdi:thermometer"
     ),
     BinarySensorEntityDescription(
+        key="cav2_probe_within_10deg",
+        name="Lower oven probe within 10° of target",
+        icon="mdi:thermometer-chevron-up",
+    ),
+    BinarySensorEntityDescription(
         key="cav2_probe_at_set_temp",
         name="Lower oven probe target reached",
         icon="mdi:thermometer-check",
     ),
     BinarySensorEntityDescription(
         key="cav2_gourmet_mode_on", name="Lower oven gourmet mode", icon="mdi:chef-hat"
+    ),
+    BinarySensorEntityDescription(
+        key="cav2_cook_timer_within_1min",
+        name="Lower oven cooking timer under one minute",
+        icon="mdi:timer-alert-outline",
     ),
     BinarySensorEntityDescription(
         key="cav2_cook_timer_complete",

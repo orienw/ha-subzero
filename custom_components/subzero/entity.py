@@ -10,8 +10,33 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import SubZeroConfigEntry
-from .controls import excluded_entity_keys
+from .controls import excluded_entity_keys, has_left_and_right_ovens
 from .coordinator import SubZeroCoordinator
+
+
+def zone_name(data: dict, key: str, names: dict[str, str | None]) -> str | None:
+    """The app's name for a cavity or zone entity, when the appliance's layout changes it.
+
+    Ranges call two cavities right and left ovens, and two wine zones are upper and lower.
+    """
+    cavity = key.removeprefix("remote_start_")
+    if cavity.startswith(("cav_", "cav2_")) and has_left_and_right_ovens(data):
+        second = cavity.startswith("cav2_")
+        name = names.get(key if second else key.replace("cav_", "cav2_", 1))
+        side = "left" if second else "right"
+        if name and "ower oven" in name:
+            return name.replace("Lower oven", f"{side.title()} oven").replace(
+                "lower oven", f"{side} oven"
+            )
+        return None
+    if cavity.startswith(("wine_", "wine2_")) and cavity != "wine_temp_alert_on":
+        door = cavity.endswith("_door_ajar")
+        if ("wine2_door_ajar" if door else "wine2_set_temp") not in data:
+            return None
+        base = (names.get(key) or "").removesuffix(" 2")
+        zone = "Lower" if cavity.startswith("wine2_") else "Upper"
+        return f"{zone} {base[0].lower()}{base[1:]}" if base else None
+    return None
 
 
 class SubZeroEntity(CoordinatorEntity[SubZeroCoordinator]):
@@ -21,6 +46,29 @@ class SubZeroEntity(CoordinatorEntity[SubZeroCoordinator]):
         super().__init__(coordinator)
         self.entity_description = description
         self._attr_unique_id = f"{coordinator.device_id}_{description.key}"
+        # The platform's entity names by key, which cavity and zone names are built from.
+        self.zone_names: dict[str, str | None] = {}
+        self._zone_name: str | None = None
+
+    def update_zone_name(self) -> None:
+        """Name a cavity or zone entity as the app does for the appliance's layout.
+
+        A second cavity or zone can be reported after the first one's entities exist.
+        Renaming keeps the entity ID.
+        """
+        name = zone_name(self.coordinator.data, self.entity_description.key, self.zone_names)
+        if name == self._zone_name:
+            return
+        self._zone_name = name
+        if name is None:
+            del self._attr_name
+        else:
+            self._attr_name = name
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        self.update_zone_name()
+        super()._handle_coordinator_update()
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -45,6 +93,7 @@ def async_setup_entities(
 ) -> None:
     """Discover entities at setup and when their appliance reports new capabilities."""
     discovered: set[tuple[str, str]] = set()
+    names = {description.key: description.name for description in descriptions}
 
     @callback
     def discover(coordinator: SubZeroCoordinator) -> None:
@@ -57,7 +106,10 @@ def async_setup_entities(
                 and supported(coordinator, description)
             ):
                 discovered.add(key)
-                entities.append(entity_class(coordinator, description))
+                entity = entity_class(coordinator, description)
+                entity.zone_names = names
+                entity.update_zone_name()
+                entities.append(entity)
         if entities:
             async_add_entities(entities)
 

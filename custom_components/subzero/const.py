@@ -1,5 +1,7 @@
 """Integration settings and recognized appliance properties."""
 
+import math
+
 DOMAIN = "subzero"
 CONTROL_CONFIRM_TIMEOUT = 8
 CONTROL_PUSH_TIMEOUT = 5
@@ -103,7 +105,12 @@ EXCLUDED_PROPERTIES = {
 # Entities the app hides with a discarded property, besides the property's own.
 DEPENDENT_ENTITY_KEYS = {
     "air_filter_pct_remaining": ("reset_air_filter",),
-    "cav2_probe_on": ("cav2_probe_at_set_temp", "cav2_probe_set_temp", "cav2_probe_temp"),
+    "cav2_probe_on": (
+        "cav2_probe_at_set_temp",
+        "cav2_probe_within_10deg",
+        "cav2_probe_set_temp",
+        "cav2_probe_temp",
+    ),
     "high_use_on": ("high_use_start_time", "high_use_end_time"),
     "ice_maker_on": (
         "ice_maker_mode",
@@ -115,6 +122,7 @@ DEPENDENT_ENTITY_KEYS = {
     "kitchen_timer2_active": (
         "kitchen_timer2_duration",
         "kitchen_timer2_complete",
+        "kitchen_timer2_within_1min",
         "kitchen_timer2_start_time",
         "kitchen_timer2_end_time",
         "dismiss_kitchen_timer2",
@@ -273,6 +281,11 @@ GOURMET_RECIPES = {
 }
 # Wolf requires these modes to be started at the appliance.
 MANUAL_COOK_MODES = {3, 7, 9, 11}
+BROIL = 3
+# The app's broil level for a Broil setpoint below each bound, in °F.
+BROIL_LEVELS = ((400, "Low"), (500, "Medium"), (math.inf, "High"))
+# Ranges with two cavities call them right and left ovens, not upper and lower.
+RANGE_SERIES = 8
 # E series and M series start with a power write alone; the app sends the
 # cooking mode, power, and setpoint to every other series.
 LEGACY_START_SERIES = {3, 4}
@@ -475,16 +488,18 @@ BINARY_KEYS = {
             "remote_ready",
             "probe_on",
             "probe_at_set_temp",
+            "probe_within_10deg",
             "gourmet_mode_on",
             "mode_change_enabled",
             "cook_timer_active",
             "cook_timer_complete",
+            "cook_timer_within_1min",
         )
     ),
     *(
         f"{prefix}_{state}"
         for prefix in KITCHEN_TIMERS.values()
-        for state in ("active", "complete")
+        for state in ("active", "complete", "within_1min")
     ),
     "door_ajar",
     "wash_cycle_on",

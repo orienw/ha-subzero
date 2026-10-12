@@ -7,6 +7,8 @@ from homeassistant.exceptions import ServiceValidationError
 
 from .const import (
     ACCENT_LIGHT_LABELS,
+    BROIL,
+    BROIL_LEVELS,
     COOK_MODES,
     DEPENDENT_ENTITY_KEYS,
     DISHWASHER_MODES,
@@ -27,6 +29,7 @@ from .const import (
     MANUAL_COOK_MODES,
     OVEN_PREFIXES,
     OVEN_TEMPERATURE_RANGES,
+    RANGE_SERIES,
     SETPOINT_KEYS,
     WASH_CYCLES,
     WINE_SETPOINT_KEYS,
@@ -107,6 +110,15 @@ def is_dishwasher(data: dict) -> bool:
     return bool({"wash_cycle", "wash_status", "wash_cycle_on"}.intersection(data))
 
 
+def has_left_and_right_ovens(data: dict) -> bool:
+    """Whether the app calls the cavities right and left ovens: a range with two.
+
+    Like the app, a second cavity's setpoint shows that there are two.
+    """
+    parts = appliance_type(data)
+    return parts is not None and parts[1] == RANGE_SERIES and data.get("cav2_set_temp") is not None
+
+
 def supports_air_filter_reset(data: dict) -> bool:
     return (is_fridge(data) or is_wine(data)) and "air_filter_pct_remaining" in data
 
@@ -119,6 +131,19 @@ def wash_cancel_enabled(data: dict) -> bool:
     # The app offers cancel while a cycle runs, dries, or waits for a delayed start.
     status = data.get("wash_status")
     return data.get("wash_cycle_on") is True or (type(status) is int and status in {2, 5, 7})
+
+
+def broil_level(data: dict, prefix: str) -> str | None:
+    """The app's broil level while a cavity broils."""
+    temperature = data.get(f"{prefix}_set_temp")
+    if (
+        data.get(f"{prefix}_unit_on") is not True
+        or data.get(f"{prefix}_cook_mode") != BROIL
+        or not is_finite_number(temperature)
+        or temperature <= 0
+    ):
+        return None
+    return next(name for bound, name in BROIL_LEVELS if temperature < bound)
 
 
 def supports_control(data: dict, key: str) -> bool:
