@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, call, patch
 
@@ -26,6 +26,7 @@ from custom_components.subzero.api import (
 )
 from custom_components.subzero.auth import InvalidAuth
 from custom_components.subzero.const import DOMAIN
+from custom_components.subzero.controls import clock_zone
 from custom_components.subzero.diagnostics import (
     async_get_config_entry_diagnostics,
     async_get_device_diagnostics,
@@ -138,7 +139,12 @@ async def appliances(hass, tokens, request, unit_system):
         },
     }
     updates = asyncio.Queue()
-    behavior = {"accept": True, "push": True}
+    # `zone` is the appliance's local time zone, when it reports times without an offset.
+    behavior = {"accept": True, "push": True, "zone": None}
+
+    def appliance_time(value):
+        zone = behavior["zone"]
+        return value.astimezone(zone).replace(tzinfo=None) if zone else value
 
     async def update(device_id, properties, *, full=False):
         if full:
@@ -161,8 +167,8 @@ async def appliances(hass, tokens, request, unit_system):
             properties = {
                 f"{prefix}_active": value > 0,
                 f"{prefix}_complete": False,
-                f"{prefix}_start_time": start.isoformat() if value else None,
-                f"{prefix}_end_time": (start + timedelta(minutes=value)).isoformat()
+                f"{prefix}_start_time": appliance_time(start).isoformat() if value else None,
+                f"{prefix}_end_time": appliance_time(start + timedelta(minutes=value)).isoformat()
                 if value
                 else None,
             }
@@ -1108,6 +1114,69 @@ async def test_timer_ack_without_correct_end_time_is_not_success(
     assert appliances.client.set_property.await_count == 3
 
 
+@pytest.mark.parametrize("push", [True, False])
+async def test_timer_restarts_are_confirmed(hass, appliances, push):
+    appliances.behavior["push"] = push
+    entity_id = "number.oven_kitchen_timer_duration"
+    for minutes in (15, 15, 30):
+        await hass.services.async_call(
+            "number", "set_value", {"entity_id": entity_id, "value": minutes}, blocking=True
+        )
+        assert hass.states.get(entity_id).state == str(minutes)
+    assert appliances.client.set_property.await_count == 3
+
+
+async def test_rejected_timer_write_is_not_confirmed_by_a_late_restart(hass, appliances):
+    entity_id = "number.oven_kitchen_timer_duration"
+    started = dt_util.utcnow() - timedelta(minutes=3)
+    earlier = {
+        "kitchen_timer_active": True,
+        "kitchen_timer_start_time": started.isoformat(),
+        "kitchen_timer_end_time": (started + timedelta(minutes=15)).isoformat(),
+    }
+
+    async def write(device_id, key, value):
+        # A timer restarted minutes ago arrives late, and the API rejects this write.
+        await appliances.update("oven", earlier)
+        raise ApiError("Sub-Zero returned HTTP 503.")
+
+    appliances.client.set_property.side_effect = write
+    with pytest.raises(HomeAssistantError, match="did not confirm"):
+        await hass.services.async_call(
+            "number", "set_value", {"entity_id": entity_id, "value": 15}, blocking=True
+        )
+    assert appliances.client.set_property.await_count == 3
+
+
+async def test_timer_times_without_an_offset_follow_the_pushed_clock(hass, appliances):
+    # The appliance keeps local time three hours ahead of Home Assistant's time zone.
+    zone = timezone(dt_util.now().utcoffset() + timedelta(hours=3))
+    appliances.behavior["zone"] = zone
+    entity_id = "number.oven_kitchen_timer_duration"
+    # Until a push reports the appliance clock, they read as Home Assistant's local time.
+    with pytest.raises(HomeAssistantError, match="did not confirm"):
+        await hass.services.async_call(
+            "number", "set_value", {"entity_id": entity_id, "value": 15}, blocking=True
+        )
+    await appliances.update("oven", {"time": dt_util.now(zone).isoformat()})
+    # Status reads report the clock in UTC, which does not replace the pushed zone.
+    appliances.states["oven"]["time"] = dt_util.utcnow().isoformat()
+    await appliances.entry.runtime_data.coordinators["oven"].async_refresh()
+    await hass.services.async_call(
+        "number", "set_value", {"entity_id": entity_id, "value": 20}, blocking=True
+    )
+    assert hass.states.get(entity_id).state == "20"
+    assert appliances.client.set_property.await_count == 4
+
+
+def test_clock_zone_prefers_home_time_zone_when_offsets_match(hass):
+    home = dt_util.get_default_time_zone()
+    assert clock_zone(dt_util.now().isoformat()) is home
+    assert clock_zone("2026-10-05T15:29:24+05:30") == timezone(timedelta(hours=5, minutes=30))
+    for value in ("2026-10-05T15:29:24", "not a time", None):
+        assert clock_zone(value) is None
+
+
 @pytest.mark.parametrize(
     ("device", "key", "value"),
     [
@@ -1418,11 +1487,21 @@ async def test_unknown_enum_values_do_not_become_known_modes(hass, appliances):
     assert hass.states.get("select.oven_upper_oven_cooking_mode").state == "unavailable"
 
 
-async def test_naive_timestamps_need_the_appliance_clock_offset(hass, appliances):
+async def test_naive_timestamps_use_the_pushed_clock_zone(hass, appliances):
+    coordinator = appliances.entry.runtime_data.coordinators["fridge"]
+    local = datetime(2026, 9, 5, 10, tzinfo=dt_util.get_default_time_zone())
     await appliances.update("fridge", {"max_ice_start_time": "2026-09-05T10:00:00"})
-    assert hass.states.get("sensor.fridge_max_ice_start").state == "unknown"
-    await appliances.update("fridge", {"time": "2026-09-05T11:00:00-07:00"})
-    assert hass.states.get("sensor.fridge_max_ice_start").state == "2026-09-05T17:00:00+00:00"
+    # Until a push reports the appliance clock, like the app, Home Assistant's time zone.
+    assert hass.states.get("sensor.fridge_max_ice_start").state == local.astimezone(UTC).isoformat()
+    expected = "2026-09-05T14:00:00+00:00"
+    await appliances.update("fridge", {"time": "2026-09-05T11:00:00-04:00"})
+    assert hass.states.get("sensor.fridge_max_ice_start").state == expected
+    # Status reads report the clock in UTC, which does not replace the pushed zone.
+    appliances.states["fridge"]["time"] = "2026-09-05T15:00:00+00:00"
+    await coordinator.async_refresh()
+    assert hass.states.get("sensor.fridge_max_ice_start").state == expected
+    await appliances.update("fridge", {"max_ice_start_time": "2026-09-05T10:00:00+02:00"})
+    assert hass.states.get("sensor.fridge_max_ice_start").state == "2026-09-05T08:00:00+00:00"
     await appliances.update("fridge", {"max_ice_start_time": None})
     assert hass.states.get("sensor.fridge_max_ice_start").state == "unknown"
 

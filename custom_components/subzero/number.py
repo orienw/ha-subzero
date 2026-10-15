@@ -98,7 +98,9 @@ class SubZeroNumber(SubZeroEntity, NumberEntity):
     @property
     def native_value(self) -> int | float | None:
         if self.entity_description.key in KITCHEN_TIMERS:
-            return timer_minutes(self.coordinator.data, self.entity_description.key)
+            return timer_minutes(
+                self.coordinator.data, self.entity_description.key, self.coordinator.clock_zone
+            )
         value = self.coordinator.data.get(self.entity_description.key)
         if self.entity_description.key == "delay_off_duration":
             return value / 60000 if type(value) is int else None
