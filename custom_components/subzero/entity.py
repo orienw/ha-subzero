@@ -23,10 +23,13 @@ def zone_name(data: dict, key: str, names: dict[str, str | None]) -> str | None:
     cavity = key.removeprefix("remote_start_")
     if cavity.startswith(("cav_", "cav2_")) and data.get("cav2_set_temp") is not None:
         second = cavity.startswith("cav2_")
-        if second and not has_left_and_right_ovens(data):
+        if has_left_and_right_ovens(data):
+            side = "left" if second else "right"
+        elif second:
             return None
+        else:
+            side = "upper"
         name = names.get(key if second else key.replace("cav_", "cav2_", 1))
-        side = ("left" if second else "right") if has_left_and_right_ovens(data) else "upper"
         if name and "ower oven" in name:
             return name.replace("Lower oven", f"{side.title()} oven").replace(
                 "lower oven", f"{side} oven"

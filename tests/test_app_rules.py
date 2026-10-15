@@ -1,6 +1,7 @@
 """Readings and names that follow the Sub-Zero app's own rules."""
 
 import pytest
+from homeassistant.helpers import entity_registry as er
 from homeassistant.util.unit_system import US_CUSTOMARY_SYSTEM
 
 CAVITY = {
@@ -114,6 +115,24 @@ async def test_a_second_cavity_reported_later_renames_the_first(
         (f"sensor.kitchen_{second}_oven_cooking_mode", f"{second.title()} oven cooking mode"),
     ):
         assert friendly_name(hass, entity_id) == f"Kitchen {name}"
+
+
+@pytest.mark.parametrize(
+    ("cloud_appliance", "first"),
+    [(SINGLE_RANGE, "right"), (SINGLE_WALL_OVEN, "upper")],
+    indirect=["cloud_appliance"],
+)
+async def test_an_upgrade_keeps_first_cavity_entity_ids(hass, cloud_appliance, first):
+    # An earlier release created the first cavity's entities without a prefix.
+    er.async_get(hass).async_update_entity("switch.kitchen_oven_light", name="Lamp")
+    cloud_appliance.state.update({f"cav2_{key}": value for key, value in CAVITY.items()})
+    assert await hass.config_entries.async_reload(cloud_appliance.entry.entry_id)
+    await hass.async_block_till_done()
+    assert friendly_name(hass, "climate.kitchen_oven") == f"Kitchen {first.title()} oven"
+    assert friendly_name(hass, "button.kitchen_start_oven") == f"Kitchen Start {first} oven"
+    assert hass.states.get(f"climate.kitchen_{first}_oven") is None
+    # A user's own name is kept.
+    assert friendly_name(hass, "switch.kitchen_oven_light") == "Lamp"
 
 
 @pytest.mark.parametrize("cloud_appliance", [RANGE], indirect=True)
