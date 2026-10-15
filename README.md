@@ -100,7 +100,7 @@ Use the **Sub-Zero: Schedule ice delay** action to pause production for 1–12 h
 
 ## Wolf ovens
 
-Each reported oven cavity has its own entities. First-cavity entity IDs are preserved from earlier releases; a second cavity uses names prefixed with **Lower oven**. Ranges with two ovens use the app's **Right oven** and **Left oven** names instead. When a second cavity or wine zone is first reported after the first one's entities exist, the first one's entities are renamed. Renaming keeps existing entity IDs.
+Each reported oven cavity has its own entities. Ovens with two cavities name them **Upper oven** and **Lower oven**, or **Right oven** and **Left oven** on ranges, as the app does. When a second cavity or wine zone is first reported after the first one's entities exist, the first one's entities are renamed. Renaming keeps existing entity IDs.
 
 | Type | Available properties |
 | --- | --- |

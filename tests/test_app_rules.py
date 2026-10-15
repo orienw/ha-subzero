@@ -22,6 +22,15 @@ SINGLE_RANGE = {
     **{f"cav_{key}": value for key, value in CAVITY.items()},
 }
 RANGE = {**SINGLE_RANGE, **{f"cav2_{key}": value for key, value in CAVITY.items()}}
+SINGLE_WALL_OVEN = {
+    "appliance_model": "DO30PM",
+    "appliance_type": "1.4.2.3",
+    **{f"cav_{key}": value for key, value in CAVITY.items()},
+}
+DOUBLE_WALL_OVEN = {
+    **SINGLE_WALL_OVEN,
+    **{f"cav2_{key}": value for key, value in CAVITY.items()},
+}
 DUAL_ZONE_WINE = {
     "appliance_model": "DEU2450WDZ",
     "appliance_type": "17.14.2.0",
@@ -66,8 +75,30 @@ async def test_a_range_names_its_cavities_right_and_left(hass, cloud_appliance):
         assert friendly_name(hass, entity_id) == f"Kitchen {name}"
 
 
-@pytest.mark.parametrize("cloud_appliance", [SINGLE_RANGE], indirect=True)
-async def test_a_second_cavity_reported_later_renames_the_first(hass, cloud_appliance):
+@pytest.mark.parametrize("cloud_appliance", [DOUBLE_WALL_OVEN], indirect=True)
+async def test_a_double_wall_oven_names_its_cavities_upper_and_lower(hass, cloud_appliance):
+    for entity_id, name in (
+        ("climate.kitchen_upper_oven", "Upper oven"),
+        ("climate.kitchen_lower_oven", "Lower oven"),
+        ("sensor.kitchen_upper_oven_temperature", "Upper oven temperature"),
+        ("sensor.kitchen_lower_oven_temperature", "Lower oven temperature"),
+        ("select.kitchen_upper_oven_cooking_mode", "Upper oven cooking mode"),
+        ("switch.kitchen_lower_oven_light", "Lower oven light"),
+        ("button.kitchen_start_upper_oven", "Start upper oven"),
+        ("binary_sensor.kitchen_upper_oven_door", "Upper oven door"),
+        ("sensor.kitchen_lower_oven_broil_level", "Lower oven broil level"),
+    ):
+        assert friendly_name(hass, entity_id) == f"Kitchen {name}"
+
+
+@pytest.mark.parametrize(
+    ("cloud_appliance", "first", "second"),
+    [(SINGLE_RANGE, "right", "left"), (SINGLE_WALL_OVEN, "upper", "lower")],
+    indirect=["cloud_appliance"],
+)
+async def test_a_second_cavity_reported_later_renames_the_first(
+    hass, cloud_appliance, first, second
+):
     assert friendly_name(hass, "climate.kitchen_oven") == "Kitchen Oven"
     assert friendly_name(hass, "sensor.kitchen_cooking_mode") == "Kitchen Cooking mode"
     # Like the app, the second cavity's setpoint shows that there are two.
@@ -76,11 +107,11 @@ async def test_a_second_cavity_reported_later_renames_the_first(hass, cloud_appl
     await cloud_appliance.update({f"cav2_{key}": value for key, value in CAVITY.items()})
     # Renaming keeps the first cavity's entity IDs.
     for entity_id, name in (
-        ("climate.kitchen_oven", "Right oven"),
-        ("sensor.kitchen_cooking_mode", "Right oven cooking mode"),
-        ("button.kitchen_start_oven", "Start right oven"),
-        ("climate.kitchen_left_oven", "Left oven"),
-        ("sensor.kitchen_left_oven_cooking_mode", "Left oven cooking mode"),
+        ("climate.kitchen_oven", f"{first.title()} oven"),
+        ("sensor.kitchen_cooking_mode", f"{first.title()} oven cooking mode"),
+        ("button.kitchen_start_oven", f"Start {first} oven"),
+        (f"climate.kitchen_{second}_oven", f"{second.title()} oven"),
+        (f"sensor.kitchen_{second}_oven_cooking_mode", f"{second.title()} oven cooking mode"),
     ):
         assert friendly_name(hass, entity_id) == f"Kitchen {name}"
 
