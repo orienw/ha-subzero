@@ -6,7 +6,7 @@ import random
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, tzinfo
+from datetime import UTC, datetime, timedelta, tzinfo
 
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import HomeAssistant, callback
@@ -130,14 +130,16 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         # appliance clock running ahead cannot replay events from before loading.
         deliver = self._history_seen or not history
         self._history_seen |= history
-        events = []
+        events = {}
         for record in notification_records(properties):
             timestamp = appliance_datetime(record["timestamp"], self.clock_zone)
             if timestamp is not None:
-                events.append((timestamp, record["notif_seq"], record["notif_type"]))
+                # Identify by instant: a local time in a repeated hour never equals a UTC time.
+                identity = (timestamp.astimezone(UTC), record["notif_seq"], record["notif_type"])
+                events[identity] = timestamp
         for identity in sorted(events):
-            timestamp, sequence, code = identity
-            if timestamp < self._event_cutoff or identity in self._event_ids:
+            instant, sequence, code = identity
+            if instant < self._event_cutoff or identity in self._event_ids:
                 continue
             self._event_ids.add(identity)
             if len(self._event_ids) > MAX_EVENT_HISTORY:
@@ -149,7 +151,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             event = {
                 "code": code,
                 "sequence": sequence,
-                "appliance_timestamp": timestamp.isoformat(),
+                "appliance_timestamp": events[identity].isoformat(),
             }
             for listener in self._event_listeners:
                 listener(event)

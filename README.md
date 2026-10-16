@@ -37,7 +37,7 @@ Entities are created only for recognized properties that each appliance reports,
 
 Celsius and Fahrenheit appliance settings are supported. Home Assistant displays temperatures and accepts setpoints in your preferred unit. Setpoints use whole-degree Fahrenheit precision, so Celsius requests may be rounded. Appliance units are read at startup and on reload, falling back to the last saved unit if the appliance list is temporarily unavailable. Appliances with unknown units keep all of their non-temperature entities.
 
-Timestamps keep any offset they include. A timestamp without an offset is read in the time zone of the appliance clock, from the offset of the clock time each push reports. Status reads report the clock in UTC, so they do not change it. Until a push reports the clock, Home Assistant's time zone is used, as the Sub-Zero app uses the phone's.
+Timestamps keep any offset they include. A timestamp without an offset is read in the time zone of the appliance clock, from the offset of the clock time each push reports. When that offset matches Home Assistant's time zone, that zone is used, so daylight saving changes are followed. Status reads report the clock in UTC, so they do not change it. Until a push reports the clock, Home Assistant's time zone is used, as the Sub-Zero app uses the phone's.
 
 Each appliance reports **Active faults**: the count of currently active faults and their details, refreshed every 30 minutes. Clearing faults happens at the appliance.
 

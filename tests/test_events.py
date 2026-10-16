@@ -1,7 +1,7 @@
 """Appliance notification decoding and automation replay protection."""
 
 import json
-from datetime import UTC, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -193,6 +193,15 @@ async def test_bounded_history_does_not_replay_evicted_events(hass, cloud_applia
     assert len(event_changes(events)) == count
 
 
+async def test_events_at_the_last_supported_instant_are_ignored(hass, cloud_appliance):
+    last = datetime.max.replace(tzinfo=UTC)
+    # Evicting the oldest would move the cutoff past the last supported instant.
+    history = [record(i, 201, last) for i in range(MAX_EVENT_HISTORY + 1)]
+    await cloud_appliance.update({"notifs": history})
+    assert not cloud_appliance.coordinator._event_ids
+    assert hass.states.get("event.kitchen_appliance_event").state != "unavailable"
+
+
 async def test_reload_baselines_previously_received_events(hass, cloud_appliance):
     await cloud_appliance.update({"notifs": [record()]})
     await hass.config_entries.async_reload(cloud_appliance.entry.entry_id)
@@ -253,3 +262,21 @@ async def test_naive_event_timestamps_follow_the_pushed_clock(hass, cloud_applia
     )
     [event] = event_changes(events)
     assert event.attributes["appliance_timestamp"] == now.isoformat()
+
+
+async def test_events_in_a_repeated_hour_are_identified_by_instant(hass, cloud_appliance):
+    events = async_capture_events(hass, "state_changed")
+    # Daylight saving ends that night in Home Assistant's zone, so 01:10 happens twice.
+    await cloud_appliance.update(
+        {
+            "time": "2037-11-01T01:05:00-07:00",
+            "notifs": [record(timestamp=datetime(2037, 11, 1, 1, 10))],
+        }
+    )
+    assert cloud_appliance.coordinator.clock_zone is dt_util.get_default_time_zone()
+    # The same event reported again in UTC.
+    await cloud_appliance.update(
+        {"notifs": [record(timestamp=datetime(2037, 11, 1, 8, 10, tzinfo=UTC))]}
+    )
+    [event] = event_changes(events)
+    assert event.attributes["appliance_timestamp"] == "2037-11-01T01:10:00-07:00"

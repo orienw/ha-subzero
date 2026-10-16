@@ -1,7 +1,7 @@
 """Reported control capabilities, appliance interlocks, and protocol values."""
 
 import math
-from datetime import datetime, timezone, tzinfo
+from datetime import UTC, datetime, timezone, tzinfo
 
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.util import dt as dt_util
@@ -190,13 +190,14 @@ def clock_zone(value) -> tzinfo | None:
         return None
     try:
         parsed = datetime.fromisoformat(value)
-    except ValueError:
+        offset = parsed.utcoffset()
+        if offset is None:
+            return None
+        home = dt_util.get_default_time_zone()
+        return home if parsed.astimezone(home).utcoffset() == offset else timezone(offset)
+    except ValueError, OverflowError:
+        # Times at the edge of the supported years can't be converted between zones.
         return None
-    offset = parsed.utcoffset()
-    if offset is None:
-        return None
-    home = dt_util.get_default_time_zone()
-    return home if parsed.astimezone(home).utcoffset() == offset else timezone(offset)
 
 
 def appliance_datetime(value, zone: tzinfo | None = None) -> datetime | None:
@@ -209,10 +210,14 @@ def appliance_datetime(value, zone: tzinfo | None = None) -> datetime | None:
         return None
     try:
         parsed = datetime.fromisoformat(value)
-    except ValueError:
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=zone or dt_util.get_default_time_zone())
+        # Appliance times never fall in the first or last supported year, where
+        # converting or offsetting them overflows.
+        if not 1 < parsed.astimezone(UTC).year < 9999:
+            return None
+    except ValueError, OverflowError:
         return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=zone or dt_util.get_default_time_zone())
     return parsed
 
 

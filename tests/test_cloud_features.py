@@ -1123,6 +1123,15 @@ async def test_timer_restarts_are_confirmed(hass, appliances, push):
             "number", "set_value", {"entity_id": entity_id, "value": minutes}, blocking=True
         )
         assert hass.states.get(entity_id).state == str(minutes)
+        # The next write restarts a timer that has been running for a while.
+        started = dt_util.utcnow() - timedelta(minutes=10)
+        await appliances.update(
+            "oven",
+            {
+                "kitchen_timer_start_time": started.isoformat(),
+                "kitchen_timer_end_time": (started + timedelta(minutes=minutes)).isoformat(),
+            },
+        )
     assert appliances.client.set_property.await_count == 3
 
 
@@ -1173,7 +1182,8 @@ def test_clock_zone_prefers_home_time_zone_when_offsets_match(hass):
     home = dt_util.get_default_time_zone()
     assert clock_zone(dt_util.now().isoformat()) is home
     assert clock_zone("2026-10-05T15:29:24+05:30") == timezone(timedelta(hours=5, minutes=30))
-    for value in ("2026-10-05T15:29:24", "not a time", None):
+    # The last would fall before year 1 in Home Assistant's zone.
+    for value in ("2026-10-05T15:29:24", "not a time", None, "0001-01-01T00:00:00+00:00"):
         assert clock_zone(value) is None
 
 
@@ -1504,6 +1514,21 @@ async def test_naive_timestamps_use_the_pushed_clock_zone(hass, appliances):
     assert hass.states.get("sensor.fridge_max_ice_start").state == "2026-09-05T08:00:00+00:00"
     await appliances.update("fridge", {"max_ice_start_time": None})
     assert hass.states.get("sensor.fridge_max_ice_start").state == "unknown"
+
+
+async def test_times_at_the_edge_of_the_supported_years_are_ignored(hass, appliances):
+    await appliances.update("fridge", {"time": "2026-09-05T11:00:00-04:00"})
+    # Each would fall before year 1 in Home Assistant's zone or in UTC.
+    await appliances.update("fridge", {"time": "0001-01-01T00:00:00+00:00"})
+    await appliances.update("fridge", {"max_ice_start_time": "0001-01-01T00:00:00+05:00"})
+    assert hass.states.get("sensor.fridge_max_ice_start").state == "unknown"
+    device = dr.async_get(hass).async_get_device_by_identifier(
+        (DOMAIN, "fridge"), appliances.entry.entry_id
+    )
+    result = await async_get_device_diagnostics(hass, appliances.entry, device)
+    assert result["clock_zone"] == "UTC-04:00"
+    await appliances.update("fridge", {"max_ice_start_time": "2026-09-05T10:00:00"})
+    assert hass.states.get("sensor.fridge_max_ice_start").state == "2026-09-05T14:00:00+00:00"
 
 
 @pytest.mark.parametrize("value", [None, True, "38", float("nan"), float("inf")])
