@@ -21,6 +21,9 @@ def appliance_diagnostics(
     return {
         "available": coordinator.last_update_success,
         "temperature_unit": coordinator.device.get("temperature_unit"),
+        # The zone the appliance's times without an offset are read in; None means
+        # Home Assistant's, until a push reports the appliance clock.
+        "clock_zone": str(coordinator.clock_zone) if coordinator.clock_zone else None,
         "push": {
             **coordinator.push_stats,
             "last_channel_message": coordinator.client.last_messages.get(coordinator.device_id),

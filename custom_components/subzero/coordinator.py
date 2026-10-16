@@ -6,7 +6,7 @@ import random
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, tzinfo
 
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import HomeAssistant, callback
@@ -47,6 +47,7 @@ from .const import (
 from .controls import (
     appliance_datetime,
     appliance_type,
+    clock_zone,
     control_matches,
     excluded_properties,
     ice_mode,
@@ -100,6 +101,8 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self.device = dict(device)
         self._read_failed = read_failed
         self.unrecognized_keys: set[str] = set()
+        # The appliance clock's time zone, from the offset of its last pushed `time`.
+        self.clock_zone: tzinfo | None = None
         self.push_stats: dict[str, int | str | None] = {
             "snapshots": 0,
             "updates": 0,
@@ -129,7 +132,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self._history_seen |= history
         events = []
         for record in notification_records(properties):
-            timestamp = appliance_datetime(record["timestamp"], {**self.data, **properties})
+            timestamp = appliance_datetime(record["timestamp"], self.clock_zone)
             if timestamp is not None:
                 events.append((timestamp, record["notif_seq"], record["notif_type"]))
         for identity in sorted(events):
@@ -237,7 +240,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         changes = {
             key: value
             for key, value in properties.items()
-            if not (force and control_matches(self.data, key, value, now))
+            if not (force and control_matches(self.data, key, value, now, self.clock_zone))
         }
         if changes or not force:
             validate_control_properties(self.data, self.device.get("temperature_unit"), changes)
@@ -254,13 +257,15 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                         # Setting a finished timer to 0 clears it, as the app does.
                         and (value > 0 or self.data.get(f"{KITCHEN_TIMERS[key]}_complete") is True)
                     )
-                    or not control_matches(self.data, key, value, requested_at[key])
+                    or not control_matches(
+                        self.data, key, value, requested_at[key], self.clock_zone
+                    )
                 ):
                     requested_at[key] = await self._async_set_property(
                         key, value, resend=key not in changes
                     )
             if not self.last_update_success or any(
-                not control_matches(self.data, key, value, requested_at[key])
+                not control_matches(self.data, key, value, requested_at[key], self.clock_zone)
                 for key, value in properties.items()
             ):
                 raise HomeAssistantError("The appliance did not confirm the requested setting.")
@@ -313,7 +318,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                     break
                 raise ServiceValidationError("The appliance is unavailable.")
             requested_at = dt_util.utcnow()
-            matched = control_matches(self.data, key, value, requested_at)
+            matched = control_matches(self.data, key, value, requested_at, self.clock_zone)
             if not resend or not matched:
                 validate_control_properties(
                     self.data, self.device.get("temperature_unit"), {key: value}
@@ -324,7 +329,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             @callback
             def confirm() -> None:
                 if self.last_update_success and control_matches(
-                    self.data, key, value, requested_at
+                    self.data, key, value, requested_at, self.clock_zone
                 ):
                     confirmed.set()
                 else:
@@ -501,6 +506,8 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
     @callback
     def apply_update(self, update: StateUpdate) -> None:
         self.unrecognized_keys.update(update.properties.keys() - STATE_KEYS)
+        if zone := clock_zone(update.properties.get("time")):
+            self.clock_zone = zone
         properties = {key: value for key, value in update.properties.items() if key in STATE_KEYS}
         if "appliance_type" in properties and appliance_type(properties) is None:
             # Like the app, an unusable type does not replace the known one.

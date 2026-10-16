@@ -1,9 +1,10 @@
 """Reported control capabilities, appliance interlocks, and protocol values."""
 
 import math
-from datetime import datetime
+from datetime import datetime, timezone, tzinfo
 
 from homeassistant.exceptions import ServiceValidationError
+from homeassistant.util import dt as dt_util
 
 from .const import (
     ACCENT_LIGHT_LABELS,
@@ -179,18 +180,40 @@ def supports_control(data: dict, key: str) -> bool:
     }
 
 
-def appliance_datetime(value, data: dict) -> datetime | None:
-    """Use only explicit offsets, including the appliance clock's offset."""
+def clock_zone(value) -> tzinfo | None:
+    """The time zone of a pushed `time`, which carries the appliance's local offset.
+
+    Status reads report `time` in UTC, so only pushes show the offset. When it
+    matches Home Assistant's time zone, that zone also follows daylight saving.
+    """
     if not isinstance(value, str):
         return None
     try:
         parsed = datetime.fromisoformat(value)
-        if parsed.tzinfo is None:
-            clock = datetime.fromisoformat(data.get("time", ""))
-            parsed = parsed.replace(tzinfo=clock.tzinfo)
-        return parsed if parsed.tzinfo is not None else None
-    except ValueError, TypeError:
+    except ValueError:
         return None
+    offset = parsed.utcoffset()
+    if offset is None:
+        return None
+    home = dt_util.get_default_time_zone()
+    return home if parsed.astimezone(home).utcoffset() == offset else timezone(offset)
+
+
+def appliance_datetime(value, zone: tzinfo | None = None) -> datetime | None:
+    """Read an appliance timestamp, taking one without an offset as local time.
+
+    Local time is the zone of the appliance's last pushed clock, or, like the app,
+    which sets the appliance clock to the phone's local time, Home Assistant's.
+    """
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=zone or dt_util.get_default_time_zone())
+    return parsed
 
 
 def ice_mode(data: dict) -> str | None:
@@ -230,21 +253,31 @@ def ice_mode_properties(data: dict, mode: str) -> dict[str, bool]:
     }
 
 
-def timer_minutes(data: dict, key: str) -> float | None:
+def timer_minutes(data: dict, key: str, zone: tzinfo | None = None) -> float | None:
     prefix = KITCHEN_TIMERS[key]
     if data.get(f"{prefix}_active") is False:
         return 0
     if data.get(f"{prefix}_active") is not True:
         return None
-    start = appliance_datetime(data.get(f"{prefix}_start_time"), data)
-    end = appliance_datetime(data.get(f"{prefix}_end_time"), data)
+    start = appliance_datetime(data.get(f"{prefix}_start_time"), zone)
+    end = appliance_datetime(data.get(f"{prefix}_end_time"), zone)
     if start is not None and end is not None and end >= start:
         return round((end - start).total_seconds() / 60)
     duration = data.get(key)
     return duration if type(duration) is int and duration >= 0 else None
 
 
-def control_matches(data: dict, key: str, value: bool | int, requested_at: datetime) -> bool:
+def control_matches(
+    data: dict,
+    key: str,
+    value: bool | int,
+    requested_at: datetime,
+    zone: tzinfo | None = None,
+) -> bool:
+    """Whether the appliance reports a setting as requested.
+
+    `zone` is the appliance clock's time zone, for timer times without an offset.
+    """
     if key == "accent_light_level":
         return (
             type(data.get(key)) is int
@@ -263,8 +296,9 @@ def control_matches(data: dict, key: str, value: bool | int, requested_at: datet
     prefix = KITCHEN_TIMERS[key]
     if value == 0:
         return data.get(f"{prefix}_active") is False
-    end = appliance_datetime(data.get(f"{prefix}_end_time"), data)
-    duration = timer_minutes(data, key)
+    end = appliance_datetime(data.get(f"{prefix}_end_time"), zone)
+    duration = timer_minutes(data, key, zone)
+    # The appliance clock has been seen within about 15 seconds of real time.
     return (
         data.get(f"{prefix}_active") is True
         and end is not None

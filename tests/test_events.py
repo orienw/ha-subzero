@@ -1,7 +1,7 @@
 """Appliance notification decoding and automation replay protection."""
 
 import json
-from datetime import timedelta
+from datetime import UTC, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -233,13 +233,23 @@ async def test_out_of_order_events_and_equal_timestamps_remain_distinct(hass, cl
     assert [item.attributes["code"] for item in event_changes(events)] == [201, 205, 202]
 
 
-async def test_event_timestamp_uses_only_reported_offset(hass, cloud_appliance):
-    now = dt_util.utcnow() + timedelta(seconds=1)
-    payload = record(timestamp=now.replace(tzinfo=None))
-    await cloud_appliance.update({"notifs": [payload]})
-    assert hass.states.get("event.kitchen_appliance_event").state == "unknown"
-    await cloud_appliance.update({"time": now.isoformat(), "notifs": [payload]})
-    assert (
-        hass.states.get("event.kitchen_appliance_event").attributes["appliance_timestamp"]
-        == now.isoformat()
+async def test_naive_event_timestamps_use_the_home_time_zone(hass, cloud_appliance):
+    events = async_capture_events(hass, "state_changed")
+    now = dt_util.now() + timedelta(seconds=1)
+    # A status read reports the clock in UTC, which a naive timestamp does not borrow.
+    cloud_appliance.state["time"] = now.astimezone(UTC).isoformat()
+    await cloud_appliance.coordinator.async_refresh()
+    await cloud_appliance.update({"notifs": [record(timestamp=now.replace(tzinfo=None))]})
+    [event] = event_changes(events)
+    assert event.attributes["appliance_timestamp"] == now.isoformat()
+
+
+async def test_naive_event_timestamps_follow_the_pushed_clock(hass, cloud_appliance):
+    events = async_capture_events(hass, "state_changed")
+    zone = timezone(dt_util.now().utcoffset() + timedelta(hours=3))
+    now = dt_util.now(zone) + timedelta(seconds=1)
+    await cloud_appliance.update(
+        {"time": now.isoformat(), "notifs": [record(timestamp=now.replace(tzinfo=None))]}
     )
+    [event] = event_changes(events)
+    assert event.attributes["appliance_timestamp"] == now.isoformat()
