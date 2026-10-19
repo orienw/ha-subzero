@@ -19,17 +19,16 @@ The Sub-Zero Group Owner's App is available in **Canada, Mexico, and the United 
 
 [![Open this repository in HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=orienw&repository=ha-subzero&category=integration)
 
-Use the button above, or add the repository manually:
+Use the button above, or find the integration in HACS:
 
-1. Open **HACS → ⋮ → Custom repositories**.
-2. Add `https://github.com/orienw/ha-subzero` with type **Integration**.
-3. Download **Sub-Zero**, then restart Home Assistant.
-4. Open **Settings → Devices & services → Add integration → Sub-Zero**.
-5. Enter your Sub-Zero account email and password, then select the appliances to include. If your account uses multi-factor authentication, setup first verifies it by text message code or phone call, and may ask you to type the characters shown in an image.
+1. Open **HACS** and search for **Sub-Zero**.
+2. Download **Sub-Zero**, then restart Home Assistant.
+3. Open **Settings → Devices & services → Add integration → Sub-Zero**.
+4. Enter your Sub-Zero account email and password, then select the appliances to include. If your account uses multi-factor authentication, setup first verifies it by text message code or phone call, and may ask you to type the characters shown in an image.
 
 To change the selection later, open **Settings → Devices & services → Sub-Zero → Configure**. This refreshes the account's appliance list using the saved connection. Deselecting an appliance removes its Home Assistant device and entities.
 
-For manual installation, copy `custom_components/subzero` into your Home Assistant configuration's `custom_components` directory, restart, and follow steps 4–5.
+For manual installation, copy `custom_components/subzero` into your Home Assistant configuration's `custom_components` directory, restart, and follow steps 3–4.
 
 ## Entities
 
