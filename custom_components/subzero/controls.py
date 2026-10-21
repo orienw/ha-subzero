@@ -297,6 +297,13 @@ def control_matches(
             ready = key.replace("unit_on", "remote_ready")
             if ready in data and data[ready] is not False:
                 return False
+        if (
+            key == "wash_cycle_on"
+            and value is False
+            and data.get("delay_start_timer_active") is True
+        ):
+            # A delayed start can report the cycle off before cancellation.
+            return False
         return data.get(key) == value and isinstance(data.get(key), bool) == isinstance(value, bool)
     prefix = KITCHEN_TIMERS[key]
     if value == 0:

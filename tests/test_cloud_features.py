@@ -1258,6 +1258,40 @@ async def test_dishwasher_cancel_needs_confirmation_but_not_remote_ready(hass, a
     ] * (1 if accept else 3)
 
 
+@pytest.mark.parametrize("delay_ends", [False, True])
+async def test_delayed_wash_cancel_requires_the_delay_to_end(hass, appliances, delay_ends):
+    await appliances.update(
+        "dishwasher",
+        {"wash_cycle_on": False, "wash_status": 7, "delay_start_timer_active": True},
+    )
+
+    async def cancel(device_id, key, value):
+        properties = {
+            "wash_cycle_on": False,
+            "wash_status": 4 if delay_ends else 7,
+            "delay_start_timer_active": not delay_ends,
+        }
+        appliances.states[device_id].update(properties)
+        await appliances.updates.put((device_id, StateUpdate(properties, full=False)))
+
+    appliances.client.set_property.side_effect = cancel
+    entity_id = "button.dishwasher_cancel_wash_cycle"
+    if delay_ends:
+        await hass.services.async_call("button", "press", {"entity_id": entity_id}, blocking=True)
+    else:
+        with pytest.raises(HomeAssistantError, match="did not confirm"):
+            await hass.services.async_call(
+                "button", "press", {"entity_id": entity_id}, blocking=True
+            )
+    assert appliances.client.set_property.await_args_list == [
+        call("dishwasher", "wash_cycle_on", False)
+    ] * (1 if delay_ends else 3)
+    await hass.async_block_till_done()
+    assert appliances.entry.runtime_data.coordinators["dishwasher"].data[
+        "delay_start_timer_active"
+    ] == (not delay_ends)
+
+
 async def test_dishwasher_cancel_follows_wash_status(hass, appliances):
     entity_id = "button.dishwasher_cancel_wash_cycle"
     for status in (0, 6):
