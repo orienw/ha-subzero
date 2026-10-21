@@ -632,6 +632,8 @@ async def control_server(aiohttp_server, monkeypatch, socket_enabled, tokens):
         )
         if isinstance(response, str):
             return web.Response(text=response, status=status)
+        if isinstance(response, bytes):
+            return web.Response(body=response, status=status, content_type="application/json")
         return web.json_response(response, status=status, headers={"Retry-After": "300"})
 
     app = web.Application()
@@ -664,6 +666,15 @@ async def test_accepted_channel_opening_returns_quietly(hass, control_server, to
     control_server["response"] = response
     client = api.SubZeroClient(async_get_clientsession(hass), "test-key", tokens)
     await client.open_channel("test-fridge")
+
+
+@pytest.mark.parametrize("status", [200, 500])
+async def test_invalid_command_encoding_is_an_api_error(hass, control_server, tokens, status):
+    control_server.update(status=status, response=b"\xff\xfe")
+    client = api.SubZeroClient(async_get_clientsession(hass), "test-key", tokens)
+    with pytest.raises(api.ApiError):
+        await client.open_channel("test-fridge")
+    assert len(control_server["requests"]) == 1
 
 
 async def test_control_writes_use_the_authenticated_app_envelope(hass, control_server, tokens):

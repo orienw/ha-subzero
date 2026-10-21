@@ -388,7 +388,7 @@ class SubZeroClient:
                 if response.status in (401, 403) or (token_request and response.status == 400):
                     raise InvalidAuth("Sub-Zero requires a new sign-in.")
                 if appliance_command and (200 <= response.status < 300 or response.status == 500):
-                    body = (await response.text()).strip()
+                    body = (await response.text(errors="replace")).strip()
                     if response.status < 300 and body in ("", "OK", '"OK"'):
                         return {}
                     try:
