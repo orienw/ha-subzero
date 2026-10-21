@@ -86,6 +86,7 @@ async def cloud_appliance(hass, tokens, request, enable_custom_integrations):
         client = factory.return_value
         client.tokens = token_state(tokens)
         client.push_connected = True
+        client.open_channel = AsyncMock()
         client.appliances = AsyncMock(return_value=[Appliance("appliance", "Kitchen", "F")])
         client.state = AsyncMock(side_effect=lambda device_id: dict(state))
         client.set_property = AsyncMock(side_effect=write)

@@ -29,8 +29,8 @@ from .auth import (
     MfaCallTimeout,
     SubZeroLogin,
 )
-from .const import DOMAIN
-from .coordinator import selected_devices
+from .const import DOMAIN, STATUS_POLL_INTERVALS
+from .coordinator import selected_devices, status_poll_interval
 
 
 def device_schema(devices: dict, selected: list[str]) -> vol.Schema:
@@ -485,12 +485,29 @@ class SubZeroOptionsFlow(config_entries.OptionsFlowWithReload):
                 return self.async_abort(reason="all_configured")
             else:
                 return self.async_create_entry(
-                    data={"devices": {key: self._devices[key] for key in selected}}
+                    data={
+                        "devices": {key: self._devices[key] for key in selected},
+                        "status_poll_interval": int(
+                            user_input.get("status_poll_interval", status_poll_interval(entry))
+                        ),
+                    }
                 )
         return self.async_show_form(
             step_id="init",
             data_schema=device_schema(
                 self._devices, [key for key in current if key in self._devices]
+            ).extend(
+                {
+                    vol.Required(
+                        "status_poll_interval", default=str(status_poll_interval(entry))
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[str(seconds) for seconds in STATUS_POLL_INTERVALS],
+                            mode=SelectSelectorMode.DROPDOWN,
+                            translation_key="status_poll_interval",
+                        )
+                    )
+                }
             ),
             errors=errors,
         )

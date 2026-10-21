@@ -344,6 +344,7 @@ class SubZeroClient:
         self._refresh_lock = asyncio.Lock()
         self._retry_at = 0.0
         self.push_connected = False
+        self._renewal_requested = False
         self.notification_stats: dict[str, int | str | None] = {
             "received": 0,
             "ignored": 0,
@@ -604,6 +605,10 @@ class SubZeroClient:
             metadata["resolution_steps"] = "\n".join(steps)
         return metadata or None
 
+    def renew_connection(self) -> None:
+        """Recreate the notification connection within one ping interval."""
+        self._renewal_requested = True
+
     async def watch(
         self, device_ids: list[str]
     ) -> AsyncIterator[tuple[str, StateUpdate | ApiError | ChannelOpened]]:
@@ -618,6 +623,7 @@ class SubZeroClient:
     async def _watch_connection(
         self, device_ids: list[str]
     ) -> AsyncIterator[tuple[str, StateUpdate | ApiError | ChannelOpened]]:
+        self._renewal_requested = False
         info = await self._request(
             "POST", "/signal-r/negotiateUser", user_id=self.tokens["user_id"]
         )
@@ -731,7 +737,7 @@ class SubZeroClient:
                                 pending_channels.discard(device_id)
                             yield device_id, update
                         now = time.monotonic()
-                        if now >= renew_at:
+                        if now >= renew_at or self._renewal_requested:
                             return
                         if now - last_received > 60:
                             raise ApiError("Sub-Zero's notification connection stopped responding.")

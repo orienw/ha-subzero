@@ -7,6 +7,7 @@ import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta, tzinfo
+from itertools import cycle
 
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import HomeAssistant, callback
@@ -17,6 +18,7 @@ from homeassistant.exceptions import (
     ServiceValidationError,
 )
 from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
@@ -34,6 +36,7 @@ from .auth import InvalidAuth
 from .const import (
     CONTROL_CONFIRM_TIMEOUT,
     CONTROL_PUSH_TIMEOUT,
+    DEFAULT_STATUS_POLL_INTERVAL,
     DOMAIN,
     FAULT_METADATA_APPLIES_TO_BY_SERIES,
     ICE_DELAY_KEYS,
@@ -43,6 +46,7 @@ from .const import (
     PRIVATE_KEYS,
     RECONNECT_DELAY,
     STATE_KEYS,
+    STATUS_POLL_INTERVALS,
 )
 from .controls import (
     appliance_datetime,
@@ -64,6 +68,12 @@ from .controls import (
 
 _LOGGER = logging.getLogger(__name__)
 INITIAL_STATE_TIMEOUT = 16
+SNAPSHOT_TIMEOUT = 16
+
+
+def status_poll_interval(entry: ConfigEntry) -> int:
+    interval = entry.options.get("status_poll_interval", DEFAULT_STATUS_POLL_INTERVAL)
+    return interval if interval in STATUS_POLL_INTERVALS else DEFAULT_STATUS_POLL_INTERVAL
 
 
 def selected_devices(entry: ConfigEntry) -> dict[str, dict]:
@@ -118,6 +128,48 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self._event_ids: set[tuple[datetime, int, int]] = set()
         self._event_listeners: list[Callable[[dict], None]] = []
         self._history_seen = False
+        self._channel_snapshot: asyncio.Future[None] | None = None
+        self._renewed = False
+        self.verification_stats: dict[str, int | str | None] = {
+            "checks": 0,
+            "fallback_reads": 0,
+            "connection_renewals": 0,
+            "last_success": None,
+        }
+
+    async def async_verify_state(self) -> None:
+        """Request a full push snapshot, falling back to a status read."""
+        self.verification_stats["checks"] += 1
+        snapshots = self.push_stats["snapshots"]
+        snapshot = self._channel_snapshot = self.hass.loop.create_future()
+        try:
+            await self.client.open_channel(self.device_id)
+            async with asyncio.timeout(SNAPSHOT_TIMEOUT):
+                await snapshot
+        except RateLimited:
+            # The client also holds off other requests until Retry-After expires.
+            return
+        except InvalidAuth as error:
+            self.async_set_update_error(ConfigEntryAuthFailed(str(error)))
+            self.entry.async_start_reauth(self.hass)
+            return
+        except ApiError, TimeoutError:
+            _LOGGER.debug("No verified push snapshot from %s; reading status", self.device["name"])
+        finally:
+            answered = snapshot.done() and not snapshot.cancelled()
+            snapshot.cancel()
+            self._channel_snapshot = None
+        if not answered:
+            self.verification_stats["fallback_reads"] += 1
+            await self.async_refresh()
+        if self.last_update_success:
+            self.verification_stats["last_success"] = dt_util.utcnow().isoformat()
+            if self.push_stats["snapshots"] == snapshots and not self._renewed:
+                # A working status read with no push snapshot warrants one renewal
+                # until a full snapshot shows that this appliance is reporting again.
+                self._renewed = True
+                self.verification_stats["connection_renewals"] += 1
+                self.client.renew_connection()
 
     @callback
     def async_add_event_listener(self, listener: Callable[[dict], None]) -> Callable[[], None]:
@@ -528,6 +580,10 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 self._read_updates.update(properties)
         self.push_stats["snapshots" if update.full else "updates"] += 1
         self.push_stats["last_received"] = dt_util.utcnow().isoformat()
+        if update.full:
+            self._renewed = False
+            if self._channel_snapshot is not None and not self._channel_snapshot.done():
+                self._channel_snapshot.set_result(None)
         _LOGGER.debug(
             "%s %s: %s",
             self.device["name"],
@@ -626,6 +682,8 @@ class SubZeroAccount:
         }
         self._initial_states = {device_id: asyncio.Event() for device_id in self.coordinators}
         self._recoveries: dict[str, asyncio.Task] = {}
+        self._verification_order = cycle(self.coordinators.values())
+        self._verifications: dict[str, asyncio.Task] = {}
 
     async def async_setup(self) -> None:
         if not self.coordinators:
@@ -695,6 +753,31 @@ class SubZeroAccount:
             self.entry.async_create_background_task(
                 self.hass, coordinator.async_refresh(), "Sub-Zero faults"
             )
+        if interval := status_poll_interval(self.entry):
+            self.entry.async_on_unload(
+                async_track_time_interval(
+                    self.hass,
+                    self._verify_next_appliance,
+                    timedelta(seconds=interval / len(self.coordinators)),
+                    cancel_on_shutdown=True,
+                )
+            )
+
+    @callback
+    def _verify_next_appliance(self, _now: datetime) -> None:
+        coordinator = next(self._verification_order)
+        pending = self._verifications.get(coordinator.device_id)
+        if (
+            self.entry.pref_disable_polling
+            or not self.client.push_connected
+            or not coordinator.last_update_success
+            or pending is not None
+            and not pending.done()
+        ):
+            return
+        self._verifications[coordinator.device_id] = self.entry.async_create_background_task(
+            self.hass, coordinator.async_verify_state(), "Sub-Zero state verification"
+        )
 
     @callback
     def set_error(self, error: Exception) -> None:

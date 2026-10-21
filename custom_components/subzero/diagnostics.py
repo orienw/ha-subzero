@@ -28,6 +28,7 @@ def appliance_diagnostics(
             **coordinator.push_stats,
             "last_channel_message": coordinator.client.last_messages.get(coordinator.device_id),
         },
+        "state_verification": dict(coordinator.verification_stats),
         "unrecognized_state_keys": sorted(coordinator.unrecognized_keys),
         "state": async_redact_data(coordinator.data, PRIVATE_KEYS),
         "faults": records,

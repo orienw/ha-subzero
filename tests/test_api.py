@@ -870,8 +870,9 @@ def test_notification_expiry_is_independent_of_account_token(monkeypatch):
 
 
 @pytest.mark.parametrize("user_id", ["test-owner", "TEST-OWNER"])
-async def test_live_signalr_socket_is_renewed_before_token_expiry(
-    hass, aiohttp_server, monkeypatch, socket_enabled, user_id
+@pytest.mark.parametrize("requested", [False, True])
+async def test_live_signalr_socket_is_renewed_before_token_expiry_or_on_request(
+    hass, aiohttp_server, monkeypatch, socket_enabled, user_id, requested
 ):
     sockets = []
     commands = []
@@ -916,7 +917,7 @@ async def test_live_signalr_socket_is_renewed_before_token_expiry(
     monkeypatch.setattr(api, "API_BASE", origin)
     monkeypatch.setattr(api, "SIGNALR_ORIGIN", origin)
     monkeypatch.setattr(api, "PING_INTERVAL", 0.01)
-    monkeypatch.setattr(api, "notification_lifetime", lambda _: 0.35)
+    monkeypatch.setattr(api, "notification_lifetime", lambda _: 3000 if requested else 0.35)
     client = api.SubZeroClient(async_get_clientsession(hass), "test-key", make_tokens(user_id))
     stream = client.watch(["test-fridge"])
     try:
@@ -925,6 +926,8 @@ async def test_live_signalr_socket_is_renewed_before_token_expiry(
             async for event in stream:
                 if isinstance(event[1], api.StateUpdate):
                     snapshots.append(event)
+                    if requested and len(snapshots) == 1:
+                        client.renew_connection()
                 if len(snapshots) == 2:
                     break
             first, second = snapshots
@@ -932,7 +935,8 @@ async def test_live_signalr_socket_is_renewed_before_token_expiry(
         assert client.push_connected
         assert len(sockets) == 2 and sockets[0].closed
         assert commands == ["open_cloud_async", "open_cloud_async"]
-        assert pings
+        if not requested:
+            assert pings
     finally:
         await stream.aclose()
     assert not client.push_connected

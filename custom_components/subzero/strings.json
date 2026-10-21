@@ -63,9 +63,9 @@
   "options": {
     "step": {
       "init": {
-        "title": "Choose appliances",
-        "description": "The list is refreshed from your Sub-Zero account. Deselecting an appliance removes its Home Assistant device and entities.",
-        "data": {"device_ids": "Appliances"}
+        "title": "Appliances and updates",
+        "description": "The list is refreshed from your Sub-Zero account. Deselecting an appliance removes its Home Assistant device and entities. Periodic state checks help recover missed updates.",
+        "data": {"device_ids": "Appliances", "status_poll_interval": "State check interval"}
       }
     },
     "error": {
@@ -76,6 +76,17 @@
     "abort": {
       "reauth_required": "Sign in again using Home Assistant's Sub-Zero sign-in prompt, then reopen Configure.",
       "all_configured": "These appliances are already managed by another Sub-Zero entry. Reopen Configure to refresh the list."
+    }
+  },
+  "selector": {
+    "status_poll_interval": {
+      "options": {
+        "0": "Push only",
+        "60": "1 minute",
+        "120": "2 minutes",
+        "300": "5 minutes",
+        "600": "10 minutes"
+      }
     }
   },
   "entity": {
