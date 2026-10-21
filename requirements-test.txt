@@ -1,2 +1,3 @@
-pytest-homeassistant-custom-component>=0.13.354,<=0.13.371
+certifi>=2026.10.19
+pytest-homeassistant-custom-component>=0.13.354,<=0.13.373
 ruff==0.16.6
