@@ -75,6 +75,31 @@ async def test_incomplete_status_reply_does_not_confirm_old_values(loaded, freez
     assert "ref_door_ajar" in coordinator.missing_state_keys["read"]
 
 
+@pytest.mark.parametrize("complete", [False, True])
+async def test_status_confirmation_requires_door_state_but_not_notification_history(
+    hass, loaded, freezer, complete
+):
+    entry, client, _, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    coordinator.apply_update(
+        StateUpdate({**client.state.return_value, "ref_door_ajar": True, "notifs": []}, full=True)
+    )
+    confirmed = coordinator.confirmed_at
+    assert "notifs" in coordinator.data
+    assert "notifs" not in client.state.return_value
+    freezer.tick(1)
+
+    if complete:
+        assert await coordinator.async_read_status() == dt_util.utcnow()
+        assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
+    else:
+        del client.state.return_value["ref_door_ajar"]
+        with pytest.raises(HomeAssistantError, match="complete state"):
+            await coordinator.async_read_status()
+        assert coordinator.confirmed_at == confirmed
+        assert "ref_door_ajar" in coordinator.missing_state_keys["read"]
+
+
 async def test_update_entity_waits_for_each_read_inside_the_old_cooldown(hass, loaded):
     _, client, _, _, _ = loaded
     assert await async_setup_component(hass, "homeassistant", {})

@@ -191,7 +191,7 @@ After an error, a reopened channel or an incoming state update triggers a fresh 
 
 A new event or a transition to an open door, active timer, or running wash starts a short follow-up window. It reads status after two seconds, then up to twice more at one- and two-minute delays while a tracked condition remains active. Follow-up reads stay at least one minute apart per appliance; overlapping events do not extend the window. A reported clear condition, failed read, or rate limit ends it. **Push only** and Home Assistant's polling option also disable these automatic follow-ups. An alert's metadata never substitutes for current sensor values.
 
-Each appliance has a **State confirmed** diagnostic timestamp. It advances only when a successful status read or full push snapshot covers the appliance's known state. Individual updates and cached data recovered after a failed read do not advance it. An available entity can retain an old value during rate limits; inspect this timestamp when the age of its state matters.
+Each appliance has a **State confirmed** diagnostic timestamp. It advances only when a successful status read or full push snapshot covers the appliance's known state. Notification history is separate: status replies can omit it without making the sensor values incomplete. Individual updates and cached data recovered after a failed read do not advance it. An available entity can retain an old value during rate limits; inspect this timestamp when the age of its state matters.
 
 For a reminder that depends on an appliance still being in a particular state, use **Sub-Zero: Read appliance status** before checking the condition:
 

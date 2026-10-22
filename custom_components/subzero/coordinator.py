@@ -231,8 +231,11 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
     @callback
     def _confirm_state(self, properties: dict, source: str) -> bool:
         model = properties.get("appliance_model")
+        # Status replies can omit notification history.
         required = (
-            self.data.keys() if model == self.data.get("appliance_model") else {"appliance_model"}
+            self.data.keys() - {"notifs"}
+            if model == self.data.get("appliance_model")
+            else {"appliance_model"}
         )
         missing = self.missing_state_keys[source] = sorted(required - properties.keys())
         if missing or not isinstance(model, str) or not model:
