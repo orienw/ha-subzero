@@ -129,6 +129,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self._event_listeners: list[Callable[[dict], None]] = []
         self._history_seen = False
         self._channel_snapshot: asyncio.Future[None] | None = None
+        self._complete_snapshots = 0
         self._renewed = False
         self.verification_stats: dict[str, int | str | None] = {
             "checks": 0,
@@ -137,13 +138,18 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             "last_success": None,
         }
 
-    async def async_verify_state(self) -> None:
+    async def async_verify_state(
+        self, renew_connection: Callable[[SubZeroCoordinator], bool]
+    ) -> None:
         """Request a full push snapshot, falling back to a status read."""
         self.verification_stats["checks"] += 1
-        snapshots = self.push_stats["snapshots"]
+        snapshots = self._complete_snapshots
         snapshot = self._channel_snapshot = self.hass.loop.create_future()
+        opened = False
+        silent = False
         try:
             await self.client.open_channel(self.device_id)
+            opened = True
             async with asyncio.timeout(SNAPSHOT_TIMEOUT):
                 await snapshot
         except RateLimited:
@@ -153,7 +159,9 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             self.async_set_update_error(ConfigEntryAuthFailed(str(error)))
             self.entry.async_start_reauth(self.hass)
             return
-        except ApiError, TimeoutError:
+        except TimeoutError:
+            silent = opened
+        except ApiError:
             _LOGGER.debug("No verified push snapshot from %s; reading status", self.device["name"])
         finally:
             answered = snapshot.done() and not snapshot.cancelled()
@@ -161,15 +169,24 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             self._channel_snapshot = None
         if not answered:
             self.verification_stats["fallback_reads"] += 1
-            await self.async_refresh()
+            try:
+                data = await self._async_update_data()
+            except ConfigEntryAuthFailed as error:
+                self.async_set_update_error(error)
+                self.entry.async_start_reauth(self.hass)
+                return
+            except UpdateFailed as error:
+                if error.retry_after is None:
+                    self.async_set_update_error(error)
+                    self._read_failed(self)
+                return
+            self.async_set_updated_data(data)
         if self.last_update_success:
             self.verification_stats["last_success"] = dt_util.utcnow().isoformat()
-            if self.push_stats["snapshots"] == snapshots and not self._renewed:
+            if silent and self._complete_snapshots == snapshots and not self._renewed:
                 # A working status read with no push snapshot warrants one renewal
                 # until a full snapshot shows that this appliance is reporting again.
-                self._renewed = True
-                self.verification_stats["connection_renewals"] += 1
-                self.client.renew_connection()
+                self._renewed = renew_connection(self)
 
     @callback
     def async_add_event_listener(self, listener: Callable[[dict], None]) -> Callable[[], None]:
@@ -580,7 +597,8 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 self._read_updates.update(properties)
         self.push_stats["snapshots" if update.full else "updates"] += 1
         self.push_stats["last_received"] = dt_util.utcnow().isoformat()
-        if update.full:
+        if update.full and self.data.keys() <= properties.keys():
+            self._complete_snapshots += 1
             self._renewed = False
             if self._channel_snapshot is not None and not self._channel_snapshot.done():
                 self._channel_snapshot.set_result(None)
@@ -684,6 +702,7 @@ class SubZeroAccount:
         self._recoveries: dict[str, asyncio.Task] = {}
         self._verification_order = cycle(self.coordinators.values())
         self._verifications: dict[str, asyncio.Task] = {}
+        self._last_renewal: float | None = None
 
     async def async_setup(self) -> None:
         if not self.coordinators:
@@ -776,8 +795,23 @@ class SubZeroAccount:
         ):
             return
         self._verifications[coordinator.device_id] = self.entry.async_create_background_task(
-            self.hass, coordinator.async_verify_state(), "Sub-Zero state verification"
+            self.hass,
+            coordinator.async_verify_state(self._renew_connection),
+            "Sub-Zero state verification",
         )
+
+    @callback
+    def _renew_connection(self, coordinator: SubZeroCoordinator) -> bool:
+        now = time.monotonic()
+        if not self.client.push_connected or (
+            self._last_renewal is not None
+            and now - self._last_renewal < status_poll_interval(self.entry)
+        ):
+            return False
+        self._last_renewal = now
+        coordinator.verification_stats["connection_renewals"] += 1
+        self.client.renew_connection()
+        return True
 
     @callback
     def set_error(self, error: Exception) -> None:

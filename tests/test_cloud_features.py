@@ -1258,12 +1258,15 @@ async def test_dishwasher_cancel_needs_confirmation_but_not_remote_ready(hass, a
     ] * (1 if accept else 3)
 
 
-@pytest.mark.parametrize("delay_ends", [False, True])
-async def test_delayed_wash_cancel_requires_the_delay_to_end(hass, appliances, delay_ends):
+@pytest.mark.parametrize("confirmation", ["push", "read", "never"])
+async def test_delayed_wash_cancel_requires_the_delay_to_end(hass, appliances, confirmation):
     await appliances.update(
         "dishwasher",
         {"wash_cycle_on": False, "wash_status": 7, "delay_start_timer_active": True},
     )
+
+    delay_ends = confirmation != "never"
+    reads = appliances.client.state.await_count
 
     async def cancel(device_id, key, value):
         properties = {
@@ -1272,6 +1275,8 @@ async def test_delayed_wash_cancel_requires_the_delay_to_end(hass, appliances, d
             "delay_start_timer_active": not delay_ends,
         }
         appliances.states[device_id].update(properties)
+        if confirmation == "read":
+            properties = {"wash_cycle_on": False}
         await appliances.updates.put((device_id, StateUpdate(properties, full=False)))
 
     appliances.client.set_property.side_effect = cancel
@@ -1290,6 +1295,8 @@ async def test_delayed_wash_cancel_requires_the_delay_to_end(hass, appliances, d
     assert appliances.entry.runtime_data.coordinators["dishwasher"].data[
         "delay_start_timer_active"
     ] == (not delay_ends)
+    if confirmation == "read":
+        assert appliances.client.state.await_count == reads + 1
 
 
 async def test_dishwasher_cancel_follows_wash_status(hass, appliances):

@@ -607,7 +607,8 @@ class SubZeroClient:
 
     def renew_connection(self) -> None:
         """Recreate the notification connection within one ping interval."""
-        self._renewal_requested = True
+        if self.push_connected:
+            self._renewal_requested = True
 
     async def watch(
         self, device_ids: list[str]
