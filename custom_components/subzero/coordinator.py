@@ -130,6 +130,9 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self._history_seen = False
         self._channel_snapshot: asyncio.Future[None] | None = None
         self._renewed = False
+        self.confirmed_at: datetime | None = None
+        self._confirmation = 0
+        self.missing_state_keys: dict[str, list[str]] = {"snapshot": [], "read": []}
         self.verification_stats: dict[str, int | str | None] = {
             "checks": 0,
             "complete_snapshots": 0,
@@ -143,6 +146,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
     ) -> None:
         """Request a full push snapshot, falling back to a status read."""
         self.verification_stats["checks"] += 1
+        confirmation = self._confirmation
         snapshots = self.verification_stats["complete_snapshots"]
         snapshot = self._channel_snapshot = self.hass.loop.create_future()
         opened = False
@@ -184,8 +188,8 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 self._read_failed(self)
                 return
             self.async_set_updated_data(data)
-        if self.last_update_success:
-            self.verification_stats["last_success"] = dt_util.utcnow().isoformat()
+        if self.last_update_success and self._confirmation > confirmation:
+            self.verification_stats["last_success"] = self.confirmed_at.isoformat()
             if (
                 silent
                 and self.verification_stats["complete_snapshots"] == snapshots
@@ -194,6 +198,19 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 # A working status read with no push snapshot warrants one renewal
                 # until a full snapshot shows that this appliance is reporting again.
                 self._renewed = renew_connection(self)
+
+    @callback
+    def _confirm_state(self, properties: dict, source: str) -> bool:
+        model = properties.get("appliance_model")
+        required = (
+            self.data.keys() if model == self.data.get("appliance_model") else {"appliance_model"}
+        )
+        missing = self.missing_state_keys[source] = sorted(required - properties.keys())
+        if missing or not isinstance(model, str) or not model:
+            return False
+        self.confirmed_at = dt_util.utcnow()
+        self._confirmation += 1
+        return True
 
     @callback
     def async_add_event_listener(self, listener: Callable[[dict], None]) -> Callable[[], None]:
@@ -510,6 +527,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             self._read_updates = {}
             self._read_error = None
             try:
+                received = True
                 try:
                     data = await self.client.state(self.device_id)
                 except ApiError:
@@ -517,8 +535,12 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                     if not isinstance(model, str) or not model:
                         raise
                     data = self.data
+                    received = False
                 if error := self._read_error or self._channel_error:
                     raise error
+                model = self._read_updates.get("appliance_model")
+                if received and (not model or model == data.get("appliance_model")):
+                    self._confirm_state(data, "read")
                 self.unrecognized_keys.update(data.keys() - STATE_KEYS)
                 if "notifs" in data:
                     data = {**data, "notifs": notification_records(data)}
@@ -587,7 +609,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         if zone := clock_zone(update.properties.get("time")):
             self.clock_zone = zone
         properties = {key: value for key, value in update.properties.items() if key in STATE_KEYS}
-        complete_snapshot = update.full and self.data.keys() <= properties.keys()
+        complete_snapshot = update.full and self._confirm_state(properties, "snapshot")
         if "appliance_type" in properties and appliance_type(properties) is None:
             # Like the app, an unusable type does not replace the known one.
             del properties["appliance_type"]
