@@ -129,10 +129,10 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self._event_listeners: list[Callable[[dict], None]] = []
         self._history_seen = False
         self._channel_snapshot: asyncio.Future[None] | None = None
-        self._complete_snapshots = 0
         self._renewed = False
         self.verification_stats: dict[str, int | str | None] = {
             "checks": 0,
+            "complete_snapshots": 0,
             "fallback_reads": 0,
             "connection_renewals": 0,
             "last_success": None,
@@ -143,7 +143,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
     ) -> None:
         """Request a full push snapshot, falling back to a status read."""
         self.verification_stats["checks"] += 1
-        snapshots = self._complete_snapshots
+        snapshots = self.verification_stats["complete_snapshots"]
         snapshot = self._channel_snapshot = self.hass.loop.create_future()
         opened = False
         silent = False
@@ -175,15 +175,22 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 self.async_set_update_error(error)
                 self.entry.async_start_reauth(self.hass)
                 return
-            except UpdateFailed as error:
-                if error.retry_after is None:
-                    self.async_set_update_error(error)
-                    self._read_failed(self)
+            except Exception as error:
+                if isinstance(error, UpdateFailed) and error.retry_after is not None:
+                    return
+                if not isinstance(error, UpdateFailed):
+                    _LOGGER.exception("Sub-Zero state verification failed unexpectedly")
+                self.async_set_update_error(error)
+                self._read_failed(self)
                 return
             self.async_set_updated_data(data)
         if self.last_update_success:
             self.verification_stats["last_success"] = dt_util.utcnow().isoformat()
-            if silent and self._complete_snapshots == snapshots and not self._renewed:
+            if (
+                silent
+                and self.verification_stats["complete_snapshots"] == snapshots
+                and not self._renewed
+            ):
                 # A working status read with no push snapshot warrants one renewal
                 # until a full snapshot shows that this appliance is reporting again.
                 self._renewed = renew_connection(self)
@@ -580,6 +587,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         if zone := clock_zone(update.properties.get("time")):
             self.clock_zone = zone
         properties = {key: value for key, value in update.properties.items() if key in STATE_KEYS}
+        complete_snapshot = update.full and self.data.keys() <= properties.keys()
         if "appliance_type" in properties and appliance_type(properties) is None:
             # Like the app, an unusable type does not replace the known one.
             del properties["appliance_type"]
@@ -597,8 +605,8 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 self._read_updates.update(properties)
         self.push_stats["snapshots" if update.full else "updates"] += 1
         self.push_stats["last_received"] = dt_util.utcnow().isoformat()
-        if update.full and self.data.keys() <= properties.keys():
-            self._complete_snapshots += 1
+        if complete_snapshot:
+            self.verification_stats["complete_snapshots"] += 1
             self._renewed = False
             if self._channel_snapshot is not None and not self._channel_snapshot.done():
                 self._channel_snapshot.set_result(None)

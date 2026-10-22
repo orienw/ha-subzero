@@ -299,6 +299,61 @@ async def test_rate_limited_verification_read_preserves_available_state(hass, lo
     client.renew_connection.assert_not_called()
 
 
+async def test_verification_snapshot_keeps_a_known_type_when_the_pushed_type_is_unusable(
+    hass, loaded, monkeypatch
+):
+    entry, client, updates, _, _ = loaded
+    monkeypatch.setattr("custom_components.subzero.coordinator.SNAPSHOT_TIMEOUT", 0)
+    client.state.return_value["appliance_type"] = "1.2.6.0"
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    await coordinator.async_refresh()
+    reads = client.state.await_count
+
+    async def open_channel(device_id):
+        await updates.put(
+            StateUpdate({**client.state.return_value, "appliance_type": "bad"}, full=True)
+        )
+        await hass.async_block_till_done()
+
+    client.open_channel.side_effect = open_channel
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=301))
+    await hass.async_block_till_done()
+    await entry.runtime_data._verifications["test-fridge"]
+    assert coordinator.data["appliance_type"] == "1.2.6.0"
+    assert coordinator.verification_stats["fallback_reads"] == 0
+    assert client.state.await_count == reads
+    client.renew_connection.assert_not_called()
+
+
+async def test_verification_handles_a_stream_failure_during_its_status_read(
+    hass, loaded, monkeypatch
+):
+    entry, client, updates, disconnected, _ = loaded
+    monkeypatch.setattr("custom_components.subzero.coordinator.SNAPSHOT_TIMEOUT", 0)
+    client.push_connected = True
+    reading = asyncio.Event()
+    release = asyncio.Event()
+
+    async def state(device_id):
+        reading.set()
+        await release.wait()
+        return dict(client.state.return_value)
+
+    client.state.side_effect = state
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=301))
+    await hass.async_block_till_done()
+    await asyncio.wait_for(reading.wait(), 1)
+    client.push_connected = False
+    await updates.put(RuntimeError("Unexpected stream failure"))
+    await disconnected.wait()
+    await hass.async_block_till_done()
+    release.set()
+    task = entry.runtime_data._verifications["test-fridge"]
+    await task
+    assert task.exception() is None
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "unavailable"
+
+
 async def test_rejected_verification_reopen_does_not_renew(hass, loaded):
     entry, client, _, _, _ = loaded
     client.open_channel.side_effect = ApiError("The appliance rejected opening its update channel.")
