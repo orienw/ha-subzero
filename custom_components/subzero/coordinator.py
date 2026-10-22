@@ -317,8 +317,8 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
 
     @callback
     def _process_events(self, properties: dict, *, history: bool) -> None:
-        # The first snapshot or status read only sets the baseline, so an
-        # appliance clock running ahead cannot replay events from before loading.
+        # The first snapshot or status read sets the baseline, even without history.
+        # Later history still passes through the startup timestamp cutoff.
         deliver = self._history_seen or not history
         self._history_seen |= history
         events = {}
@@ -700,8 +700,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 self.async_set_update_error(error)
             return result
         self.async_set_updated_data(data)
-        if "notifs" in data:
-            self._process_events(data, history=True)
+        self._process_events(data, history=True)
         confirmed = self.confirmed_at if self._confirmation > confirmation else None
         result = self._completed_read = StateRead(request, confirmed, published=self._published)
         return result
@@ -881,7 +880,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 or not self.last_update_success
             ):
                 self.async_set_updated_data(updated)
-        if "notifs" in properties:
+        if update.full or "notifs" in properties:
             self._process_events(properties, history=update.full)
 
 

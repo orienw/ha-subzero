@@ -213,14 +213,13 @@ async def test_reload_baselines_previously_received_events(hass, cloud_appliance
     assert not event_changes(events)
 
 
-async def test_first_history_is_a_baseline_even_from_a_fast_clock(hass, cloud_appliance):
-    del cloud_appliance.state["notifs"]
+async def test_startup_history_is_a_baseline_even_from_a_fast_clock(hass, cloud_appliance):
+    ahead = dt_util.utcnow() + timedelta(minutes=5)
+    cloud_appliance.state["notifs"] = [record(1, 201, ahead)]
     await hass.config_entries.async_reload(cloud_appliance.entry.entry_id)
     await hass.async_block_till_done()
     events = async_capture_events(hass, "state_changed")
     coordinator = cloud_appliance.entry.runtime_data.coordinators["appliance"]
-    ahead = dt_util.utcnow() + timedelta(minutes=5)
-    cloud_appliance.state["notifs"] = [record(1, 201, ahead)]
     await coordinator.async_refresh()
     await hass.async_block_till_done()
     assert not event_changes(events)

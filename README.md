@@ -157,9 +157,9 @@ The integration creates its own alert subscription identity. Disabling alerts or
 
 The event entity keeps its last occurrence when the connection drops. Events found during a status read are delivered immediately, including while the push connection is recovering.
 
-Startup history is not replayed. The first snapshot or status read after loading only sets a baseline, so events reported while the integration starts do not fire, even when the appliance clock runs ahead. While the integration is loaded, repeated notifications and reconnect history are deduplicated, including when the appliance resets its sequence counter. Events from before the integration loaded are ignored; events that occur while Home Assistant is stopped do not trigger automations on startup. Event timestamps without an offset are read in the appliance clock's time zone, as described above.
+History included in the first snapshot or status read after loading only sets a baseline and is not replayed, even when the appliance clock runs ahead. If that observation omits history, later records are filtered by the startup timestamp, so new alerts are still delivered. While the integration is loaded, repeated notifications and reconnect history are deduplicated, including when the appliance resets its sequence counter. Event timestamps without an offset are read in the appliance clock's time zone, as described above.
 
-Replay protection relies on the appliance clock. A clock five minutes behind Home Assistant can suppress the first five minutes of live events after a reload. If the clock moves backward, events can also be ignored until it catches up with the retained history cutoff.
+Replay protection relies on the appliance clock. When the initial observation omits history, a clock running ahead can make an older alert look new. A clock five minutes behind Home Assistant can suppress the first five minutes of live events after a reload. If the clock moves backward, events can also be ignored until it catches up with the retained history cutoff.
 
 ## Diagnostics
 

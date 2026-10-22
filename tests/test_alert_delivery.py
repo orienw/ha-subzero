@@ -58,6 +58,38 @@ async def test_an_alert_during_the_last_followup_read_starts_a_new_window(hass, 
     assert coordinator._followup_task is None
 
 
+@pytest.mark.parametrize("startup_source", ["read", "snapshot"])
+@pytest.mark.parametrize("history_source", ["read", "snapshot"])
+async def test_historyless_startup_keeps_later_alerts(
+    hass, freezer, loaded, startup_source, history_source
+):
+    entry, client, updates, _, _ = loaded
+    assert "notifs" not in client.state.return_value
+    if startup_source == "snapshot":
+        await hass.config_entries.async_unload(entry.entry_id)
+        client.state.reset_mock()
+        await updates.put(StateUpdate(dict(client.state.return_value), full=True))
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        client.state.assert_not_awaited()
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    observed = []
+    coordinator.async_add_event_listener(observed.append)
+    started = dt_util.utcnow()
+    freezer.tick(60)
+    client.state.return_value["notifs"] = [
+        door_alert(started - timedelta(seconds=1), 1),
+        door_alert(dt_util.utcnow(), 2),
+    ]
+    for _ in range(2):
+        if history_source == "snapshot":
+            await updates.put(StateUpdate(dict(client.state.return_value), full=True))
+        else:
+            await coordinator.async_read_status()
+        await hass.async_block_till_done()
+    assert [(event["sequence"], event["source"]) for event in observed] == [(2, "history")]
+
+
 @pytest.mark.parametrize("failure", ["none", "failed_read", "rate_limited", "reconnect"])
 async def test_channel_alert_then_missed_door_close(hass, freezer, loaded, monkeypatch, failure):
     """The reported workflow: a door alert, then the door closes and the channel never says so.
