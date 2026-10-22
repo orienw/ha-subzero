@@ -1,6 +1,7 @@
 """Completed observations, freshness and independent state recovery."""
 
 import asyncio
+import logging
 from datetime import timedelta
 from unittest.mock import Mock
 
@@ -27,6 +28,38 @@ async def test_partial_push_does_not_confirm_unchanged_properties(hass, loaded, 
     await updates.put(StateUpdate({"ref_set_temp": 39}, full=False))
     await hass.async_block_till_done()
     assert coordinator.confirmed_at == confirmed
+
+
+async def test_debug_logs_distinguish_observed_and_published_state_without_private_values(
+    hass, loaded, caplog
+):
+    entry, client, _, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    caplog.set_level(logging.DEBUG, logger="custom_components.subzero.coordinator")
+    caplog.clear()
+
+    async def read(_device_id):
+        coordinator.apply_update(StateUpdate({"ref_door_ajar": True}, full=False))
+        return {
+            **client.state.return_value,
+            "ap_ssid": "redact-network",
+            "appliance_serial": "redact-serial",
+            "unknown_token": "redact-token",
+            "version": {"secret": "redact-nested"},
+        }
+
+    client.state.side_effect = read
+    await coordinator.async_read_status()
+    replies = [record.message for record in caplog.records if "status response" in record.message]
+    publications = [
+        record.message for record in caplog.records if "state published" in record.message
+    ]
+    assert len(replies) == 1
+    assert "'ref_door_ajar': False" in replies[0]
+    assert "'ref_door_ajar': True" in publications[-1]
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
+    for private in ("redact-network", "redact-serial", "redact-token", "redact-nested"):
+        assert private not in caplog.text
 
 
 @pytest.mark.parametrize("complete", [False, True])

@@ -108,6 +108,14 @@ def selected_devices(entry: ConfigEntry) -> dict[str, dict]:
     return entry.options.get("devices", entry.data["devices"])
 
 
+def _state_for_log(properties: dict) -> dict:
+    return {
+        key: value
+        for key, value in properties.items()
+        if key in STATE_KEYS and key not in PRIVATE_KEYS and not isinstance(value, dict | list)
+    }
+
+
 class SubZeroCoordinator(DataUpdateCoordinator[dict]):
     def __init__(
         self,
@@ -252,6 +260,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self._published += 1
         active = self._active_conditions()
         super().async_set_updated_data(data)
+        _LOGGER.debug("%s state published: %s", self.device["name"], _state_for_log(self.data))
         updated = self._active_conditions()
         if updated - active and self.entry.state is ConfigEntryState.LOADED:
             self.async_schedule_followup()
@@ -721,14 +730,29 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             self._read_error = None
             try:
                 received = True
+                started = time.monotonic()
+                _LOGGER.debug("Reading status for %s", self.device["name"])
                 try:
                     data = await self.client.state(self.device_id)
-                except ApiError:
+                except ApiError as error:
+                    _LOGGER.debug(
+                        "%s status request failed after %.3fs: %s",
+                        self.device["name"],
+                        time.monotonic() - started,
+                        type(error).__name__,
+                    )
                     model = self._read_updates.get("appliance_model")
                     if not isinstance(model, str) or not model:
                         raise
                     data = self.data
                     received = False
+                else:
+                    _LOGGER.debug(
+                        "%s status response after %.3fs: %s",
+                        self.device["name"],
+                        time.monotonic() - started,
+                        _state_for_log(data),
+                    )
                 if error := self._read_error:
                     raise error
                 model = self._read_updates.get("appliance_model")
@@ -830,11 +854,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             "%s %s: %s",
             self.device["name"],
             "snapshot" if update.full else "update",
-            {
-                key: value
-                for key, value in properties.items()
-                if key not in PRIVATE_KEYS and not isinstance(value, dict | list)
-            },
+            _state_for_log(properties),
         )
         if self.last_update_success or update.full:
             replace = update.full and (

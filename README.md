@@ -169,7 +169,7 @@ Download diagnostics from the integration or individual device page. Downloads u
 
 Integration diagnostics count appliance notifications received, ignored, or invalid since the last reload. Heartbeats are excluded from the received count. Each appliance also records parsed snapshots and updates, with the time of the last one, and the time of the last message from its update channel, including messages without state. These counts help distinguish incoming messages from a connection that only receives heartbeats; they do not prove every state change was received or applied.
 
-Enable debug logging for `custom_components.subzero` to record channel-open attempts, notification types and payload key names, and parsed state updates. State values exclude network identifiers and nested objects.
+Enable debug logging for `custom_components.subzero` to record channel-open attempts, notification types and payload key names, parsed state updates, status response timing and values, and published coordinator state. This separates what the cloud returned from the state applied after concurrent updates. Logged state values include only recognized scalar properties, excluding network identifiers.
 
 ## Compatibility
 
