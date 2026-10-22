@@ -6,8 +6,10 @@ from datetime import timedelta
 from unittest.mock import Mock
 
 import pytest
+from homeassistant.config_entries import RELOAD_AFTER_UPDATE_DELAY
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.update_coordinator import UpdateFailed
 from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
@@ -17,6 +19,17 @@ from custom_components.subzero.api import ApiError, RateLimited, StateUpdate
 from tests.test_integration import loaded as loaded
 
 pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
+
+
+@pytest.fixture
+async def enabled_confirmation_sensor(hass, loaded, freezer):
+    entity_id = "sensor.kitchen_state_confirmed"
+    er.async_get(hass).async_update_entity(entity_id, disabled_by=None)
+    await hass.async_block_till_done()
+    freezer.tick(RELOAD_AFTER_UPDATE_DELAY + 1)
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+    return entity_id
 
 
 async def test_partial_push_does_not_confirm_unchanged_properties(hass, loaded, freezer):
@@ -282,13 +295,15 @@ async def test_explicit_confirmation_fails_instead_of_trusting_cached_state(load
     assert coordinator.confirmed_at == confirmed
 
 
-async def test_confirmation_sensor_keeps_the_last_observation_when_offline(hass, loaded):
+async def test_confirmation_sensor_keeps_the_last_observation_when_offline(
+    hass, loaded, enabled_confirmation_sensor
+):
     entry, _, _, _, _ = loaded
     coordinator = entry.runtime_data.coordinators["test-fridge"]
-    timestamp = hass.states.get("sensor.kitchen_state_confirmed").state
+    timestamp = hass.states.get(enabled_confirmation_sensor).state
     assert timestamp == coordinator.confirmed_at.replace(microsecond=0).isoformat()
     coordinator.async_set_update_error(ApiError("Offline"))
-    assert hass.states.get("sensor.kitchen_state_confirmed").state == timestamp
+    assert hass.states.get(enabled_confirmation_sensor).state == timestamp
 
 
 async def test_scheduled_reads_continue_when_push_is_disconnected(hass, loaded, freezer):
@@ -308,7 +323,7 @@ async def test_scheduled_reads_continue_when_push_is_disconnected(hass, loaded, 
 
 
 async def test_rate_limited_checks_leave_confirmation_age_unchanged(
-    hass, loaded, freezer, monkeypatch
+    hass, loaded, freezer, monkeypatch, enabled_confirmation_sensor
 ):
     entry, client, updates, _, _ = loaded
     coordinator = entry.runtime_data.coordinators["test-fridge"]
@@ -325,7 +340,7 @@ async def test_rate_limited_checks_leave_confirmation_age_unchanged(
         await hass.async_block_till_done()
     assert coordinator.confirmed_at == confirmed
     assert (
-        hass.states.get("sensor.kitchen_state_confirmed").state
+        hass.states.get(enabled_confirmation_sensor).state
         == confirmed.replace(microsecond=0).isoformat()
     )
     with pytest.raises(HomeAssistantError):

@@ -116,6 +116,11 @@ async def test_reported_properties_drive_entity_discovery(hass, loaded):
     }
     assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "38"
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
+    assert (
+        registry.async_get("sensor.kitchen_state_confirmed").disabled_by
+        is er.RegistryEntryDisabler.INTEGRATION
+    )
+    assert hass.states.get("sensor.kitchen_state_confirmed") is None
     coordinator = entry.runtime_data.coordinators["test-fridge"]
     assert "ap_ssid" not in coordinator.data
     device = dr.async_get(hass).async_get_device_by_identifier(
@@ -1449,6 +1454,7 @@ async def test_oven_entities_follow_the_reported_snapshot(hass, oven_loaded):
     assert len(entities) == 27
     assert {entity.unique_id for entity in entities if entity.disabled_by is not None} == {
         "test-oven_live_reporting_mode",
+        "test-oven_state_confirmed_at",
     }
     assert hass.states.get("switch.wall_oven_oven_light").state == "off"
     assert hass.states.get("binary_sensor.wall_oven_cooking").state == "off"
