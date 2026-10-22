@@ -49,6 +49,12 @@ ENUM_VALUES = {
 }
 # Entities write state in this order within one update, and automations can observe it.
 DESCRIPTIONS = (
+    SensorEntityDescription(
+        key="state_confirmed_at",
+        name="State confirmed",
+        device_class=SensorDeviceClass.TIMESTAMP,
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
     *(
         SensorEntityDescription(
             key=key,
@@ -297,7 +303,10 @@ async def async_setup_entry(
         DESCRIPTIONS,
         SubZeroSensor,
         lambda coordinator, description: (
-            (description.key == "live_reporting_mode" or description.key in coordinator.data)
+            (
+                description.key in {"live_reporting_mode", "state_confirmed_at"}
+                or description.key in coordinator.data
+            )
             and (
                 description.device_class != SensorDeviceClass.TEMPERATURE
                 or coordinator.device.get("temperature_unit") in ("F", "C")
@@ -347,11 +356,16 @@ async def async_setup_entry(
 class SubZeroSensor(SubZeroEntity, SensorEntity):
     @property
     def available(self) -> bool:
-        return self.entity_description.key == "live_reporting_mode" or super().available
+        return (
+            self.entity_description.key in {"live_reporting_mode", "state_confirmed_at"}
+            or super().available
+        )
 
     @property
     def native_value(self) -> int | float | str | datetime | None:
         key = self.entity_description.key
+        if key == "state_confirmed_at":
+            return self.coordinator.confirmed_at
         if key == "live_reporting_mode":
             return (
                 "Cloud push"

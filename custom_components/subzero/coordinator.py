@@ -6,6 +6,7 @@ import random
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, tzinfo
 from itertools import cycle
 
@@ -71,6 +72,13 @@ INITIAL_STATE_TIMEOUT = 16
 SNAPSHOT_TIMEOUT = 16
 
 
+@dataclass(frozen=True)
+class StateRead:
+    request: int
+    confirmed_at: datetime | None
+    error: Exception | None = None
+
+
 def status_poll_interval(entry: ConfigEntry) -> int:
     interval = entry.options.get("status_poll_interval", DEFAULT_STATUS_POLL_INTERVAL)
     return interval if interval in STATUS_POLL_INTERVALS else DEFAULT_STATUS_POLL_INTERVAL
@@ -121,6 +129,8 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self._command_lock = asyncio.Lock()
         self._unsettled = False
         self._state_lock = asyncio.Lock()
+        self._read_requests = 0
+        self._read_task: asyncio.Task[StateRead] | None = None
         self._read_updates: dict | None = None
         self._read_error: Exception | None = None
         self._channel_error: ApiError | None = None
@@ -152,10 +162,11 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         opened = False
         silent = False
         try:
-            await self.client.open_channel(self.device_id)
-            opened = True
-            async with asyncio.timeout(SNAPSHOT_TIMEOUT):
-                await snapshot
+            if self.client.push_connected:
+                await self.client.open_channel(self.device_id)
+                opened = True
+                async with asyncio.timeout(SNAPSHOT_TIMEOUT):
+                    await snapshot
         except RateLimited:
             # The client also holds off other requests until Retry-After expires.
             return
@@ -510,12 +521,59 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         )
 
     async def async_request_refresh(self) -> None:
-        """Finish a requested status read even if the caller is cancelled."""
-        await asyncio.shield(
-            self.entry.async_create_background_task(
-                self.hass, super().async_request_refresh(), "Sub-Zero status request"
-            )
-        )
+        """Wait for a completed read rather than a debounced request."""
+        await self.async_read_status()
+
+    async def async_read_status(self) -> datetime:
+        """Confirm state with a read that starts after this call."""
+        result = await self._async_read_result()
+        if error := result.error:
+            if isinstance(error, ConfigEntryAuthFailed):
+                self.entry.async_start_reauth(self.hass)
+            else:
+                self._read_failed(self)
+            raise HomeAssistantError(str(error)) from error
+        if result.confirmed_at is None:
+            raise HomeAssistantError("The appliance did not return a complete state snapshot.")
+        return result.confirmed_at
+
+    async def _async_read_result(self) -> StateRead:
+        self._read_requests += 1
+        request = self._read_requests
+        while True:
+            task = self._read_task
+            if task is None or task.done() and task.result().request < request:
+                task = self._read_task = self.entry.async_create_background_task(
+                    self.hass, self._async_read_state(), "Sub-Zero state read"
+                )
+                task.add_done_callback(self._async_read_finished)
+            result = await asyncio.shield(task)
+            if result.request >= request:
+                return result
+
+    async def _async_read_state(self) -> StateRead:
+        request = self._read_requests
+        confirmation = self._confirmation
+        try:
+            data = await self._async_fetch_state()
+        except Exception as error:
+            if not isinstance(error, UpdateFailed) or error.retry_after is None:
+                self.async_set_update_error(error)
+            return StateRead(request, None, error)
+        self.async_set_updated_data(data)
+        if "notifs" in data:
+            self._process_events(data, history=True)
+        confirmed = self.confirmed_at if self._confirmation > confirmation else None
+        return StateRead(request, confirmed)
+
+    @callback
+    def _async_read_finished(self, task: asyncio.Task[StateRead]) -> None:
+        if task.cancelled() or (error := task.result().error) is None:
+            return
+        if isinstance(error, ConfigEntryAuthFailed):
+            self.entry.async_start_reauth(self.hass)
+        else:
+            self._read_failed(self)
 
     @callback
     def _async_refresh_finished(self) -> None:
@@ -523,6 +581,12 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             self._read_failed(self)
 
     async def _async_update_data(self) -> dict:
+        result = await self._async_read_result()
+        if result.error is not None:
+            raise result.error
+        return self.data
+
+    async def _async_fetch_state(self) -> dict:
         async with self._state_lock:
             self._read_updates = {}
             self._read_error = None
@@ -536,7 +600,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                         raise
                     data = self.data
                     received = False
-                if error := self._read_error or self._channel_error:
+                if error := self._read_error:
                     raise error
                 model = self._read_updates.get("appliance_model")
                 if received and (not model or model == data.get("appliance_model")):
@@ -544,7 +608,6 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 self.unrecognized_keys.update(data.keys() - STATE_KEYS)
                 if "notifs" in data:
                     data = {**data, "notifs": notification_records(data)}
-                    self._process_events(data, history=True)
                 model = self._read_updates.get("appliance_model")
                 if isinstance(model, str) and model and model != data.get("appliance_model"):
                     data = {}
@@ -818,8 +881,7 @@ class SubZeroAccount:
         pending = self._verifications.get(coordinator.device_id)
         if (
             self.entry.pref_disable_polling
-            or not self.client.push_connected
-            or not coordinator.last_update_success
+            or isinstance(coordinator.last_exception, ConfigEntryAuthFailed | InvalidAuth)
             or pending is not None
             and not pending.done()
         ):
@@ -846,7 +908,8 @@ class SubZeroAccount:
     @callback
     def set_error(self, error: Exception) -> None:
         for coordinator in self.coordinators.values():
-            coordinator._read_error = error
+            if isinstance(error, InvalidAuth):
+                coordinator._read_error = error
             coordinator.async_set_update_error(error)
         for ready in self._initial_states.values():
             ready.set()
@@ -861,11 +924,9 @@ class SubZeroAccount:
 
     @callback
     def _read_failed(self, coordinator: SubZeroCoordinator) -> None:
-        # With the channel open, no reconnect will prompt a recovery read.
         if (
-            coordinator._channel_error is None
-            and self.client.push_connected
-            and self.entry.state is ConfigEntryState.LOADED
+            self.entry.state is ConfigEntryState.LOADED
+            and not coordinator.last_update_success
             and not isinstance(coordinator.last_exception, ConfigEntryAuthFailed)
         ):
             self._start_recovery(coordinator)
@@ -889,7 +950,6 @@ class SubZeroAccount:
                         if ready := self._initial_states.get(device_id):
                             ready.set()
                     if isinstance(update, ApiError):
-                        coordinator._read_error = update
                         coordinator._channel_error = update
                         coordinator.async_set_update_error(update)
                     elif isinstance(update, ChannelOpened):
@@ -912,6 +972,9 @@ class SubZeroAccount:
             except InvalidAuth as error:
                 self.set_error(error)
                 self.entry.async_start_reauth(self.hass)
+                for recovery in recoveries.values():
+                    recovery.cancel()
+                    canceled.add(recovery)
                 return
             except ApiError as error:
                 self.set_error(error)
@@ -921,12 +984,8 @@ class SubZeroAccount:
                 self.set_error(error)
                 retry_after = 0
             finally:
-                pending = {*recoveries.values(), *canceled}
-                for recovery in pending:
-                    recovery.cancel()
-                if pending:
-                    await asyncio.gather(*pending, return_exceptions=True)
-                recoveries.clear()
+                if canceled:
+                    await asyncio.gather(*canceled, return_exceptions=True)
             if time.monotonic() - started >= 120:
                 backoff = RECONNECT_DELAY
             await asyncio.sleep(max(backoff, retry_after) + random.uniform(0, 5))

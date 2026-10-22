@@ -111,6 +111,7 @@ async def test_reported_properties_drive_entity_discovery(hass, loaded):
         "test-fridge_ref_set_temp",
         "test-fridge_ref_door_ajar",
         "test-fridge_live_reporting_mode",
+        "test-fridge_state_confirmed_at",
         "test-fridge_active_faults",
     }
     assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "38"
@@ -351,7 +352,7 @@ async def test_verification_handles_a_stream_failure_during_its_status_read(
     task = entry.runtime_data._verifications["test-fridge"]
     await task
     assert task.exception() is None
-    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "unavailable"
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
 
 
 async def test_rejected_verification_reopen_does_not_renew(hass, loaded):
@@ -546,7 +547,7 @@ async def test_startup_push_survives_a_pending_status_read_failure(hass, loaded)
     assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "38"
 
 
-async def test_startup_status_does_not_hide_a_rejected_channel(hass, loaded):
+async def test_startup_status_can_restore_state_despite_a_rejected_channel(hass, loaded):
     entry, client, _, _, _ = loaded
     updates = asyncio.Queue()
     delivered = asyncio.Event()
@@ -569,9 +570,9 @@ async def test_startup_status_does_not_hide_a_rejected_channel(hass, loaded):
     client.state.side_effect = state
     await hass.config_entries.async_reload(entry.entry_id)
     await hass.async_block_till_done()
-    assert entry.state is ConfigEntryState.SETUP_RETRY
-    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "unavailable"
-    assert closed.is_set()
+    assert entry.state is ConfigEntryState.LOADED
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
+    assert not closed.is_set()
 
 
 async def test_startup_stream_auth_failure_stops_before_status_reads(hass, loaded):
@@ -987,7 +988,7 @@ async def test_failed_status_read_leaves_recovery_to_the_connection(hass, loaded
     await hass.async_block_till_done()
     entry.mock_state(hass, ConfigEntryState.LOADED)
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "unavailable"
-    assert client.state.await_count == 2
+    assert client.state.await_count == (3 if cause in {"push_closed", "channel_error"} else 2)
 
 
 async def test_failed_setup_read_leaves_recovery_to_setup_retry(hass, loaded):
@@ -1030,36 +1031,34 @@ async def test_recovery_preserves_incoming_updates_and_other_appliances(hass, ov
     assert entry.runtime_data.coordinators["test-oven"].push_stats["snapshots"] == 0
 
 
-async def test_canceling_one_recovery_does_not_block_other_appliance_updates(hass, oven_loaded):
+async def test_stream_errors_do_not_cancel_shared_reads_or_block_other_appliances(
+    hass, oven_loaded
+):
     _, client, updates = oven_loaded
-    reading = asyncio.Event()
-    canceling = asyncio.Event()
-    cleanup = asyncio.Event()
+    reading, release, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
     async def state(device_id):
         assert device_id == "test-oven"
         reading.set()
         try:
-            await asyncio.Event().wait()
+            await release.wait()
+            return {"appliance_model": "SO3050PMSP", "cav_light_on": True}
         except asyncio.CancelledError:
-            canceling.set()
-            await cleanup.wait()
+            cancelled.set()
             raise
 
     client.state.side_effect = state
     await updates.put(("test-oven", ApiError("Disconnected")))
     await updates.put(("test-oven", ChannelOpened()))
     await reading.wait()
-    try:
-        await updates.put(("test-oven", ApiError("Channel lost")))
-        await canceling.wait()
-        await updates.put(StateUpdate({"ref_door_ajar": True}, full=False))
-        await hass.async_block_till_done()
-        assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
-        assert hass.states.get("switch.wall_oven_oven_light").state == "unavailable"
-    finally:
-        cleanup.set()
-        await hass.async_block_till_done()
+    await updates.put(("test-oven", ApiError("Channel lost")))
+    await updates.put(StateUpdate({"ref_door_ajar": True}, full=False))
+    await hass.async_block_till_done()
+    assert not cancelled.is_set()
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
+    release.set()
+    await hass.async_block_till_done()
+    assert hass.states.get("switch.wall_oven_oven_light").state == "on"
 
 
 @pytest.mark.parametrize(
@@ -1090,17 +1089,20 @@ async def test_failed_recovery_retries_with_backoff(hass, loaded, monkeypatch, e
 
 
 @pytest.mark.parametrize("finish", ["snapshot", "disconnect", "channel_error", "unload"])
-async def test_recovery_cannot_overwrite_newer_state_or_outlive_connection(hass, loaded, finish):
+async def test_shared_recovery_read_survives_stream_changes_and_stops_on_unload(
+    hass, loaded, finish
+):
     entry, client, updates, _, _ = loaded
-    reading = asyncio.Event()
-    cancelled = asyncio.Event()
+    reading, release, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
     async def state(device_id):
         reading.set()
         try:
-            await asyncio.Event().wait()
-        finally:
+            await release.wait()
+            return dict(client.state.return_value)
+        except asyncio.CancelledError:
             cancelled.set()
+            raise
 
     client.state.side_effect = state
     await updates.put(("test-fridge", ApiError("Disconnected")))
@@ -1109,21 +1111,22 @@ async def test_recovery_cannot_overwrite_newer_state_or_outlive_connection(hass,
     assert reading.is_set()
     if finish == "unload":
         await hass.config_entries.async_unload(entry.entry_id)
-    elif finish == "snapshot":
+        assert cancelled.is_set()
+        return
+    if finish == "snapshot":
         await updates.put(
             StateUpdate({"appliance_model": "ANOTHER-MODEL", "ref_door_ajar": True}, full=True)
         )
     else:
         error = ApiError("Disconnected again")
         await updates.put(error if finish == "disconnect" else ("test-fridge", error))
-    async with asyncio.timeout(1):
-        await cancelled.wait()
     await hass.async_block_till_done()
-    assert cancelled.is_set()
-    if finish != "unload":
-        assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == (
-            "on" if finish == "snapshot" else "unavailable"
-        )
+    assert not cancelled.is_set()
+    release.set()
+    await hass.async_block_till_done()
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == (
+        "on" if finish == "snapshot" else "off"
+    )
 
 
 async def test_recovery_auth_failure_starts_reauthentication(hass, loaded):
@@ -1443,7 +1446,7 @@ async def test_oven_entities_follow_the_reported_snapshot(hass, oven_loaded):
     entities = er.async_entries_for_device(
         er.async_get(hass), device.id, include_disabled_entities=True
     )
-    assert len(entities) == 26
+    assert len(entities) == 27
     assert {entity.unique_id for entity in entities if entity.disabled_by is not None} == {
         "test-oven_live_reporting_mode",
     }
