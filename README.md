@@ -165,7 +165,7 @@ Replay protection relies on the appliance clock. A clock five minutes behind Hom
 
 Wi-Fi signal strength and **State confirmed** are enabled by default. Uptime, IP address, MAC address, and live reporting mode are diagnostic sensors disabled by default. Enable them from the entity settings when needed. Appliances cut their uptime to eight characters, so from 100 hours it is accurate to ten seconds, and from 1,000 hours to the minute.
 
-Download diagnostics from the integration or individual device page. Downloads use the cached appliance state and omit account credentials, appliance names, serial numbers, and network identifiers. They also list unrecognized state key names, without their values.
+Download diagnostics from the integration or individual device page. Downloads use the cached appliance state and omit account credentials, appliance names, serial numbers, and network identifiers. They also list unrecognized state key names, without their values. The integration download records when the notification connection completed its handshake and when it last received any frame, heartbeats included, so a quiet channel can be told apart from a dead connection.
 
 Integration diagnostics count appliance notifications received, ignored, or invalid since the last reload. Heartbeats are excluded from the received count. Each appliance also records parsed snapshots and updates, with the time of the last one, and the time of the last message from its update channel, including messages without state. These counts help distinguish incoming messages from a connection that only receives heartbeats; they do not prove every state change was received or applied.
 

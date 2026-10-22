@@ -1208,6 +1208,41 @@ async def test_notification_counts_include_dropped_messages_but_not_heartbeats(n
     assert set(client.last_messages) == {"test-fridge"}
 
 
+async def test_connection_diagnostics_record_handshake_and_heartbeats(notification_stream):
+    client, stream, frames, _ = notification_stream
+    assert client.notification_stats["connected_at"] is None
+    frames.append('{"type":6}' + api.SEPARATOR)
+    frames.append(json.dumps(notification({"ref_door_ajar": True})) + api.SEPARATOR)
+    async with asyncio.timeout(5):
+        assert (await anext(stream))[1].properties == {"ref_door_ajar": True}
+    stats = client.notification_stats
+    assert stats["connected_at"] is not None
+    # A frame is recorded as it arrives and parsed afterwards.
+    assert stats["connected_at"] <= stats["last_frame_received"] <= stats["last_received"]
+    assert client.push_connected
+
+
+@pytest.mark.parametrize("previous_frame", [None, "2000-01-01T00:00:00+00:00"])
+async def test_handshake_payload_refreshes_connection_frame_timestamp(
+    notification_stream, monkeypatch, previous_frame
+):
+    client, stream, _, _ = notification_stream
+    original_send = web.WebSocketResponse.send_str
+
+    async def send(socket, data, **kwargs):
+        if data == "{}" + api.SEPARATOR:
+            data += json.dumps(notification({"ref_door_ajar": False})) + api.SEPARATOR
+        await original_send(socket, data, **kwargs)
+
+    monkeypatch.setattr(web.WebSocketResponse, "send_str", send)
+    client.notification_stats["last_frame_received"] = previous_frame
+    async with asyncio.timeout(5):
+        assert (await anext(stream))[1].properties == {"ref_door_ajar": False}
+    stats = client.notification_stats
+    assert stats["last_received"] is not None
+    assert stats["last_frame_received"] == stats["connected_at"]
+
+
 async def test_messages_without_state_still_show_channel_activity(notification_stream):
     client, stream, frames, _ = notification_stream
     frames.append(

@@ -350,6 +350,11 @@ class SubZeroClient:
             "ignored": 0,
             "invalid": 0,
             "last_received": None,
+            # When the current connection completed its handshake, and when it last
+            # received any frame, heartbeats included. A quiet channel on a connection
+            # that still receives heartbeats is not a dead connection.
+            "connected_at": None,
+            "last_frame_received": None,
         }
         # Any message from a selected appliance, including ones without state, shows
         # that its update channel is still delivering.
@@ -774,6 +779,9 @@ class SubZeroClient:
                 if _object(handshake) != {}:
                     raise ApiError("Sub-Zero rejected the notification handshake.")
                 self.push_connected = True
+                connected_at = datetime.now(UTC).isoformat()
+                self.notification_stats["connected_at"] = connected_at
+                self.notification_stats["last_frame_received"] = connected_at
                 channel_events: deque[tuple[str, ApiError | ChannelOpened]] = deque()
                 pending_channels = set(device_ids)
 
@@ -869,6 +877,9 @@ class SubZeroClient:
                         receiving = asyncio.create_task(websocket.receive())
                         tasks.add(receiving)
                         last_received = time.monotonic()
+                        self.notification_stats["last_frame_received"] = datetime.now(
+                            UTC
+                        ).isoformat()
                         pending += message.data
                         if len(pending) > 262144:
                             raise ApiError("Sub-Zero sent an oversized notification.")
