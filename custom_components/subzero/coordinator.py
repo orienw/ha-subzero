@@ -84,7 +84,7 @@ class StateRead:
     request: int
     confirmed_at: datetime | None
     error: Exception | None = None
-    confirmation: int = 0
+    published: int = 0
 
 
 def status_poll_interval(entry: ConfigEntry) -> int:
@@ -159,6 +159,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self._last_followup = 0.0
         self.confirmed_at: datetime | None = None
         self._confirmation = 0
+        self._published = 0
         self.missing_state_keys: dict[str, list[str]] = {"snapshot": [], "read": []}
         self.verification_stats: dict[str, int | str | None] = {
             "checks": 0,
@@ -245,6 +246,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
 
     @callback
     def async_set_updated_data(self, data: dict) -> None:
+        self._published += 1
         active = self._active_conditions()
         super().async_set_updated_data(data)
         updated = self._active_conditions()
@@ -650,7 +652,11 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         request = self._read_requests
         while True:
             task = self._read_task
-            if task is None or task.done() and task.result().request < request:
+            if task is None or (
+                task.done()
+                and not task.cancelled()
+                and (task.exception() is not None or task.result().request < request)
+            ):
                 task = self._read_task = self.entry.async_create_background_task(
                     self.hass, self._async_read_state(), "Sub-Zero state read"
                 )
@@ -665,22 +671,26 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         try:
             data = await self._async_fetch_state()
         except Exception as error:
-            result = self._completed_read = StateRead(request, None, error, self._confirmation)
+            result = StateRead(request, None, error, self._published)
+            # A quota deferral did not publish an error for an older waiter to adopt.
             if not isinstance(error, UpdateFailed) or error.retry_after is None:
+                self._completed_read = result
                 self.async_set_update_error(error)
             return result
         self.async_set_updated_data(data)
         if "notifs" in data:
             self._process_events(data, history=True)
         confirmed = self.confirmed_at if self._confirmation > confirmation else None
-        result = self._completed_read = StateRead(
-            request, confirmed, confirmation=self._confirmation
-        )
+        result = self._completed_read = StateRead(request, confirmed, published=self._published)
         return result
 
     @callback
     def _async_read_finished(self, task: asyncio.Task[StateRead]) -> None:
-        if task.cancelled() or (error := task.result().error) is None:
+        if (
+            task.cancelled()
+            or task.exception() is not None
+            or (error := task.result().error) is None
+        ):
             return
         if isinstance(error, ConfigEntryAuthFailed):
             self.entry.async_start_reauth(self.hass)
@@ -694,10 +704,10 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
 
     async def _async_update_data(self) -> dict:
         result = await self._async_read_result()
-        result = self._completed_read or result
+        if (latest := self._completed_read) is not None and latest.request > result.request:
+            result = latest
         if result.error is not None and (
-            isinstance(result.error, ConfigEntryAuthFailed)
-            or self._confirmation <= result.confirmation
+            isinstance(result.error, ConfigEntryAuthFailed) or self._published <= result.published
         ):
             raise result.error
         return self.data
@@ -727,10 +737,13 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 model = self._read_updates.get("appliance_model")
                 if isinstance(model, str) and model and model != data.get("appliance_model"):
                     data = {}
+                history = data.get("notifs")
                 data = {
                     **{key: value for key, value in data.items() if key in STATE_KEYS},
                     **self._read_updates,
                 }
+                if history is not None:
+                    data["notifs"] = [*history, *self._read_updates.get("notifs", [])]
                 return self._discard_excluded(data)
             except InvalidAuth as error:
                 raise ConfigEntryAuthFailed(str(error)) from error
@@ -1000,7 +1013,10 @@ class SubZeroAccount:
         pending = self._verifications.get(coordinator.device_id)
         if (
             self.entry.pref_disable_polling
-            or isinstance(coordinator.last_exception, ConfigEntryAuthFailed | InvalidAuth)
+            or (
+                not coordinator.last_update_success
+                and isinstance(coordinator.last_exception, ConfigEntryAuthFailed | InvalidAuth)
+            )
             or pending is not None
             and not pending.done()
         ):

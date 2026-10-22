@@ -7,11 +7,12 @@ from unittest.mock import Mock
 import pytest
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.update_coordinator import UpdateFailed
 from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import async_fire_time_changed
 
-from custom_components.subzero.api import ApiError, StateUpdate
+from custom_components.subzero.api import ApiError, RateLimited, StateUpdate
 from tests.test_integration import loaded as loaded
 
 pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
@@ -207,8 +208,6 @@ async def test_scheduled_reads_continue_when_push_is_disconnected(hass, loaded, 
 async def test_rate_limited_checks_leave_confirmation_age_unchanged(
     hass, loaded, freezer, monkeypatch
 ):
-    from custom_components.subzero.api import RateLimited
-
     entry, client, updates, _, _ = loaded
     coordinator = entry.runtime_data.coordinators["test-fridge"]
     monkeypatch.setattr("custom_components.subzero.coordinator.SNAPSHOT_TIMEOUT", 0)
@@ -324,8 +323,6 @@ async def test_event_listeners_see_state_from_the_same_message(hass, loaded):
 
 
 async def test_rate_limits_stop_event_followups_without_claiming_new_state(hass, freezer, loaded):
-    from custom_components.subzero.api import RateLimited
-
     entry, client, updates, _, _ = loaded
     coordinator = entry.runtime_data.coordinators["test-fridge"]
     confirmed = coordinator.confirmed_at
@@ -376,22 +373,28 @@ async def test_unloading_cancels_event_followup_timers(hass, freezer, loaded):
     assert task.cancelled()
 
 
-@pytest.mark.parametrize("newer", ["failed_read", "snapshot"])
+@pytest.mark.parametrize(
+    "newer", ["failed_read", "rate_limited", "snapshot", "incomplete_snapshot"]
+)
 async def test_an_older_refresh_cannot_overwrite_a_newer_read_or_snapshot(hass, loaded, newer):
     entry, client, _, _, _ = loaded
     coordinator = entry.runtime_data.coordinators["test-fridge"]
     reading, release, recovery_release = asyncio.Event(), asyncio.Event(), asyncio.Event()
     client.state.reset_mock()
+    confirmed = coordinator.confirmed_at
 
     async def read(_device_id):
         if client.state.await_count == 1:
             reading.set()
             await release.wait()
-            if newer == "snapshot":
+            if newer in {"snapshot", "incomplete_snapshot"}:
                 raise ApiError("The older read failed")
             return dict(client.state.return_value)
-        if client.state.await_count == 2 and newer == "failed_read":
-            raise ApiError("A newer read failed")
+        if client.state.await_count == 2:
+            if newer == "failed_read":
+                raise ApiError("A newer read failed")
+            if newer == "rate_limited":
+                raise RateLimited(60)
         await recovery_release.wait()
         return dict(client.state.return_value)
 
@@ -405,8 +408,11 @@ async def test_an_older_refresh_cannot_overwrite_a_newer_read_or_snapshot(hass, 
             await coordinator.async_read_status()
 
     def after_read(_task):
-        if newer == "snapshot":
-            coordinator.apply_update(StateUpdate(dict(client.state.return_value), full=True))
+        if newer in {"snapshot", "incomplete_snapshot"}:
+            properties = dict(client.state.return_value)
+            if newer == "incomplete_snapshot":
+                del properties["ref_door_ajar"]
+            coordinator.apply_update(StateUpdate(properties, full=True))
         else:
             subsequent.append(
                 entry.async_create_background_task(hass, failed_read(), "Newer status read")
@@ -417,4 +423,60 @@ async def test_an_older_refresh_cannot_overwrite_a_newer_read_or_snapshot(hass, 
     await refresh
     if subsequent:
         await subsequent[0]
-    assert coordinator.last_update_success is (newer == "snapshot")
+    assert coordinator.last_update_success is (newer != "failed_read")
+    if newer == "incomplete_snapshot":
+        assert coordinator.confirmed_at == confirmed
+    if newer == "rate_limited":
+        client.state.side_effect = RateLimited(60)
+        with pytest.raises(UpdateFailed):
+            await coordinator._async_update_data()
+
+
+async def test_verification_resumes_after_auth_failure_is_recovered_by_push(hass, freezer, loaded):
+    from custom_components.subzero.auth import InvalidAuth
+
+    entry, client, updates, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    client.open_channel.side_effect = InvalidAuth("Sign-in expired")
+    freezer.tick(301)
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+    await entry.runtime_data._verifications["test-fridge"]
+    assert not coordinator.last_update_success
+    await updates.put(StateUpdate(dict(client.state.return_value), full=True))
+    await hass.async_block_till_done()
+    assert coordinator.last_update_success
+
+    async def open_channel(_device_id):
+        coordinator.apply_update(StateUpdate(dict(client.state.return_value), full=True))
+
+    client.open_channel.side_effect = open_channel
+    freezer.tick(301)
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+    await entry.runtime_data._verifications["test-fridge"]
+    assert client.open_channel.await_count == 2
+    assert coordinator.verification_stats["checks"] == 2
+
+
+async def test_an_unexpected_event_listener_failure_does_not_wedge_future_reads(hass, loaded):
+    entry, client, _, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    observed = []
+    client.state.return_value["notifs"] = []
+    await coordinator.async_read_status()
+
+    def listener(event):
+        observed.append(event)
+        raise RuntimeError("Event listener failed")
+
+    coordinator.async_add_event_listener(listener)
+    client.state.reset_mock()
+    client.state.return_value["notifs"] = [
+        {"notif_seq": 1, "notif_type": 101, "timestamp": dt_util.utcnow().isoformat()}
+    ]
+    with pytest.raises(RuntimeError, match="Event listener failed"):
+        await coordinator.async_read_status()
+    await coordinator.async_read_status()
+    assert client.state.await_count == 2
+    assert len(observed) == 1
