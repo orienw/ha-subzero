@@ -229,3 +229,148 @@ async def test_rate_limited_checks_leave_confirmation_age_unchanged(
     )
     with pytest.raises(HomeAssistantError):
         await coordinator.async_read_status()
+
+
+async def _advance_followup(hass, freezer, coordinator, seconds):
+    freezer.tick(seconds)
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+    if coordinator._read_task is not None:
+        await coordinator._read_task
+    await hass.async_block_till_done()
+
+
+async def test_followups_repair_a_missed_door_close_and_stop(hass, freezer, loaded):
+    entry, client, updates, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    client.state.reset_mock()
+    client.state.return_value["ref_door_ajar"] = True
+    await updates.put(StateUpdate({"ref_door_ajar": True}, full=False))
+    await hass.async_block_till_done()
+    await _advance_followup(hass, freezer, coordinator, 3)
+    assert client.state.await_count == 1
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
+    client.state.return_value["ref_door_ajar"] = False
+    await _advance_followup(hass, freezer, coordinator, 61)
+    assert client.state.await_count == 2
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
+    await _advance_followup(hass, freezer, coordinator, 121)
+    assert client.state.await_count == 2
+    assert coordinator._followup_task is None
+
+
+async def test_alert_bursts_and_unrelated_updates_do_not_extend_followups(hass, freezer, loaded):
+    entry, client, updates, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    client.state.return_value["ref_door_ajar"] = True
+    client.state.reset_mock()
+    for sequence in range(5):
+        await updates.put(
+            StateUpdate(
+                {
+                    "ref_door_ajar": True,
+                    "notifs": [
+                        {
+                            "notif_seq": sequence,
+                            "notif_type": 101,
+                            "timestamp": dt_util.utcnow().isoformat(),
+                        }
+                    ],
+                },
+                full=False,
+            )
+        )
+    await hass.async_block_till_done()
+    for seconds in (3, 61, 121, 100):
+        await _advance_followup(hass, freezer, coordinator, seconds)
+        await updates.put(StateUpdate({"ref_set_temp": 39}, full=False))
+        await hass.async_block_till_done()
+    assert client.state.await_count == 3
+    assert coordinator._followup_task is None
+
+
+async def test_a_pushed_close_cancels_pending_followups(hass, freezer, loaded):
+    entry, client, updates, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    client.state.reset_mock()
+    for opened in (True, False):
+        await updates.put(StateUpdate({"ref_door_ajar": opened}, full=False))
+        await hass.async_block_till_done()
+    await _advance_followup(hass, freezer, coordinator, 10)
+    client.state.assert_not_awaited()
+    assert coordinator._followup_task is None
+
+
+async def test_event_listeners_see_state_from_the_same_message(hass, loaded):
+    entry, _, updates, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    observed = []
+    coordinator.async_add_event_listener(
+        lambda _: observed.append(hass.states.get("binary_sensor.kitchen_refrigerator_door").state)
+    )
+    await updates.put(
+        StateUpdate(
+            {
+                "ref_door_ajar": True,
+                "notifs": [
+                    {"notif_seq": 1, "notif_type": 101, "timestamp": dt_util.utcnow().isoformat()}
+                ],
+            },
+            full=False,
+        )
+    )
+    await hass.async_block_till_done()
+    assert observed == ["on"]
+
+
+async def test_rate_limits_stop_event_followups_without_claiming_new_state(hass, freezer, loaded):
+    from custom_components.subzero.api import RateLimited
+
+    entry, client, updates, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    confirmed = coordinator.confirmed_at
+    client.state.reset_mock()
+    client.state.side_effect = RateLimited(300)
+    await updates.put(StateUpdate({"ref_door_ajar": True}, full=False))
+    await hass.async_block_till_done()
+    await _advance_followup(hass, freezer, coordinator, 3)
+    await _advance_followup(hass, freezer, coordinator, 181)
+    client.state.assert_awaited_once()
+    assert coordinator.confirmed_at == confirmed
+    assert coordinator.last_update_success
+    assert coordinator._followup_task is None
+
+
+@pytest.mark.parametrize("system_option", [False, True])
+async def test_disabled_checks_also_disable_automatic_event_followups(
+    hass, freezer, loaded, system_option
+):
+    entry, client, updates, _, _ = loaded
+    if system_option:
+        hass.config_entries.async_update_entry(entry, pref_disable_polling=True)
+    else:
+        hass.config_entries.async_update_entry(entry, options={"status_poll_interval": 0})
+    await hass.async_block_till_done()
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    client.state.reset_mock()
+    await updates.put(StateUpdate({"ref_door_ajar": True}, full=False))
+    await hass.async_block_till_done()
+    await _advance_followup(hass, freezer, coordinator, 10)
+    client.state.assert_not_awaited()
+    await coordinator.async_read_status()
+    client.state.assert_awaited_once()
+
+
+async def test_unloading_cancels_event_followup_timers(hass, freezer, loaded):
+    entry, client, updates, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    await updates.put(StateUpdate({"ref_door_ajar": True}, full=False))
+    await hass.async_block_till_done()
+    task = coordinator._followup_task
+    assert task is not None
+    await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    client.state.reset_mock()
+    await _advance_followup(hass, freezer, coordinator, 185)
+    client.state.assert_not_awaited()
+    assert task.cancelled()

@@ -178,7 +178,7 @@ async def test_state_verification_is_not_postponed_by_partial_updates(
     await hass.async_block_till_done()
     await entry.runtime_data._verifications["test-fridge"]
     client.open_channel.assert_awaited_once_with("test-fridge")
-    assert client.state.await_count == (1 if complete_snapshot else 2)
+    assert client.state.await_count == (2 if complete_snapshot else 3)
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
     stats = entry.runtime_data.coordinators["test-fridge"].verification_stats
     assert stats["checks"] == 1
@@ -207,7 +207,7 @@ async def test_silent_reopen_reads_state_and_renews_once(
         await hass.async_block_till_done()
         await entry.runtime_data._verifications["test-fridge"]
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
-    assert client.state.await_count == 3
+    assert client.state.await_count == 4
     client.renew_connection.assert_called_once()
     coordinator = entry.runtime_data.coordinators["test-fridge"]
     assert coordinator.verification_stats["fallback_reads"] == 2

@@ -183,6 +183,8 @@ State checks run every five minutes per appliance by default, staggered across s
 
 After an error, a reopened channel or an incoming state update triggers a fresh status read if no full push snapshot has restored the appliance. A failed status read starts recovery independently of the push connection. Failed recovery reads retry with increasing delays. A successful status read can restore availability while notifications remain disconnected. Diagnostics record state-check attempts, complete pushed snapshots, fallback reads, connection renewals, and missing keys in incomplete observations.
 
+A new event or a transition to an open door, active timer, or running wash starts a short follow-up window. It reads status after two seconds, then up to twice more at one- and two-minute delays while a tracked condition remains active. Follow-up reads stay at least one minute apart per appliance; overlapping events do not extend the window. A reported clear condition, failed read, or rate limit ends it. **Push only** and Home Assistant's polling option also disable these automatic follow-ups. An alert's metadata never substitutes for current sensor values.
+
 Each appliance has a **State confirmed** diagnostic timestamp. It advances only when a successful status read or full push snapshot covers the appliance's known state. Individual updates and cached data recovered after a failed read do not advance it. An available entity can retain an old value during rate limits; inspect this timestamp when the age of its state matters.
 
 For a reminder that depends on an appliance still being in a particular state, use **Sub-Zero: Read appliance status** before checking the condition:

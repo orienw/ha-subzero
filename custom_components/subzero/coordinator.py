@@ -35,6 +35,7 @@ from .api import (
 )
 from .auth import InvalidAuth
 from .const import (
+    BINARY_KEYS,
     CONTROL_CONFIRM_TIMEOUT,
     CONTROL_PUSH_TIMEOUT,
     DEFAULT_STATUS_POLL_INTERVAL,
@@ -70,6 +71,11 @@ from .controls import (
 _LOGGER = logging.getLogger(__name__)
 INITIAL_STATE_TIMEOUT = 16
 SNAPSHOT_TIMEOUT = 16
+FOLLOWUP_DELAYS = (2, 60, 120)
+FOLLOWUP_KEYS = {key for key in BINARY_KEYS if key.endswith(("door_ajar", "timer_active"))} | {
+    "kitchen_timer2_active",
+    "wash_cycle_on",
+}
 
 
 @dataclass(frozen=True)
@@ -140,6 +146,9 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self._history_seen = False
         self._channel_snapshot: asyncio.Future[None] | None = None
         self._renewed = False
+        self._followup_task: asyncio.Task | None = None
+        self._followup_alert = False
+        self._last_followup = 0.0
         self.confirmed_at: datetime | None = None
         self._confirmation = 0
         self.missing_state_keys: dict[str, list[str]] = {"snapshot": [], "read": []}
@@ -223,6 +232,52 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self._confirmation += 1
         return True
 
+    def _active_conditions(self) -> set[str]:
+        return {key for key in FOLLOWUP_KEYS if self.data.get(key) is True}
+
+    @callback
+    def async_set_updated_data(self, data: dict) -> None:
+        active = self._active_conditions()
+        super().async_set_updated_data(data)
+        updated = self._active_conditions()
+        if updated - active and self.entry.state is ConfigEntryState.LOADED:
+            self.async_schedule_followup()
+        elif not updated and not self._followup_alert and self._followup_task is not None:
+            self._followup_task.cancel()
+
+    @callback
+    def async_schedule_followup(self, *, alert: bool = False) -> None:
+        """Check a new alert or active condition without extending an existing window."""
+        if self.entry.pref_disable_polling or not status_poll_interval(self.entry):
+            return
+        self._followup_alert |= alert
+        if (
+            self._followup_task is not None
+            and not self._followup_task.done()
+            and not self._followup_task.cancelling()
+        ):
+            return
+        self._followup_task = self.entry.async_create_background_task(
+            self.hass, self._async_followup(), "Sub-Zero event follow-up"
+        )
+
+    async def _async_followup(self) -> None:
+        try:
+            for delay in FOLLOWUP_DELAYS:
+                await asyncio.sleep(max(delay, self._last_followup + 60 - time.monotonic()))
+                if self.entry.pref_disable_polling or not status_poll_interval(self.entry):
+                    return
+                self._followup_alert = False
+                self._last_followup = time.monotonic()
+                result = await self._async_read_result()
+                if result.error is not None or (
+                    not self._active_conditions() and not self._followup_alert
+                ):
+                    return
+        finally:
+            if self._followup_task is asyncio.current_task():
+                self._followup_task = None
+
     @callback
     def async_add_event_listener(self, listener: Callable[[dict], None]) -> Callable[[], None]:
         self._event_listeners.append(listener)
@@ -259,6 +314,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             }
             for listener in self._event_listeners:
                 listener(event)
+            self.async_schedule_followup(alert=True)
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -678,7 +734,6 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             del properties["appliance_type"]
         if "notifs" in properties:
             properties["notifs"] = notification_records(properties)
-            self._process_events(properties, history=update.full)
         if properties:
             self._read_error = None
             self._channel_error = None
@@ -705,20 +760,23 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 if key not in PRIVATE_KEYS and not isinstance(value, dict | list)
             },
         )
-        if not self.last_update_success and not update.full:
-            return
-        replace = update.full and (
-            not self.last_update_success
-            or properties.get("appliance_model") != self.data.get("appliance_model")
-        )
-        updated = self._discard_excluded(properties if replace else {**self.data, **properties})
-        if (
-            update.full
-            or updated != self.data
-            or any(type(value) is not type(self.data.get(key)) for key, value in updated.items())
-            or not self.last_update_success
-        ):
-            self.async_set_updated_data(updated)
+        if self.last_update_success or update.full:
+            replace = update.full and (
+                not self.last_update_success
+                or properties.get("appliance_model") != self.data.get("appliance_model")
+            )
+            updated = self._discard_excluded(properties if replace else {**self.data, **properties})
+            if (
+                update.full
+                or updated != self.data
+                or any(
+                    type(value) is not type(self.data.get(key)) for key, value in updated.items()
+                )
+                or not self.last_update_success
+            ):
+                self.async_set_updated_data(updated)
+        if "notifs" in properties:
+            self._process_events(properties, history=update.full)
 
 
 class SubZeroFaultsCoordinator(DataUpdateCoordinator[list[ApplianceFault]]):
