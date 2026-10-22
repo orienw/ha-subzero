@@ -374,3 +374,47 @@ async def test_unloading_cancels_event_followup_timers(hass, freezer, loaded):
     await _advance_followup(hass, freezer, coordinator, 185)
     client.state.assert_not_awaited()
     assert task.cancelled()
+
+
+@pytest.mark.parametrize("newer", ["failed_read", "snapshot"])
+async def test_an_older_refresh_cannot_overwrite_a_newer_read_or_snapshot(hass, loaded, newer):
+    entry, client, _, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    reading, release, recovery_release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    client.state.reset_mock()
+
+    async def read(_device_id):
+        if client.state.await_count == 1:
+            reading.set()
+            await release.wait()
+            if newer == "snapshot":
+                raise ApiError("The older read failed")
+            return dict(client.state.return_value)
+        if client.state.await_count == 2 and newer == "failed_read":
+            raise ApiError("A newer read failed")
+        await recovery_release.wait()
+        return dict(client.state.return_value)
+
+    client.state.side_effect = read
+    refresh = asyncio.create_task(coordinator.async_refresh())
+    await reading.wait()
+    subsequent = []
+
+    async def failed_read():
+        with pytest.raises(HomeAssistantError):
+            await coordinator.async_read_status()
+
+    def after_read(_task):
+        if newer == "snapshot":
+            coordinator.apply_update(StateUpdate(dict(client.state.return_value), full=True))
+        else:
+            subsequent.append(
+                entry.async_create_background_task(hass, failed_read(), "Newer status read")
+            )
+
+    coordinator._read_task.add_done_callback(after_read)
+    release.set()
+    await refresh
+    if subsequent:
+        await subsequent[0]
+    assert coordinator.last_update_success is (newer == "snapshot")

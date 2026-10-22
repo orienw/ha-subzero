@@ -84,6 +84,7 @@ class StateRead:
     request: int
     confirmed_at: datetime | None
     error: Exception | None = None
+    confirmation: int = 0
 
 
 def status_poll_interval(entry: ConfigEntry) -> int:
@@ -142,6 +143,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self._state_lock = asyncio.Lock()
         self._read_requests = 0
         self._read_task: asyncio.Task[StateRead] | None = None
+        self._completed_read: StateRead | None = None
         self._read_updates: dict | None = None
         self._read_error: Exception | None = None
         self._channel_error: ApiError | None = None
@@ -663,14 +665,18 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         try:
             data = await self._async_fetch_state()
         except Exception as error:
+            result = self._completed_read = StateRead(request, None, error, self._confirmation)
             if not isinstance(error, UpdateFailed) or error.retry_after is None:
                 self.async_set_update_error(error)
-            return StateRead(request, None, error)
+            return result
         self.async_set_updated_data(data)
         if "notifs" in data:
             self._process_events(data, history=True)
         confirmed = self.confirmed_at if self._confirmation > confirmation else None
-        return StateRead(request, confirmed)
+        result = self._completed_read = StateRead(
+            request, confirmed, confirmation=self._confirmation
+        )
+        return result
 
     @callback
     def _async_read_finished(self, task: asyncio.Task[StateRead]) -> None:
@@ -688,7 +694,11 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
 
     async def _async_update_data(self) -> dict:
         result = await self._async_read_result()
-        if result.error is not None:
+        result = self._completed_read or result
+        if result.error is not None and (
+            isinstance(result.error, ConfigEntryAuthFailed)
+            or self._confirmation <= result.confirmation
+        ):
             raise result.error
         return self.data
 
