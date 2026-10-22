@@ -108,6 +108,50 @@ async def test_incomplete_status_reply_does_not_confirm_old_values(loaded, freez
     assert "ref_door_ajar" in coordinator.missing_state_keys["read"]
 
 
+@pytest.mark.parametrize("source", ["read", "snapshot"])
+async def test_repeated_incomplete_observations_keep_known_state_requirements(
+    hass, loaded, freezer, source
+):
+    entry, client, _, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    complete = dict(client.state.return_value)
+    confirmed = coordinator.confirmed_at
+    del client.state.return_value["ref_door_ajar"]
+
+    for _ in range(2):
+        freezer.tick(1)
+        if source == "read":
+            with pytest.raises(HomeAssistantError, match="complete state"):
+                await coordinator.async_read_status()
+        else:
+            coordinator.apply_update(StateUpdate(dict(client.state.return_value), full=True))
+        await hass.async_block_till_done()
+        assert coordinator.confirmed_at == confirmed
+        assert coordinator.missing_state_keys[source] == ["ref_door_ajar"]
+
+    client.state.return_value = complete
+    assert await coordinator.async_read_status() == dt_util.utcnow()
+    freezer.tick(1)
+    client.state.return_value = {"appliance_model": "REPLACEMENT", "ref_set_temp": 40}
+    assert await coordinator.async_read_status() == dt_util.utcnow()
+    assert not coordinator.missing_state_keys["read"]
+
+
+async def test_invalid_model_does_not_erase_known_state_requirements(loaded, freezer):
+    entry, client, _, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    confirmed = coordinator.confirmed_at
+    for reply in (
+        {"appliance_model": ""},
+        {"appliance_model": "ANOTHER-MODEL", "ref_set_temp": 39},
+    ):
+        client.state.return_value = reply
+        freezer.tick(1)
+        with pytest.raises(HomeAssistantError, match="complete state"):
+            await coordinator.async_read_status()
+        assert coordinator.confirmed_at == confirmed
+
+
 @pytest.mark.parametrize("complete", [False, True])
 async def test_status_confirmation_requires_door_state_but_not_notification_history(
     hass, loaded, freezer, complete

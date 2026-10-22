@@ -167,6 +167,8 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self._last_followup = 0.0
         self.confirmed_at: datetime | None = None
         self._confirmation = 0
+        self._confirmation_model: str | None = None
+        self._required_state_keys: set[str] = set()
         self._published = 0
         self.missing_state_keys: dict[str, list[str]] = {"snapshot": [], "read": []}
         self.verification_stats: dict[str, int | str | None] = {
@@ -238,15 +240,20 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
 
     @callback
     def _confirm_state(self, properties: dict, source: str) -> bool:
+        # Incomplete replies must not erase the next confirmation's requirements.
+        if self.data.get("appliance_model") == self._confirmation_model:
+            self._required_state_keys.update(self.data.keys() - {"notifs"})
         model = properties.get("appliance_model")
-        # Status replies can omit notification history.
-        required = (
-            self.data.keys() - {"notifs"}
-            if model == self.data.get("appliance_model")
-            else {"appliance_model"}
+        if not isinstance(model, str) or not model:
+            self.missing_state_keys[source] = ["appliance_model"]
+            return False
+        if model != self._confirmation_model:
+            self._confirmation_model = model
+            self._required_state_keys = {"appliance_model"}
+        missing = self.missing_state_keys[source] = sorted(
+            self._required_state_keys - properties.keys()
         )
-        missing = self.missing_state_keys[source] = sorted(required - properties.keys())
-        if missing or not isinstance(model, str) or not model:
+        if missing:
             return False
         self.confirmed_at = dt_util.utcnow()
         self._confirmation += 1
