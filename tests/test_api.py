@@ -1470,3 +1470,149 @@ async def test_invalid_ice_delay_never_sends(
     with pytest.raises(ValueError):
         await client.set_ice_delay("test-fridge", duration, offset, repeat)
     assert not control_server["requests"]
+
+
+async def test_phone_alert_endpoints_accept_primitive_responses(
+    aiohttp_server, monkeypatch, socket_enabled, tokens
+):
+    requests = []
+
+    async def alerts(request):
+        body = await request.json() if request.method in {"POST", "PUT", "DELETE"} else None
+        requests.append((request.method, request.path, request.headers.get("uuid"), body))
+        if request.method == "GET" and "/registrations/" in request.path:
+            return web.json_response({"id": "registration-id"})
+        if request.method == "GET":
+            return web.json_response([{"valueType": "101"}, {"valueType": "102"}])
+        if request.method == "DELETE":
+            return web.json_response(True)
+        return web.json_response("registration-id")
+
+    app = web.Application()
+    app.router.add_route("*", "/consumerapp/api/notification/{path:.*}", alerts)
+    server = await aiohttp_server(app)
+    monkeypatch.setattr(api, "API_BASE", str(server.make_url("/")).rstrip("/"))
+    async with aiohttp.ClientSession() as session:
+        client = api.SubZeroClient(session, "test-key", tokens)
+        assert await client.alert_registration("test-psid", "test-device") == {
+            "id": "registration-id"
+        }
+        await client.register_for_alerts(
+            {
+                "id": "registration-id",
+                "fcmToken": "test-token",
+                "deviceId": "test-device",
+                "psid": "test-psid",
+            },
+            update=False,
+        )
+        assert await client.alert_types("test-psid", "test-device") == {101, 102}
+        await client.subscribe_alerts("test-psid", "test-device", {101: "door_open"})
+        await client.unsubscribe_alerts("test-psid", "test-device", {101})
+
+    assert requests[0][:3] == (
+        "GET",
+        "/consumerapp/api/notification/registrations/devices/test-psid/appliances/test-device",
+        "test-psid",
+    )
+    assert requests[2][2] == requests[3][2] == requests[4][2] == "test-psid"
+    assert requests[3][3] == [
+        {
+            "deviceId": "test-device",
+            "mutable_content": False,
+            "valueType": 101,
+            "body_loc_key": "door_open",
+            "sound": None,
+            "clickAction": None,
+        }
+    ]
+    assert requests[4][3] == {"valueTypes": ["101"], "deviceId": "test-device"}
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        # Like the app, the lookup is a list holding the appliance's record.
+        (
+            [
+                {"id": "other", "deviceId": "other-device"},
+                {"id": "ours", "deviceId": "test-device"},
+            ],
+            {"id": "ours", "deviceId": "test-device"},
+        ),
+        ([], None),
+        ([{"deviceId": "test-device"}], None),
+        ({"id": "registration-id"}, {"id": "registration-id"}),
+    ],
+)
+async def test_alert_registration_reads_the_appliance_record(
+    aiohttp_server, monkeypatch, socket_enabled, tokens, body, expected
+):
+    async def lookup(request):
+        return web.json_response(body)
+
+    app = web.Application()
+    app.router.add_route("GET", "/consumerapp/api/notification/{path:.*}", lookup)
+    server = await aiohttp_server(app)
+    monkeypatch.setattr(api, "API_BASE", str(server.make_url("/")).rstrip("/"))
+    async with aiohttp.ClientSession() as session:
+        client = api.SubZeroClient(session, "test-key", tokens)
+        assert await client.alert_registration("test-psid", "test-device") == expected
+
+
+@pytest.mark.parametrize(("subscribed", "deletes"), [([{"valueType": "101"}], 1), ([], 0)])
+async def test_unsubscribing_all_alerts_removes_only_current_ones(
+    aiohttp_server, monkeypatch, socket_enabled, tokens, subscribed, deletes
+):
+    requests = []
+
+    async def alerts(request):
+        body = await request.json() if request.method == "DELETE" else None
+        requests.append((request.method, body))
+        return web.json_response(subscribed if request.method == "GET" else True)
+
+    app = web.Application()
+    app.router.add_route("*", "/consumerapp/api/notification/{path:.*}", alerts)
+    server = await aiohttp_server(app)
+    monkeypatch.setattr(api, "API_BASE", str(server.make_url("/")).rstrip("/"))
+    async with aiohttp.ClientSession() as session:
+        await api.SubZeroClient(session, "test-key", tokens).unsubscribe_all_alerts(
+            "test-psid", "test-device"
+        )
+    assert [method for method, _ in requests] == ["GET"] + ["DELETE"] * deletes
+    if deletes:
+        assert requests[1][1] == {"valueTypes": ["101"], "deviceId": "test-device"}
+
+
+@pytest.mark.parametrize("body", [None, {}, True, [{"valueType": "invalid"}]])
+async def test_invalid_alert_subscriptions_do_not_look_like_successful_cleanup(
+    aiohttp_server, monkeypatch, socket_enabled, tokens, body
+):
+    async def alerts(request):
+        assert request.method == "GET"
+        return web.json_response(body)
+
+    app = web.Application()
+    app.router.add_route("*", "/consumerapp/api/notification/{path:.*}", alerts)
+    server = await aiohttp_server(app)
+    monkeypatch.setattr(api, "API_BASE", str(server.make_url("/")).rstrip("/"))
+    async with aiohttp.ClientSession() as session:
+        client = api.SubZeroClient(session, "test-key", tokens)
+        with pytest.raises(api.ApiError, match="invalid alert subscriptions"):
+            await client.unsubscribe_all_alerts("own-psid", "test-device")
+
+
+async def test_a_declined_alert_change_is_an_error(
+    aiohttp_server, monkeypatch, socket_enabled, tokens
+):
+    async def alerts(request):
+        return web.json_response(False)
+
+    app = web.Application()
+    app.router.add_route("*", "/consumerapp/api/notification/{path:.*}", alerts)
+    server = await aiohttp_server(app)
+    monkeypatch.setattr(api, "API_BASE", str(server.make_url("/")).rstrip("/"))
+    async with aiohttp.ClientSession() as session:
+        client = api.SubZeroClient(session, "test-key", tokens)
+        with pytest.raises(api.ApiError, match="declined"):
+            await client.unsubscribe_alerts("own-psid", "test-device", {101})

@@ -36,6 +36,7 @@ from .api import (
 from .auth import InvalidAuth
 from .const import (
     BINARY_KEYS,
+    CONF_FIREBASE_ALERTS,
     CONTROL_CONFIRM_TIMEOUT,
     CONTROL_PUSH_TIMEOUT,
     DEFAULT_STATUS_POLL_INTERVAL,
@@ -90,6 +91,10 @@ def status_poll_interval(entry: ConfigEntry) -> int:
     return interval if interval in STATUS_POLL_INTERVALS else DEFAULT_STATUS_POLL_INTERVAL
 
 
+def firebase_alerts_enabled(entry: ConfigEntry) -> bool:
+    return entry.options.get(CONF_FIREBASE_ALERTS, False) is True
+
+
 def selected_devices(entry: ConfigEntry) -> dict[str, dict]:
     """Return the appliance selection, including entries awaiting migration."""
     if "device_id" in entry.data:
@@ -141,7 +146,8 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self._read_error: Exception | None = None
         self._channel_error: ApiError | None = None
         self._event_cutoff = dt_util.utcnow()
-        self._event_ids: set[tuple[datetime, int, int]] = set()
+        self._event_ids: dict[tuple[datetime, int, int], str] = {}
+        self._paired_events: set[tuple[datetime, int, int]] = set()
         self._event_listeners: list[Callable[[dict], None]] = []
         self._history_seen = False
         self._channel_snapshot: asyncio.Future[None] | None = None
@@ -297,24 +303,68 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 identity = (timestamp.astimezone(UTC), record["notif_seq"], record["notif_type"])
                 events[identity] = timestamp
         for identity in sorted(events):
-            instant, sequence, code = identity
-            if instant < self._event_cutoff or identity in self._event_ids:
-                continue
-            self._event_ids.add(identity)
-            if len(self._event_ids) > MAX_EVENT_HISTORY:
-                oldest = min(self._event_ids)
-                self._event_ids.remove(oldest)
-                self._event_cutoff = max(self._event_cutoff, oldest[0] + timedelta(microseconds=1))
-            if not deliver:
-                continue
-            event = {
-                "code": code,
-                "sequence": sequence,
-                "appliance_timestamp": events[identity].isoformat(),
-            }
-            for listener in self._event_listeners:
-                listener(event)
-            self.async_schedule_followup(alert=True)
+            _, sequence, code = identity
+            self.async_receive_event(
+                events[identity],
+                sequence,
+                code,
+                deliver=deliver,
+                source="history" if history else "channel",
+            )
+
+    @callback
+    def async_receive_event(
+        self,
+        timestamp: datetime,
+        sequence: int,
+        code: int,
+        *,
+        deliver: bool = True,
+        source: str = "channel",
+    ) -> bool:
+        """Deliver an event once across state history, stream and Firebase copies."""
+        identity = (timestamp.astimezone(UTC), sequence, code)
+        if identity[0] < self._event_cutoff:
+            return False
+        if (known := self._event_ids.get(identity)) is not None:
+            if (known == "firebase") != (source == "firebase"):
+                self._paired_events.add(identity)
+            return False
+        # Firebase rounds event time to whole seconds; stream and history keep
+        # milliseconds. Pair each event with at most one copy from the other path.
+        counterpart = min(
+            (
+                old
+                for old, origin in self._event_ids.items()
+                if (origin == "firebase") != (source == "firebase")
+                and old not in self._paired_events
+                and old[1:] == (sequence, code)
+                and abs(old[0] - identity[0]) < timedelta(seconds=1)
+            ),
+            key=lambda old: abs(old[0] - identity[0]),
+            default=None,
+        )
+        self._event_ids[identity] = source
+        if counterpart is not None:
+            self._paired_events.update((identity, counterpart))
+        if len(self._event_ids) > MAX_EVENT_HISTORY:
+            oldest = min(self._event_ids)
+            del self._event_ids[oldest]
+            self._paired_events.discard(oldest)
+            self._event_cutoff = max(self._event_cutoff, oldest[0] + timedelta(microseconds=1))
+        if counterpart is not None or not deliver:
+            return False
+        event = {
+            "code": code,
+            "sequence": sequence,
+            "appliance_timestamp": timestamp.isoformat(),
+            "received_at": dt_util.utcnow().isoformat(),
+            "source": source,
+        }
+        for listener in self._event_listeners:
+            listener(event)
+        self.async_schedule_followup(alert=True)
+        return True
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -838,6 +888,7 @@ class SubZeroAccount:
         self.hass = hass
         self.entry = entry
         self.client = client
+        self.alerts = None
         self.coordinators = {
             device_id: SubZeroCoordinator(hass, entry, client, device_id, device, self._read_failed)
             for device_id, device in selected_devices(entry).items()

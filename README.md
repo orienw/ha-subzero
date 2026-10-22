@@ -151,6 +151,10 @@ Some dishwashers report Start pending whenever they are idle, which the app show
 
 Each appliance has an **Appliance event** entity for automations. It reports events such as oven preheat, probe targets, timer completion, dishwasher cycles, door alerts, and maintenance notifications. Its attributes include the event type, numeric code, sequence, and appliance timestamp. Automations match event type IDs such as `refrigerator_door_ajar`, which Home Assistant shows by name, such as Refrigerator door open. Unrecognized codes use the `unknown` event type and keep their numeric code.
 
+**Firebase appliance alerts** is optional and off by default. Enable it in Configure to receive alerts through the mobile app's separate Google Firebase channel. It uses the same event entities. Alerts contain event metadata; sensor values still come from appliance status. Each event includes `source` and `received_at` alongside its occurrence time, so a late alert can be distinguished from a new occurrence. Copies from Firebase and state notifications are paired by code, sequence, and timestamps less than one second apart, accounting for Firebase's whole-second precision. Event metadata cannot distinguish separate occurrences with identical identifiers and timestamps.
+
+The integration creates its own alert subscription identity. Disabling alerts or deselecting an appliance removes only its own saved subscriptions, retrying every five minutes after failures. Reloading stops the listener and retains its credentials and subscriptions for reconnection. Deleting the integration attempts cleanup for up to 30 seconds and logs failures; cleanup cannot be guaranteed while the cloud service or authentication is unavailable. The API supports unsubscribing events but has no known operation to delete the registration record itself.
+
 The event entity keeps its last occurrence when the connection drops. Events found during a status read are delivered immediately, including while the push connection is recovering.
 
 Startup history is not replayed. The first snapshot or status read after loading only sets a baseline, so events reported while the integration starts do not fire, even when the appliance clock runs ahead. While the integration is loaded, repeated notifications and reconnect history are deduplicated, including when the appliance resets its sequence counter. Events from before the integration loaded are ignored; events that occur while Home Assistant is stopped do not trigger automations on startup. Event timestamps without an offset are read in the appliance clock's time zone, as described above.
@@ -159,7 +163,7 @@ Replay protection relies on the appliance clock. A clock five minutes behind Hom
 
 ## Diagnostics
 
-Wi-Fi signal strength is enabled by default. Uptime, IP address, MAC address, and live reporting mode are diagnostic sensors disabled by default. Enable them from the entity settings when needed. Appliances cut their uptime to eight characters, so from 100 hours it is accurate to ten seconds, and from 1,000 hours to the minute.
+Wi-Fi signal strength and **State confirmed** are enabled by default. Uptime, IP address, MAC address, and live reporting mode are diagnostic sensors disabled by default. Enable them from the entity settings when needed. Appliances cut their uptime to eight characters, so from 100 hours it is accurate to ten seconds, and from 1,000 hours to the minute.
 
 Download diagnostics from the integration or individual device page. Downloads use the cached appliance state and omit account credentials, appliance names, serial numbers, and network identifiers. They also list unrecognized state key names, without their values.
 
@@ -172,6 +176,8 @@ Enable debug logging for `custom_components.subzero` to record channel-open atte
 **Sub-Zero CL4850UFDID is the primary tested appliance.** Cloud status and push snapshots have also been tested with Wolf SO3050PMSP. The additional fridge features, dedicated ice makers, hoods, oven controls, second-cavity support, and Cove entities are covered by automated tests using simulated appliance responses and have not yet been verified against physical appliances.
 
 Other models can be added if the cloud service returns their status. Their entities depend on which recognized properties they report.
+
+The new state-recovery and Firebase paths are covered by simulated Home Assistant tests. Their latency, subscription behavior, and recovery of missed updates still need physical-appliance validation.
 
 Local network access, verification methods other than text message or phone call, and accounts that sign in through an external provider are not supported.
 

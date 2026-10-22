@@ -845,3 +845,22 @@ async def test_options_save_state_check_interval(hass, tokens, interval):
         )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert entry.options == {"devices": DEVICES, "status_poll_interval": interval}
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_options_toggle_firebase_alerts(hass, tokens, enabled):
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        version=2,
+        data={"tokens": token_state(tokens), "devices": DEVICES},
+        options={"firebase_alerts": not enabled},
+    )
+    entry.add_to_hass(hass)
+    with patch("custom_components.subzero.api.SubZeroClient.appliances", return_value=APPLIANCES):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        assert result["data_schema"]({})["firebase_alerts"] is not enabled
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {"device_ids": list(DEVICES), "firebase_alerts": enabled}
+        )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options.get("firebase_alerts", False) is enabled

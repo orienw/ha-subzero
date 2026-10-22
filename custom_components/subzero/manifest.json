@@ -7,5 +7,6 @@
   "integration_type": "hub",
   "iot_class": "cloud_push",
   "issue_tracker": "https://github.com/orienw/ha-subzero/issues",
+  "requirements": ["firebase-messaging==0.4.5"],
   "version": "0.6.2b1"
 }

@@ -45,6 +45,18 @@ async def async_get_config_entry_diagnostics(
         "connection": "cloud_push",
         "push_connected": account.client.push_connected,
         "notifications": dict(account.client.notification_stats),
+        "firebase": (
+            {
+                "connected": account.alerts.push is not None and account.alerts.push.is_started(),
+                "subscriptions_healthy": account.alerts.subscription_healthy,
+                "received": account.alerts.received,
+                "last_received": account.alerts.last_received,
+                "last_error": account.alerts.last_error,
+                "last_sync": account.alerts.last_sync,
+            }
+            if account.alerts is not None
+            else None
+        ),
         "appliances": [
             appliance_diagnostics(coordinator, account.fault_coordinators[coordinator.device_id])
             for coordinator in account.coordinators.values()

@@ -71,8 +71,8 @@
     "step": {
       "init": {
         "title": "Appliances and updates",
-        "description": "The list is refreshed from your Sub-Zero account. Deselecting an appliance removes its Home Assistant device and entities. Periodic state checks help recover missed updates.",
-        "data": {"device_ids": "Appliances", "status_poll_interval": "State check interval"}
+        "description": "The list is refreshed from your Sub-Zero account. Deselecting an appliance removes its Home Assistant device and entities. Periodic state checks help recover missed updates. Optional Firebase alerts use a separate notification channel; sensor values still require appliance status.",
+        "data": {"device_ids": "Appliances", "status_poll_interval": "State check interval", "firebase_alerts": "Firebase appliance alerts"}
       }
     },
     "error": {
