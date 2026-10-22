@@ -33,7 +33,13 @@ from .const import (
     WASH_CYCLES,
     WASH_STATUSES,
 )
-from .controls import appliance_datetime, broil_level, is_finite_number, is_ice_maker
+from .controls import (
+    appliance_datetime,
+    broil_level,
+    is_finite_number,
+    is_ice_maker,
+    uptime_seconds,
+)
 from .coordinator import SubZeroCoordinator, SubZeroFaultsCoordinator
 from .entity import SubZeroEntity, async_setup_entities
 
@@ -272,27 +278,6 @@ DESCRIPTIONS = (
         for key, name in (("ipv4_addr", "IP address"), ("device_wlan_id", "MAC address"))
     ),
 )
-
-
-def uptime_seconds(value: str) -> int | None:
-    """Read hours:minutes:seconds uptime.
-
-    Appliances cut uptime to eight characters, so from 100 hours they drop its last
-    digits, such as 387:52:1 for 387:52:1x. The missing digits count as zeros.
-    """
-    hours, separator, rest = value.partition(":")
-    if not separator:
-        return None
-    if len(value) == 8 and len(hours) > 2:
-        rest += "00:00"[len(rest) :]
-    try:
-        minutes, seconds = map(int, rest.split(":"))
-        total_hours = int(hours)
-    except ValueError:
-        return None
-    if total_hours < 0 or not 0 <= minutes < 60 or not 0 <= seconds < 60:
-        return None
-    return total_hours * 3600 + minutes * 60 + seconds
 
 
 async def async_setup_entry(

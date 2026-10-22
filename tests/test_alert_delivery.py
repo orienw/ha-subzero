@@ -25,6 +25,7 @@ async def test_an_alert_during_the_last_followup_read_starts_a_new_window(hass, 
     client.state.return_value["ref_door_ajar"] = True
     await updates.put(StateUpdate({"ref_door_ajar": True}, full=False))
     await hass.async_block_till_done()
+    coordinator.async_receive_event(dt_util.utcnow(), 0, 101)
     await _advance_followup(hass, freezer, coordinator, 3)
     await _advance_followup(hass, freezer, coordinator, 61)
     assert client.state.await_count == 2
@@ -106,7 +107,6 @@ async def test_channel_alert_then_missed_door_close(hass, freezer, loaded, monke
 
     entry, client, updates, _, _ = loaded
     coordinator = entry.runtime_data.coordinators["test-fridge"]
-    monkeypatch.setattr("custom_components.subzero.coordinator.SNAPSHOT_TIMEOUT", 0)
     monkeypatch.setattr("custom_components.subzero.coordinator.random.uniform", lambda *_: 0)
     device = dr.async_get(hass).async_get_device_by_identifier(
         ("subzero", "test-fridge"), entry.entry_id

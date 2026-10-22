@@ -16,6 +16,7 @@ from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import async_fire_time_changed
 
 from custom_components.subzero.api import ApiError, RateLimited, StateUpdate
+from custom_components.subzero.coordinator import SubZeroCoordinator
 from tests.test_integration import loaded as loaded
 
 pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
@@ -32,7 +33,241 @@ async def enabled_confirmation_sensor(hass, loaded, freezer):
     return entity_id
 
 
-async def test_partial_push_does_not_confirm_unchanged_properties(hass, loaded, freezer):
+@pytest.fixture
+def dated_snapshots(loaded):
+    _, client, _, _, _ = loaded
+    fresh = {
+        **client.state.return_value,
+        "ref_door_ajar": True,
+        "time": "2025-01-01T12:00:00+00:00",
+        "uptime": "13:00:00",
+    }
+    older = {
+        **fresh,
+        "ref_door_ajar": False,
+        "time": "2025-01-01T04:00:00-07:00",
+        "uptime": "12:00:00",
+    }
+    return fresh, older
+
+
+async def test_old_full_push_does_not_publish_confirm_or_clear_an_error(
+    hass, freezer, loaded, dated_snapshots
+):
+    entry, client, _, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    fresh, older = dated_snapshots
+    client.state.return_value = fresh
+    await coordinator.async_read_status()
+    confirmed = coordinator.confirmed_at
+    coordinator.async_receive_event(dt_util.utcnow(), 0, 101)
+    followup = coordinator._followup_task
+    assert followup is not None
+    error = ApiError("Appliance unavailable")
+    coordinator.async_set_update_error(error)
+    published = Mock()
+    coordinator.async_add_listener(published)
+    freezer.tick(1)
+
+    coordinator.apply_update(StateUpdate(older, full=True))
+    await hass.async_block_till_done()
+
+    assert coordinator.data["ref_door_ajar"] is True
+    assert coordinator.confirmed_at == confirmed
+    assert not coordinator.last_update_success
+    assert coordinator.last_exception is error
+    assert coordinator._followup_task is followup
+    assert not followup.cancelling()
+    published.assert_not_called()
+
+
+async def test_queued_old_full_push_does_not_cancel_account_recovery(hass, loaded, dated_snapshots):
+    entry, client, updates, _, _ = loaded
+    account = entry.runtime_data
+    coordinator = account.coordinators["test-fridge"]
+    fresh, older = dated_snapshots
+    client.state.return_value = fresh
+    await coordinator.async_read_status()
+    reading, release = asyncio.Event(), asyncio.Event()
+
+    async def read(_device_id):
+        reading.set()
+        await release.wait()
+        return fresh
+
+    client.state.side_effect = read
+    coordinator.async_set_update_error(ApiError("Status request failed"))
+    account._start_recovery(coordinator)
+    await asyncio.wait_for(reading.wait(), 1)
+    recovery = account._recoveries["test-fridge"]
+    try:
+        await updates.put(StateUpdate(older, full=True))
+        await hass.async_block_till_done()
+        assert account._recoveries["test-fridge"] is recovery
+        assert not recovery.done()
+        assert not recovery.cancelling()
+        assert not coordinator.last_update_success
+        assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "unavailable"
+    finally:
+        release.set()
+
+    await recovery
+    await hass.async_block_till_done()
+    assert coordinator.last_update_success
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
+
+
+async def test_initial_read_discards_old_full_push_but_keeps_later_partial(
+    hass, loaded, dated_snapshots
+):
+    entry, client, _, _, _ = loaded
+    fresh, older = dated_snapshots
+    coordinator = SubZeroCoordinator(
+        hass, entry, client, "test-fridge", {"name": "Kitchen"}, Mock()
+    )
+
+    async def read(_device_id):
+        coordinator.apply_update(StateUpdate(older, full=True))
+        coordinator.apply_update(StateUpdate({"ref_set_temp": 39}, full=False))
+        return fresh
+
+    client.state.side_effect = read
+    with pytest.raises(HomeAssistantError, match="state changed during"):
+        await coordinator.async_read_status()
+    assert coordinator.data["ref_door_ajar"] is True
+    assert coordinator.data["time"] == fresh["time"]
+    assert coordinator.data["uptime"] == fresh["uptime"]
+    assert coordinator.data["ref_set_temp"] == 39
+
+
+async def test_failed_read_cannot_be_rescued_by_an_old_full_push(loaded, freezer, dated_snapshots):
+    entry, client, _, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    fresh, older = dated_snapshots
+    client.state.return_value = fresh
+    await coordinator.async_read_status()
+    confirmed = coordinator.confirmed_at
+    freezer.tick(1)
+
+    async def read(_device_id):
+        coordinator.apply_update(StateUpdate(older, full=True))
+        raise ApiError("Status request failed")
+
+    client.state.side_effect = read
+    with pytest.raises(HomeAssistantError, match="Status request failed"):
+        await coordinator.async_read_status()
+    assert coordinator.confirmed_at == confirmed
+    assert coordinator.data["ref_door_ajar"] is True
+    assert not coordinator.last_update_success
+
+
+async def test_old_full_push_does_not_satisfy_verification(loaded, dated_snapshots):
+    entry, client, _, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    fresh, older = dated_snapshots
+    client.state.return_value = fresh
+    await coordinator.async_read_status()
+    client.state.reset_mock()
+    client.push_connected = True
+
+    async def read(_device_id):
+        coordinator.apply_update(StateUpdate(older, full=True))
+        return fresh
+
+    client.state.side_effect = read
+    await coordinator.async_verify_state()
+    client.state.assert_awaited_once_with("test-fridge")
+    client.open_channel.assert_not_awaited()
+    client.renew_connection.assert_not_called()
+    assert coordinator.data["ref_door_ajar"] is True
+    assert coordinator.verification_stats["complete_snapshots"] == 0
+    assert coordinator.verification_stats["status_reads"] == 1
+    assert coordinator.verification_stats["last_success"] is not None
+
+
+@pytest.mark.parametrize(
+    ("appliance_time", "uptime"),
+    [
+        ("2025-01-01T11:00:00+00:00", "14:00:00"),
+        ("2025-01-01T13:00:00+00:00", "0:01:00"),
+    ],
+    ids=["clock-correction", "reboot"],
+)
+async def test_full_push_accepts_clock_correction_or_reboot(
+    loaded, freezer, dated_snapshots, appliance_time, uptime
+):
+    entry, client, _, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    fresh, older = dated_snapshots
+    client.state.return_value = fresh
+    await coordinator.async_read_status()
+    freezer.tick(1)
+    coordinator.apply_update(
+        StateUpdate({**older, "time": appliance_time, "uptime": uptime}, full=True)
+    )
+    assert coordinator.data["ref_door_ajar"] is False
+    assert coordinator.confirmed_at == dt_util.utcnow()
+
+
+async def test_direct_read_rebases_snapshot_age(loaded, dated_snapshots):
+    entry, client, _, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    fresh, older = dated_snapshots
+    client.state.return_value = fresh
+    await coordinator.async_read_status()
+    client.state.return_value = older
+    await coordinator.async_read_status()
+    assert coordinator.data["time"] == older["time"]
+
+    coordinator.apply_update(
+        StateUpdate(
+            {
+                **fresh,
+                "time": "2025-01-01T11:30:00+00:00",
+                "uptime": "12:30:00",
+            },
+            full=True,
+        )
+    )
+    assert coordinator.data["ref_door_ajar"] is True
+    assert coordinator.data["uptime"] == "12:30:00"
+
+
+@pytest.mark.parametrize(("uptime", "accepted"), [("12:59:01", True), ("12:59:00", False)])
+async def test_old_full_push_allows_uptime_truncation_tolerance(
+    loaded, dated_snapshots, uptime, accepted
+):
+    entry, client, _, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    fresh, older = dated_snapshots
+    client.state.return_value = fresh
+    await coordinator.async_read_status()
+    coordinator.apply_update(StateUpdate({**older, "uptime": uptime}, full=True))
+    assert coordinator.data["ref_door_ajar"] is (not accepted)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("time", None), ("time", "invalid"), ("uptime", None), ("uptime", "invalid")],
+)
+async def test_full_push_without_usable_age_metadata_keeps_existing_behavior(
+    loaded, dated_snapshots, field, value
+):
+    entry, client, _, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    fresh, older = dated_snapshots
+    client.state.return_value = fresh
+    await coordinator.async_read_status()
+    if value is None:
+        del older[field]
+    else:
+        older[field] = value
+    coordinator.apply_update(StateUpdate(older, full=True))
+    assert coordinator.data["ref_door_ajar"] is False
+    assert coordinator.last_update_success
+
+
+async def test_partial_push_does_not_confirm_unchanged_properties(hass, freezer, loaded):
     entry, _, updates, _, _ = loaded
     coordinator = entry.runtime_data.coordinators["test-fridge"]
     confirmed = coordinator.confirmed_at
@@ -62,7 +297,8 @@ async def test_debug_logs_distinguish_observed_and_published_state_without_priva
         }
 
     client.state.side_effect = read
-    await coordinator.async_read_status()
+    with pytest.raises(HomeAssistantError, match="state changed during"):
+        await coordinator.async_read_status()
     replies = [record.message for record in caplog.records if "status response" in record.message]
     publications = [
         record.message for record in caplog.records if "state published" in record.message
@@ -75,13 +311,130 @@ async def test_debug_logs_distinguish_observed_and_published_state_without_priva
         assert private not in caplog.text
 
 
+@pytest.mark.parametrize("opened", [False, True])
+async def test_conflicting_partial_is_immediate_but_read_cannot_confirm_it(
+    hass, freezer, loaded, opened
+):
+    entry, client, _, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    confirmed = coordinator.confirmed_at
+    reading, release = asyncio.Event(), asyncio.Event()
+    client.state.return_value["ref_door_ajar"] = not opened
+    freezer.tick(1)
+
+    async def read(_device_id):
+        snapshot = dict(client.state.return_value)
+        coordinator.apply_update(StateUpdate({"ref_door_ajar": opened}, full=False))
+        reading.set()
+        await release.wait()
+        return snapshot
+
+    client.state.side_effect = read
+    request = asyncio.create_task(coordinator.async_read_status())
+    await asyncio.wait_for(reading.wait(), 1)
+    assert not request.done()
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == (
+        "on" if opened else "off"
+    )
+    assert coordinator.confirmed_at == confirmed
+    release.set()
+    with pytest.raises(HomeAssistantError, match="state changed during"):
+        await request
+    assert coordinator.confirmed_at == confirmed
+    assert coordinator.last_update_success
+
+    client.state.side_effect = None
+    client.state.return_value["ref_door_ajar"] = opened
+    assert await coordinator.async_read_status() == dt_util.utcnow()
+    assert coordinator.confirmed_at > confirmed
+
+
+async def test_matching_partial_during_read_can_confirm_state(loaded, freezer):
+    entry, client, _, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    confirmed = coordinator.confirmed_at
+    freezer.tick(1)
+
+    async def read(_device_id):
+        coordinator.apply_update(StateUpdate({"ref_door_ajar": False}, full=False))
+        return dict(client.state.return_value)
+
+    client.state.side_effect = read
+    assert await coordinator.async_read_status() == dt_util.utcnow()
+    assert coordinator.confirmed_at > confirmed
+
+
+async def test_conflicting_partial_does_not_claim_background_verification(loaded, freezer):
+    entry, client, _, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    confirmed = coordinator.confirmed_at
+    freezer.tick(1)
+
+    async def read(_device_id):
+        coordinator.apply_update(StateUpdate({"ref_door_ajar": True}, full=False))
+        return dict(client.state.return_value)
+
+    client.state.side_effect = read
+    await coordinator.async_verify_state()
+    assert coordinator.confirmed_at == confirmed
+    assert coordinator.verification_stats["last_success"] is None
+    assert coordinator.last_update_success
+    assert coordinator.data["ref_door_ajar"] is True
+
+
+@pytest.mark.parametrize("background", [False, True])
+@pytest.mark.parametrize("full", [False, True])
+async def test_failed_read_with_snapshot_then_conflicting_partial_is_unconfirmed(
+    loaded, freezer, background, full
+):
+    entry, client, _, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    freezer.tick(1)
+
+    async def read(_device_id):
+        coordinator.apply_update(StateUpdate(dict(client.state.return_value), full=True))
+        properties = {"ref_door_ajar": True}
+        if full:
+            properties["appliance_model"] = client.state.return_value["appliance_model"]
+        coordinator.apply_update(StateUpdate(properties, full=full))
+        raise ApiError("Status request failed")
+
+    client.state.side_effect = read
+    if background:
+        await coordinator.async_verify_state()
+        assert coordinator.verification_stats["last_success"] is None
+    else:
+        with pytest.raises(HomeAssistantError, match="state changed during"):
+            await coordinator.async_read_status()
+    assert coordinator._completed_read.confirmed_at is None
+    assert coordinator.last_update_success
+    assert coordinator.data["ref_door_ajar"] is True
+
+
+async def test_partial_property_missing_from_status_reply_is_unconfirmed(loaded, freezer):
+    entry, client, _, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    confirmed = coordinator.confirmed_at
+    freezer.tick(1)
+
+    async def read(_device_id):
+        coordinator.apply_update(StateUpdate({"frz_door_ajar": True}, full=False))
+        return dict(client.state.return_value)
+
+    client.state.side_effect = read
+    with pytest.raises(HomeAssistantError, match="state changed during"):
+        await coordinator.async_read_status()
+    assert coordinator.confirmed_at == confirmed
+    assert coordinator.last_update_success
+    assert coordinator.data["frz_door_ajar"] is True
+
+
 @pytest.mark.parametrize("complete", [False, True])
 async def test_failed_read_only_confirms_a_complete_concurrent_snapshot(
-    hass, loaded, monkeypatch, freezer, complete
+    hass, freezer, loaded, complete
 ):
     entry, client, updates, _, _ = loaded
     coordinator = entry.runtime_data.coordinators["test-fridge"]
-    monkeypatch.setattr("custom_components.subzero.coordinator.SNAPSHOT_TIMEOUT", 0)
     await updates.put(StateUpdate({"ref_door_ajar": True}, full=False))
     await hass.async_block_till_done()
     confirmed = coordinator.confirmed_at
@@ -97,8 +450,7 @@ async def test_failed_read_only_confirms_a_complete_concurrent_snapshot(
         raise ApiError("Status request failed")
 
     client.state.side_effect = failed_read
-    renew = Mock(return_value=True)
-    await coordinator.async_verify_state(renew)
+    await coordinator.async_verify_state()
     if complete:
         assert coordinator.confirmed_at == dt_util.utcnow()
         assert coordinator.verification_stats["last_success"] is not None
@@ -107,7 +459,8 @@ async def test_failed_read_only_confirms_a_complete_concurrent_snapshot(
         assert coordinator.confirmed_at == confirmed
         assert coordinator.verification_stats["last_success"] is None
         assert "ref_door_ajar" in coordinator.missing_state_keys["snapshot"]
-    renew.assert_not_called()
+    client.open_channel.assert_not_awaited()
+    client.renew_connection.assert_not_called()
 
 
 async def test_incomplete_status_reply_does_not_confirm_old_values(loaded, freezer):
@@ -233,6 +586,79 @@ async def test_calls_during_a_read_share_a_newer_followup(hass, loaded):
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
 
 
+async def test_manual_request_during_background_read_reports_its_own_failure(hass, loaded):
+    entry, client, _, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    reading, release = asyncio.Event(), asyncio.Event()
+    client.push_connected = True
+    client.state.reset_mock()
+    coordinator._read_failed = Mock()
+
+    async def read(_device_id):
+        if client.state.await_count == 1:
+            reading.set()
+            await release.wait()
+            return dict(client.state.return_value)
+        raise ApiError("Manual read failed")
+
+    client.state.side_effect = read
+    background = asyncio.create_task(coordinator.async_verify_state())
+    await reading.wait()
+    manual = asyncio.create_task(coordinator.async_read_status())
+    await asyncio.sleep(0)
+    release.set()
+    with pytest.raises(HomeAssistantError, match="Manual read failed"):
+        await manual
+    await background
+    await hass.async_block_till_done()
+    assert client.state.await_count == 2
+    assert not coordinator.last_update_success
+    assert "Manual read failed" in str(coordinator.last_exception)
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "unavailable"
+
+
+async def test_cancelled_queued_manual_read_does_not_change_later_background_failure_policy(
+    hass, loaded
+):
+    entry, client, _, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    reading, release = asyncio.Event(), asyncio.Event()
+    client.push_connected = True
+    client.state.reset_mock()
+    coordinator._read_failed = Mock()
+
+    async def read(_device_id):
+        if client.state.await_count == 1:
+            reading.set()
+            await release.wait()
+            return dict(client.state.return_value)
+        raise ApiError("Background read failed")
+
+    client.state.side_effect = read
+    background = asyncio.create_task(coordinator.async_verify_state())
+    await reading.wait()
+    manual = asyncio.create_task(coordinator.async_read_status())
+    await asyncio.sleep(0)
+    manual.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await manual
+    assert not coordinator._read_task.cancelled()
+    release.set()
+    await background
+    confirmed = coordinator.confirmed_at
+    published = Mock()
+    coordinator.async_add_listener(published)
+
+    await coordinator.async_verify_state()
+    await hass.async_block_till_done()
+
+    assert client.state.await_count == 2
+    assert coordinator.last_update_success
+    assert coordinator.confirmed_at == confirmed
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
+    published.assert_not_called()
+
+
 async def test_cancelled_caller_does_not_cancel_the_shared_read(hass, loaded):
     entry, client, _, _, _ = loaded
     reading, release = asyncio.Event(), asyncio.Event()
@@ -323,11 +749,10 @@ async def test_scheduled_reads_continue_when_push_is_disconnected(hass, loaded, 
 
 
 async def test_rate_limited_checks_leave_confirmation_age_unchanged(
-    hass, loaded, freezer, monkeypatch, enabled_confirmation_sensor
+    hass, loaded, freezer, enabled_confirmation_sensor
 ):
     entry, client, updates, _, _ = loaded
     coordinator = entry.runtime_data.coordinators["test-fridge"]
-    monkeypatch.setattr("custom_components.subzero.coordinator.SNAPSHOT_TIMEOUT", 0)
     confirmed = coordinator.confirmed_at
     client.state.side_effect = RateLimited(600)
     started = dt_util.utcnow()
@@ -363,6 +788,7 @@ async def test_followups_repair_a_missed_door_close_and_stop(hass, freezer, load
     client.state.return_value["ref_door_ajar"] = True
     await updates.put(StateUpdate({"ref_door_ajar": True}, full=False))
     await hass.async_block_till_done()
+    coordinator.async_receive_event(dt_util.utcnow(), 0, 101)
     await _advance_followup(hass, freezer, coordinator, 3)
     assert client.state.await_count == 1
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
@@ -409,10 +835,16 @@ async def test_a_pushed_close_cancels_pending_followups(hass, freezer, loaded):
     entry, client, updates, _, _ = loaded
     coordinator = entry.runtime_data.coordinators["test-fridge"]
     client.state.reset_mock()
-    for opened in (True, False):
-        await updates.put(StateUpdate({"ref_door_ajar": opened}, full=False))
-        await hass.async_block_till_done()
-    await _advance_followup(hass, freezer, coordinator, 10)
+    client.state.return_value["ref_door_ajar"] = True
+    await updates.put(StateUpdate({"ref_door_ajar": True}, full=False))
+    await hass.async_block_till_done()
+    coordinator.async_receive_event(dt_util.utcnow(), 0, 101)
+    await _advance_followup(hass, freezer, coordinator, 3)
+    client.state.assert_awaited_once()
+    client.state.reset_mock()
+    await updates.put(StateUpdate({"ref_door_ajar": False}, full=False))
+    await hass.async_block_till_done()
+    await _advance_followup(hass, freezer, coordinator, 61)
     client.state.assert_not_awaited()
     assert coordinator._followup_task is None
 
@@ -447,6 +879,7 @@ async def test_rate_limits_stop_event_followups_without_claiming_new_state(hass,
     client.state.side_effect = RateLimited(300)
     await updates.put(StateUpdate({"ref_door_ajar": True}, full=False))
     await hass.async_block_till_done()
+    coordinator.async_receive_event(dt_util.utcnow(), 0, 101)
     await _advance_followup(hass, freezer, coordinator, 3)
     await _advance_followup(hass, freezer, coordinator, 181)
     client.state.assert_awaited_once()
@@ -472,6 +905,7 @@ async def test_failed_followup_does_not_keep_an_old_alert_pending(
     client.state.return_value["ref_door_ajar"] = True
     await updates.put(StateUpdate({"ref_door_ajar": True}, full=False))
     await hass.async_block_till_done()
+    coordinator.async_receive_event(dt_util.utcnow(), 0, 101)
     freezer.tick(3)
     async_fire_time_changed(hass, dt_util.utcnow())
     await asyncio.wait_for(reading.wait(), 1)
@@ -492,6 +926,9 @@ async def test_failed_followup_does_not_keep_an_old_alert_pending(
     client.state.return_value["ref_door_ajar"] = False
     await updates.put(StateUpdate(dict(client.state.return_value), full=True))
     await hass.async_block_till_done()
+    if task := coordinator._followup_task:
+        assert task.cancelling()
+        await asyncio.gather(task, return_exceptions=True)
     assert coordinator._followup_task is None
     client.state.reset_mock()
     for opened in (True, False):
@@ -516,6 +953,7 @@ async def test_disabled_checks_also_disable_automatic_event_followups(
     client.state.reset_mock()
     await updates.put(StateUpdate({"ref_door_ajar": True}, full=False))
     await hass.async_block_till_done()
+    coordinator.async_receive_event(dt_util.utcnow(), 0, 101)
     await _advance_followup(hass, freezer, coordinator, 10)
     client.state.assert_not_awaited()
     await coordinator.async_read_status()
@@ -527,6 +965,7 @@ async def test_unloading_cancels_event_followup_timers(hass, freezer, loaded):
     coordinator = entry.runtime_data.coordinators["test-fridge"]
     await updates.put(StateUpdate({"ref_door_ajar": True}, full=False))
     await hass.async_block_till_done()
+    coordinator.async_receive_event(dt_util.utcnow(), 0, 101)
     task = coordinator._followup_task
     assert task is not None
     await hass.config_entries.async_unload(entry.entry_id)
@@ -601,7 +1040,8 @@ async def test_verification_resumes_after_auth_failure_is_recovered_by_push(hass
 
     entry, client, updates, _, _ = loaded
     coordinator = entry.runtime_data.coordinators["test-fridge"]
-    client.open_channel.side_effect = InvalidAuth("Sign-in expired")
+    client.state.reset_mock()
+    client.state.side_effect = InvalidAuth("Sign-in expired")
     freezer.tick(301)
     async_fire_time_changed(hass, dt_util.utcnow())
     await hass.async_block_till_done()
@@ -611,16 +1051,16 @@ async def test_verification_resumes_after_auth_failure_is_recovered_by_push(hass
     await hass.async_block_till_done()
     assert coordinator.last_update_success
 
-    async def open_channel(_device_id):
-        coordinator.apply_update(StateUpdate(dict(client.state.return_value), full=True))
-
-    client.open_channel.side_effect = open_channel
+    client.state.side_effect = None
     freezer.tick(301)
     async_fire_time_changed(hass, dt_util.utcnow())
     await hass.async_block_till_done()
     await entry.runtime_data._verifications["test-fridge"]
-    assert client.open_channel.await_count == 2
+    assert client.state.await_count == 2
+    client.open_channel.assert_not_awaited()
+    client.renew_connection.assert_not_called()
     assert coordinator.verification_stats["checks"] == 2
+    assert coordinator.verification_stats["status_reads"] == 2
 
 
 async def test_an_unexpected_event_listener_failure_does_not_wedge_future_reads(hass, loaded):

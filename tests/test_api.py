@@ -199,6 +199,45 @@ def test_notification_logs_show_structure_without_private_payload_values(caplog)
         assert value not in caplog.text
 
 
+@pytest.mark.parametrize("timestamp", ["2026-10-22T10:54:17.000-07:00", 1792691657, 1792691657.312])
+def test_notification_logs_keep_source_order_metadata(caplog, timestamp):
+    caplog.set_level(logging.DEBUG, logger="custom_components.subzero.api")
+    properties = {"ref_door_ajar": False}
+    event = notification({}, pload={"props": properties, "timestamp": timestamp, "seq": 42})
+    assert api.parse_notification(event, "owner", ["test-fridge"]) == (
+        "test-fridge",
+        api.StateUpdate(properties, full=False),
+    )
+    logged_timestamp = (
+        datetime.fromisoformat(timestamp).isoformat() if isinstance(timestamp, str) else timestamp
+    )
+    assert f"timestamp={logged_timestamp} ({type(timestamp).__name__})" in caplog.text
+    assert "seq=42 (int), arguments=1" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("timestamp", "sequence"),
+    [
+        ("private-timestamp", "private-sequence"),
+        ({"secret": "private-timestamp"}, ["private-sequence"]),
+        (True, False),
+        (float("nan"), None),
+    ],
+)
+def test_notification_logs_redact_invalid_order_metadata(caplog, timestamp, sequence):
+    caplog.set_level(logging.DEBUG, logger="custom_components.subzero.api")
+    properties = {"ref_door_ajar": False}
+    event = notification({}, pload={"props": properties, "timestamp": timestamp, "seq": sequence})
+    assert api.parse_notification(event, "owner", ["test-fridge"]) == (
+        "test-fridge",
+        api.StateUpdate(properties, full=False),
+    )
+    assert "timestamp=None" in caplog.text
+    assert "seq=None" in caplog.text
+    assert "private-timestamp" not in caplog.text
+    assert "private-sequence" not in caplog.text
+
+
 def test_property_changes_are_read_from_alert_payloads():
     event = notification(
         {},
@@ -905,9 +944,8 @@ def test_notification_expiry_is_independent_of_account_token(monkeypatch):
 
 
 @pytest.mark.parametrize("user_id", ["test-owner", "TEST-OWNER"])
-@pytest.mark.parametrize("renewal", ["expiry", "requested", "connecting"])
-async def test_live_signalr_socket_is_renewed_before_token_expiry_or_on_request(
-    hass, aiohttp_server, monkeypatch, socket_enabled, user_id, renewal
+async def test_live_signalr_socket_is_renewed_before_token_expiry(
+    hass, aiohttp_server, monkeypatch, socket_enabled, user_id
 ):
     sockets = []
     commands = []
@@ -916,8 +954,6 @@ async def test_live_signalr_socket_is_renewed_before_token_expiry_or_on_request(
     async def negotiate_user(request):
         assert request.headers["Userid"] == "test-owner"
         assert not request.query
-        if renewal == "connecting":
-            client.renew_connection()
         return web.json_response({"url": origin + "/client/", "accessToken": "short-lived-token"})
 
     async def negotiate_transport(request):
@@ -954,9 +990,7 @@ async def test_live_signalr_socket_is_renewed_before_token_expiry_or_on_request(
     monkeypatch.setattr(api, "API_BASE", origin)
     monkeypatch.setattr(api, "SIGNALR_ORIGIN", origin)
     monkeypatch.setattr(api, "PING_INTERVAL", 0.01)
-    monkeypatch.setattr(
-        api, "notification_lifetime", lambda _: 3000 if renewal == "requested" else 0.35
-    )
+    monkeypatch.setattr(api, "notification_lifetime", lambda _: 0.35)
     client = api.SubZeroClient(async_get_clientsession(hass), "test-key", make_tokens(user_id))
     stream = client.watch(["test-fridge"])
     try:
@@ -965,8 +999,6 @@ async def test_live_signalr_socket_is_renewed_before_token_expiry_or_on_request(
             async for event in stream:
                 if isinstance(event[1], api.StateUpdate):
                     snapshots.append(event)
-                    if renewal == "requested" and len(snapshots) == 1:
-                        client.renew_connection()
                 if len(snapshots) == 2:
                     break
             first, second = snapshots
@@ -974,8 +1006,7 @@ async def test_live_signalr_socket_is_renewed_before_token_expiry_or_on_request(
         assert client.push_connected
         assert len(sockets) == 2 and sockets[0].closed
         assert commands == ["open_cloud_async", "open_cloud_async"]
-        if renewal != "requested":
-            assert pings
+        assert pings
     finally:
         await stream.aclose()
     assert not client.push_connected

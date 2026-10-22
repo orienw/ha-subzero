@@ -65,13 +65,13 @@ from .controls import (
     is_oven,
     start_properties,
     supports_air_filter_reset,
+    uptime_seconds,
     validate_control_properties,
     wash_cancel_enabled,
 )
 
 _LOGGER = logging.getLogger(__name__)
 INITIAL_STATE_TIMEOUT = 16
-SNAPSHOT_TIMEOUT = 16
 FOLLOWUP_DELAYS = (2, 60, 120)
 FOLLOWUP_KEYS = {key for key in BINARY_KEYS if key.endswith(("door_ajar", "timer_active"))} | {
     "kitchen_timer2_active",
@@ -85,6 +85,7 @@ class StateRead:
     confirmed_at: datetime | None
     error: Exception | None = None
     published: int = 0
+    conflicted: bool = False
 
 
 def status_poll_interval(entry: ConfigEntry) -> int:
@@ -150,9 +151,11 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self._unsettled = False
         self._state_lock = asyncio.Lock()
         self._read_requests = 0
+        self._pending_read_error_requests: set[int] = set()
         self._read_task: asyncio.Task[StateRead] | None = None
         self._completed_read: StateRead | None = None
-        self._read_updates: dict | None = None
+        self._read_updates: list[StateUpdate] | None = None
+        self._read_snapshot: dict | None = None
         self._read_error: Exception | None = None
         self._channel_error: ApiError | None = None
         self._event_cutoff = dt_util.utcnow()
@@ -160,8 +163,6 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self._paired_events: set[tuple[datetime, int, int]] = set()
         self._event_listeners: list[Callable[[dict], None]] = []
         self._history_seen = False
-        self._channel_snapshot: asyncio.Future[None] | None = None
-        self._renewed = False
         self._followup_task: asyncio.Task | None = None
         self._followup_alert = False
         self._last_followup = 0.0
@@ -174,69 +175,19 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self.verification_stats: dict[str, int | str | None] = {
             "checks": 0,
             "complete_snapshots": 0,
-            "fallback_reads": 0,
-            "connection_renewals": 0,
+            "status_reads": 0,
             "last_success": None,
         }
 
-    async def async_verify_state(
-        self, renew_connection: Callable[[SubZeroCoordinator], bool]
-    ) -> None:
-        """Request a full push snapshot, falling back to a status read."""
+    async def async_verify_state(self) -> None:
+        """Verify state without reopening a working update channel."""
         self.verification_stats["checks"] += 1
-        confirmation = self._confirmation
-        snapshots = self.verification_stats["complete_snapshots"]
-        snapshot = self._channel_snapshot = self.hass.loop.create_future()
-        opened = False
-        silent = False
-        try:
-            if self.client.push_connected:
-                await self.client.open_channel(self.device_id)
-                opened = True
-                async with asyncio.timeout(SNAPSHOT_TIMEOUT):
-                    await snapshot
-        except RateLimited:
-            # The client also holds off other requests until Retry-After expires.
+        self.verification_stats["status_reads"] += 1
+        result = await self._async_read_result(report_error=False)
+        if result.error is not None:
             return
-        except InvalidAuth as error:
-            self.async_set_update_error(ConfigEntryAuthFailed(str(error)))
-            self.entry.async_start_reauth(self.hass)
-            return
-        except TimeoutError:
-            silent = opened
-        except ApiError:
-            _LOGGER.debug("No verified push snapshot from %s; reading status", self.device["name"])
-        finally:
-            answered = snapshot.done() and not snapshot.cancelled()
-            snapshot.cancel()
-            self._channel_snapshot = None
-        if not answered:
-            self.verification_stats["fallback_reads"] += 1
-            try:
-                data = await self._async_update_data()
-            except ConfigEntryAuthFailed as error:
-                self.async_set_update_error(error)
-                self.entry.async_start_reauth(self.hass)
-                return
-            except Exception as error:
-                if isinstance(error, UpdateFailed) and error.retry_after is not None:
-                    return
-                if not isinstance(error, UpdateFailed):
-                    _LOGGER.exception("Sub-Zero state verification failed unexpectedly")
-                self.async_set_update_error(error)
-                self._read_failed(self)
-                return
-            self.async_set_updated_data(data)
-        if self.last_update_success and self._confirmation > confirmation:
-            self.verification_stats["last_success"] = self.confirmed_at.isoformat()
-            if (
-                silent
-                and self.verification_stats["complete_snapshots"] == snapshots
-                and not self._renewed
-            ):
-                # A working status read with no push snapshot warrants one renewal
-                # until a full snapshot shows that this appliance is reporting again.
-                self._renewed = renew_connection(self)
+        if self.last_update_success and result.confirmed_at is not None:
+            self.verification_stats["last_success"] = result.confirmed_at.isoformat()
 
     @callback
     def _confirm_state(self, properties: dict, source: str) -> bool:
@@ -265,18 +216,18 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
     @callback
     def async_set_updated_data(self, data: dict) -> None:
         self._published += 1
-        active = self._active_conditions()
         super().async_set_updated_data(data)
         _LOGGER.debug("%s state published: %s", self.device["name"], _state_for_log(self.data))
-        updated = self._active_conditions()
-        if updated - active and self.entry.state is ConfigEntryState.LOADED:
-            self.async_schedule_followup()
-        elif not updated and not self._followup_alert and self._followup_task is not None:
+        if (
+            not self._active_conditions()
+            and not self._followup_alert
+            and self._followup_task is not None
+        ):
             self._followup_task.cancel()
 
     @callback
     def async_schedule_followup(self, *, alert: bool = False) -> None:
-        """Check a new alert or active condition without extending an existing window."""
+        """Check a new alert without extending an existing window."""
         if self.entry.pref_disable_polling or not status_poll_interval(self.entry):
             return
         if (
@@ -299,10 +250,16 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                     return
                 self._followup_alert = False
                 self._last_followup = time.monotonic()
-                result = await self._async_read_result()
-                if result.error is not None or (
-                    not self._active_conditions() and not self._followup_alert
-                ):
+                result = await self._async_read_result(report_error=False)
+                if result.error is not None:
+                    self._followup_alert = False
+                    if not self.last_update_success or (
+                        isinstance(result.error, UpdateFailed)
+                        and result.error.retry_after is not None
+                    ):
+                        return
+                    continue
+                if not self._active_conditions() and not self._followup_alert:
                     return
         finally:
             if self._followup_task is asyncio.current_task():
@@ -666,44 +623,65 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             else:
                 self._read_failed(self)
             raise HomeAssistantError(str(error)) from error
+        if result.conflicted:
+            raise HomeAssistantError("Appliance state changed during the status read; try again.")
         if result.confirmed_at is None:
             raise HomeAssistantError("The appliance did not return a complete state snapshot.")
         return result.confirmed_at
 
-    async def _async_read_result(self) -> StateRead:
+    async def _async_read_result(self, *, report_error: bool = True) -> StateRead:
         self._read_requests += 1
         request = self._read_requests
-        while True:
-            task = self._read_task
-            if task is None or (
-                task.done()
-                and not task.cancelled()
-                and (task.exception() is not None or task.result().request < request)
-            ):
-                task = self._read_task = self.entry.async_create_background_task(
-                    self.hass, self._async_read_state(), "Sub-Zero state read"
-                )
-                task.add_done_callback(self._async_read_finished)
-            result = await asyncio.shield(task)
-            if result.request >= request:
-                return result
+        if report_error:
+            self._pending_read_error_requests.add(request)
+        try:
+            while True:
+                task = self._read_task
+                if task is None or (
+                    task.done()
+                    and not task.cancelled()
+                    and (task.exception() is not None or task.result().request < request)
+                ):
+                    task = self._read_task = self.entry.async_create_background_task(
+                        self.hass, self._async_read_state(), "Sub-Zero state read"
+                    )
+                    task.add_done_callback(self._async_read_finished)
+                result = await asyncio.shield(task)
+                if result.request >= request:
+                    return result
+        finally:
+            self._pending_read_error_requests.discard(request)
 
     async def _async_read_state(self) -> StateRead:
         request = self._read_requests
+        report_error = bool(self._pending_read_error_requests)
+        self._pending_read_error_requests.clear()
         confirmation = self._confirmation
         try:
-            data = await self._async_fetch_state()
+            data, conflicted = await self._async_fetch_state()
         except Exception as error:
             result = StateRead(request, None, error, self._published)
-            # A quota deferral did not publish an error for an older waiter to adopt.
-            if not isinstance(error, UpdateFailed) or error.retry_after is None:
+            deferred = isinstance(error, UpdateFailed) and error.retry_after is not None
+            background_failure = (
+                not report_error
+                and isinstance(error, UpdateFailed)
+                and self.last_update_success
+                and self.client.push_connected
+                and self._channel_error is None
+            )
+            # Unpublished failures must not be adopted by an older refresh.
+            if not deferred and not background_failure:
                 self._completed_read = result
                 self.async_set_update_error(error)
             return result
         self.async_set_updated_data(data)
         self._process_events(data, history=True)
-        confirmed = self.confirmed_at if self._confirmation > confirmation else None
-        result = self._completed_read = StateRead(request, confirmed, published=self._published)
+        confirmed = (
+            self.confirmed_at if not conflicted and self._confirmation > confirmation else None
+        )
+        result = self._completed_read = StateRead(
+            request, confirmed, published=self._published, conflicted=conflicted
+        )
         return result
 
     @callback
@@ -734,9 +712,10 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             raise result.error
         return self.data
 
-    async def _async_fetch_state(self) -> dict:
+    async def _async_fetch_state(self) -> tuple[dict, bool]:
         async with self._state_lock:
-            self._read_updates = {}
+            self._read_updates = []
+            self._read_snapshot = None
             self._read_error = None
             try:
                 received = True
@@ -751,7 +730,8 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                         time.monotonic() - started,
                         type(error).__name__,
                     )
-                    model = self._read_updates.get("appliance_model")
+                    updates, _ = self._pending_read_properties(self.data)
+                    model = updates.get("appliance_model")
                     if not isinstance(model, str) or not model:
                         raise
                     data = self.data
@@ -765,23 +745,40 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                     )
                 if error := self._read_error:
                     raise error
-                model = self._read_updates.get("appliance_model")
-                if received and (not model or model == data.get("appliance_model")):
+                updates, partial_keys = self._pending_read_properties(data)
+                # Arrival during a GET does not establish when a partial change
+                # happened. Publish it immediately, but do not certify the merged
+                # state when it contradicts the status reply or a complete pushed
+                # snapshot that rescued a failed GET.
+                reference = data if received else self._read_snapshot
+                observed_keys = partial_keys if received else updates.keys()
+                conflicted = reference is not None and any(
+                    key not in reference
+                    or updates[key] != reference[key]
+                    or type(updates[key]) is not type(reference[key])
+                    for key in observed_keys - {"notifs"}
+                )
+                model = updates.get("appliance_model")
+                if (
+                    received
+                    and not conflicted
+                    and (not model or model == data.get("appliance_model"))
+                ):
                     self._confirm_state(data, "read")
                 self.unrecognized_keys.update(data.keys() - STATE_KEYS)
                 if "notifs" in data:
                     data = {**data, "notifs": notification_records(data)}
-                model = self._read_updates.get("appliance_model")
+                model = updates.get("appliance_model")
                 if isinstance(model, str) and model and model != data.get("appliance_model"):
                     data = {}
                 history = data.get("notifs")
                 data = {
                     **{key: value for key, value in data.items() if key in STATE_KEYS},
-                    **self._read_updates,
+                    **updates,
                 }
                 if history is not None:
-                    data["notifs"] = [*history, *self._read_updates.get("notifs", [])]
-                return self._discard_excluded(data)
+                    data["notifs"] = [*history, *updates.get("notifs", [])]
+                return self._discard_excluded(data), conflicted
             except InvalidAuth as error:
                 raise ConfigEntryAuthFailed(str(error)) from error
             except RateLimited as error:
@@ -790,7 +787,51 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 raise UpdateFailed(str(error)) from error
             finally:
                 self._read_updates = None
+                self._read_snapshot = None
                 self._read_error = None
+
+    def _snapshot_is_older(self, properties: dict, reference: dict) -> bool:
+        if properties.get("appliance_model") != reference.get("appliance_model"):
+            return False
+        observed = appliance_datetime(properties.get("time"), self.clock_zone)
+        previous = appliance_datetime(reference.get("time"), self.clock_zone)
+        uptime = properties.get("uptime")
+        previous_uptime = reference.get("uptime")
+        if (
+            observed is None
+            or previous is None
+            or not isinstance(uptime, str)
+            or not isinstance(previous_uptime, str)
+        ):
+            return False
+        uptime = uptime_seconds(uptime)
+        previous_uptime = uptime_seconds(previous_uptime)
+        # Truncated appliance uptime can have minute precision. Requiring both
+        # clocks to regress also allows clock adjustments and ordinary reboots.
+        return (
+            uptime is not None
+            and previous_uptime is not None
+            and uptime <= previous_uptime - 60
+            and observed <= previous - timedelta(minutes=1)
+        )
+
+    def _pending_read_properties(self, reference: dict) -> tuple[dict, set[str]]:
+        properties = {}
+        partial_keys = set()
+        for update in self._read_updates or ():
+            if update.full:
+                if self._snapshot_is_older(update.properties, reference):
+                    continue
+                if update.properties["appliance_model"] != reference.get("appliance_model"):
+                    properties.clear()
+                    partial_keys.clear()
+                    reference = {}
+                partial_keys.difference_update(update.properties)
+            else:
+                partial_keys.update(update.properties)
+            properties.update(update.properties)
+            reference = {**reference, **update.properties}
+        return properties, partial_keys
 
     def _discard_excluded(self, data: dict) -> dict:
         """Drop the properties the app discards for the appliance type.
@@ -833,7 +874,12 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             backoff = min(backoff * 2, MAX_RECONNECT_DELAY)
 
     @callback
-    def apply_update(self, update: StateUpdate) -> None:
+    def apply_update(self, update: StateUpdate) -> bool:
+        self.push_stats["snapshots" if update.full else "updates"] += 1
+        self.push_stats["last_received"] = dt_util.utcnow().isoformat()
+        if update.full and self._snapshot_is_older(update.properties, self.data):
+            _LOGGER.debug("Ignoring an older snapshot from %s", self.device["name"])
+            return False
         self.unrecognized_keys.update(update.properties.keys() - STATE_KEYS)
         if zone := clock_zone(update.properties.get("time")):
             self.clock_zone = zone
@@ -848,18 +894,11 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             self._read_error = None
             self._channel_error = None
             if self._read_updates is not None:
-                if update.full and properties["appliance_model"] != self.data.get(
-                    "appliance_model"
-                ):
-                    self._read_updates.clear()
-                self._read_updates.update(properties)
-        self.push_stats["snapshots" if update.full else "updates"] += 1
-        self.push_stats["last_received"] = dt_util.utcnow().isoformat()
+                self._read_updates.append(StateUpdate(properties, full=update.full))
+                if complete_snapshot:
+                    self._read_snapshot = properties
         if complete_snapshot:
             self.verification_stats["complete_snapshots"] += 1
-            self._renewed = False
-            if self._channel_snapshot is not None and not self._channel_snapshot.done():
-                self._channel_snapshot.set_result(None)
         _LOGGER.debug(
             "%s %s: %s",
             self.device["name"],
@@ -883,6 +922,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 self.async_set_updated_data(updated)
         if update.full or "notifs" in properties:
             self._process_events(properties, history=update.full)
+        return True
 
 
 class SubZeroFaultsCoordinator(DataUpdateCoordinator[list[ApplianceFault]]):
@@ -960,7 +1000,6 @@ class SubZeroAccount:
         self._recoveries: dict[str, asyncio.Task] = {}
         self._verification_order = cycle(self.coordinators.values())
         self._verifications: dict[str, asyncio.Task] = {}
-        self._last_renewal: float | None = None
 
     async def async_setup(self) -> None:
         if not self.coordinators:
@@ -1048,7 +1087,10 @@ class SubZeroAccount:
             self.entry.pref_disable_polling
             or (
                 not coordinator.last_update_success
-                and isinstance(coordinator.last_exception, ConfigEntryAuthFailed | InvalidAuth)
+                and (
+                    coordinator._channel_error is not None
+                    or isinstance(coordinator.last_exception, ConfigEntryAuthFailed | InvalidAuth)
+                )
             )
             or pending is not None
             and not pending.done()
@@ -1056,22 +1098,9 @@ class SubZeroAccount:
             return
         self._verifications[coordinator.device_id] = self.entry.async_create_background_task(
             self.hass,
-            coordinator.async_verify_state(self._renew_connection),
+            coordinator.async_verify_state(),
             "Sub-Zero state verification",
         )
-
-    @callback
-    def _renew_connection(self, coordinator: SubZeroCoordinator) -> bool:
-        now = time.monotonic()
-        if not self.client.push_connected or (
-            self._last_renewal is not None
-            and now - self._last_renewal < status_poll_interval(self.entry)
-        ):
-            return False
-        self._last_renewal = now
-        coordinator.verification_stats["connection_renewals"] += 1
-        self.client.renew_connection()
-        return True
 
     @callback
     def set_error(self, error: Exception) -> None:
@@ -1095,6 +1124,8 @@ class SubZeroAccount:
         if (
             self.entry.state is ConfigEntryState.LOADED
             and not coordinator.last_update_success
+            and coordinator._channel_error is None
+            and self.client.push_connected
             and not isinstance(coordinator.last_exception, ConfigEntryAuthFailed)
         ):
             self._start_recovery(coordinator)
@@ -1108,15 +1139,7 @@ class SubZeroAccount:
             try:
                 async for device_id, update in self.client.watch(list(self.coordinators)):
                     coordinator = self.coordinators[device_id]
-                    if isinstance(update, ApiError) or (
-                        isinstance(update, StateUpdate) and update.full
-                    ):
-                        if recovery := recoveries.pop(device_id, None):
-                            canceled.add(recovery)
-                            recovery.add_done_callback(canceled.discard)
-                            recovery.cancel()
-                        if ready := self._initial_states.get(device_id):
-                            ready.set()
+                    accepted = True
                     if isinstance(update, ApiError):
                         coordinator._channel_error = update
                         coordinator.async_set_update_error(update)
@@ -1124,7 +1147,16 @@ class SubZeroAccount:
                         coordinator._read_error = None
                         coordinator._channel_error = None
                     else:
-                        coordinator.apply_update(update)
+                        accepted = coordinator.apply_update(update)
+                    if isinstance(update, ApiError) or (
+                        isinstance(update, StateUpdate) and update.full and accepted
+                    ):
+                        if recovery := recoveries.pop(device_id, None):
+                            canceled.add(recovery)
+                            recovery.add_done_callback(canceled.discard)
+                            recovery.cancel()
+                        if ready := self._initial_states.get(device_id):
+                            ready.set()
                     if (
                         not coordinator.last_update_success
                         and device_id not in self._initial_states
@@ -1152,8 +1184,12 @@ class SubZeroAccount:
                 self.set_error(error)
                 retry_after = 0
             finally:
-                if canceled:
-                    await asyncio.gather(*canceled, return_exceptions=True)
+                pending = {*recoveries.values(), *canceled}
+                for recovery in pending:
+                    recovery.cancel()
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
+                recoveries.clear()
             if time.monotonic() - started >= 120:
                 backoff = RECONNECT_DELAY
             await asyncio.sleep(max(backoff, retry_after) + random.uniform(0, 5))

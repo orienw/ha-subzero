@@ -304,11 +304,29 @@ def parse_notification(
         return None
     properties = _object(message.get("pload"))
     message_type = message.get("type")
+    timestamp = properties.get("timestamp")
+    timestamp_type = type(timestamp).__name__
+    if isinstance(timestamp, str):
+        try:
+            timestamp = datetime.fromisoformat(timestamp).isoformat()
+        except ValueError:
+            timestamp = None
+    elif type(timestamp) not in (int, float) or (
+        type(timestamp) is float and not math.isfinite(timestamp)
+    ):
+        timestamp = None
+    sequence = properties.get("seq")
     _LOGGER.debug(
-        "Appliance %d notification: type=%s, payload keys=%s",
+        "Appliance %d notification: type=%s, payload keys=%s, "
+        "timestamp=%s (%s), seq=%s (%s), arguments=%d",
         device_ids.index(device_id) + 1,
         message_type if isinstance(message_type, int) else "unknown",
         sorted(properties),
+        timestamp,
+        timestamp_type,
+        sequence if type(sequence) is int else None,
+        type(sequence).__name__,
+        len(arguments),
     )
     wrapper = "root"
     for key in ("resp", "props"):
@@ -357,7 +375,6 @@ class SubZeroClient:
         self._refresh_lock = asyncio.Lock()
         self._retry_at = 0.0
         self.push_connected = False
-        self._renewal_requested = False
         self.notification_stats: dict[str, int | str | None] = {
             "received": 0,
             "ignored": 0,
@@ -730,11 +747,6 @@ class SubZeroClient:
         if codes := await self.alert_types(psid, device_id):
             await self.unsubscribe_alerts(psid, device_id, codes)
 
-    def renew_connection(self) -> None:
-        """Recreate the notification connection within one ping interval."""
-        if self.push_connected:
-            self._renewal_requested = True
-
     async def watch(
         self, device_ids: list[str]
     ) -> AsyncIterator[tuple[str, StateUpdate | ApiError | ChannelOpened]]:
@@ -749,7 +761,6 @@ class SubZeroClient:
     async def _watch_connection(
         self, device_ids: list[str]
     ) -> AsyncIterator[tuple[str, StateUpdate | ApiError | ChannelOpened]]:
-        self._renewal_requested = False
         info = await self._request(
             "POST", "/signal-r/negotiateUser", user_id=self.tokens["user_id"]
         )
@@ -866,7 +877,7 @@ class SubZeroClient:
                                 pending_channels.discard(device_id)
                             yield device_id, update
                         now = time.monotonic()
-                        if now >= renew_at or self._renewal_requested:
+                        if now >= renew_at:
                             return
                         if now - last_received > 60:
                             raise ApiError("Sub-Zero's notification connection stopped responding.")
