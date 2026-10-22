@@ -194,6 +194,39 @@ async def test_cross_source_copies_do_not_replay_repeated_events(
     assert all(event["sequence"] == sequence for event in observed)
 
 
+@fridge
+@pytest.mark.parametrize("first_source", ["channel", "firebase"])
+async def test_distinct_alerts_survive_missing_copies_and_clock_skew(
+    cloud_appliance, alerts, freezer, first_source
+):
+    observed = []
+    cloud_appliance.coordinator.async_add_event_listener(observed.append)
+    freezer.tick(30)
+    first = dt_util.utcnow().replace(microsecond=0)
+
+    async def channel(when):
+        await cloud_appliance.update(
+            {
+                **cloud_appliance.state,
+                "notifs": [{"notif_seq": 0, "notif_type": 101, "timestamp": when.isoformat()}],
+            }
+        )
+
+    if first_source == "channel":
+        await channel(first + timedelta(seconds=9))
+    else:
+        alerts._on_alert(message(code=101, sequence=0, timestamp=first), "first", None)
+
+    freezer.tick(61)
+    second = first + timedelta(seconds=61)
+    if first_source == "channel":
+        alerts._on_alert(message(code=101, sequence=0, timestamp=second), "second", None)
+    else:
+        await channel(second - timedelta(seconds=9))
+
+    assert len(observed) == 2
+
+
 @oven
 async def test_old_alerts_are_ignored_and_late_alerts_keep_their_occurrence_time(
     hass, freezer, cloud_appliance, alerts
