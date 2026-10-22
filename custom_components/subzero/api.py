@@ -9,7 +9,7 @@ import random
 import time
 import uuid
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection
 from contextlib import aclosing
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -138,6 +138,12 @@ def token_state(tokens: dict, previous: dict | None = None) -> dict:
         "expires_at": expires_at,
         "user_id": user_id.lower(),
         "api_user_id": user_id,
+        # Every form of the account id the token carries; a pushed frame may name either.
+        "account_ids": sorted(
+            value.lower()
+            for value in {claims.get("mergedId"), claims.get("sub")}
+            if isinstance(value, str) and value
+        ),
     }
     if identity is not None:
         state["id_token"] = identity
@@ -259,16 +265,23 @@ def notification_records(properties: dict) -> list[dict]:
 
 
 def parse_notification(
-    event: dict, user_id: str, device_ids: list[str]
+    event: dict, account_ids: str | Collection[str], device_ids: list[str]
 ) -> tuple[str, StateUpdate | None] | None:
-    """Read state from response, property-change, or root payloads."""
+    """Read state from response, property-change, or root payloads.
+
+    A legacy two-argument frame names the account it is for, in whichever form of
+    the account id the service chose.
+    """
     if event.get("type") != 1 or event.get("target") != "ConnectedApplianceMessage":
         return None
     arguments = event.get("arguments", [])
     if not isinstance(arguments, list):
         raise ApiError("Sub-Zero sent invalid notification arguments.")
     if len(arguments) == 2:
-        if not isinstance(arguments[0], str) or arguments[0].lower() != user_id.lower():
+        accepted = {account_ids} if isinstance(account_ids, str) else set(account_ids)
+        if not isinstance(arguments[0], str) or arguments[0].lower() not in {
+            account_id.lower() for account_id in accepted
+        }:
             _LOGGER.debug("Ignoring a notification addressed to another account")
             return None
         envelope = _object(arguments[1])
@@ -837,7 +850,7 @@ class SubZeroClient:
                             self.notification_stats["last_received"] = datetime.now(UTC).isoformat()
                             try:
                                 parsed = parse_notification(
-                                    event, self.tokens["user_id"], device_ids
+                                    event, self.tokens["account_ids"], device_ids
                                 )
                             except ApiError as error:
                                 self.notification_stats["invalid"] += 1

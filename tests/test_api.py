@@ -4,11 +4,13 @@ import asyncio
 import base64
 import json
 import logging
+import time
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
+import jwt
 import pytest
 from aiohttp import web
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -52,6 +54,28 @@ def test_notifications_keep_falsy_values(legacy):
         "test-fridge",
         api.StateUpdate(properties, full=False),
     )
+
+
+def test_legacy_frames_accept_either_account_id_form():
+    tokens = {
+        "access_token": jwt.encode(
+            {"mergedId": "Merged-Id", "sub": "Sub-Id", "exp": int(time.time()) + 3600},
+            "synthetic-key-for-tests-only-32-bytes",
+            algorithm="HS256",
+        ),
+        "refresh_token": "test-refresh",
+    }
+    state = api.token_state(tokens)
+    assert state["user_id"] == "merged-id"
+    assert state["account_ids"] == ["merged-id", "sub-id"]
+    for user in ("MERGED-ID", "sub-id"):
+        event = notification({"ref_door_ajar": True}, user=user)
+        assert api.parse_notification(event, state["account_ids"], ["test-fridge"]) == (
+            "test-fridge",
+            api.StateUpdate({"ref_door_ajar": True}, full=False),
+        )
+    event = notification({"ref_door_ajar": True}, user="other")
+    assert api.parse_notification(event, state["account_ids"], ["test-fridge"]) is None
 
 
 def test_notifications_from_other_accounts_are_ignored(caplog):
