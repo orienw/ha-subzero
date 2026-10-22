@@ -44,6 +44,8 @@ async def loaded(hass, tokens, request):
             "temperature_unit": getattr(request, "param", "F"),
             "tokens": token_state(tokens),
         },
+        # Timing tests count on five-minute checks; the default is ten.
+        options={"status_poll_interval": 300},
     )
     entry.add_to_hass(hass)
     updates = asyncio.Queue()
@@ -132,6 +134,21 @@ async def test_reported_properties_drive_entity_discovery(hass, loaded):
     assert entry.unique_id == "test-fridge"
     assert entry.data["devices"] == {"test-fridge": {"name": "Kitchen", "temperature_unit": "F"}}
     client.state.assert_awaited_once()
+
+
+async def test_state_checks_default_to_ten_minutes(hass, loaded):
+    entry, client, _, _, _ = loaded
+    hass.config_entries.async_update_entry(entry, options={})
+    await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    client.open_channel.reset_mock()
+    started = dt_util.utcnow()
+    async_fire_time_changed(hass, started + timedelta(seconds=301))
+    await hass.async_block_till_done()
+    client.open_channel.assert_not_awaited()
+    async_fire_time_changed(hass, started + timedelta(seconds=601))
+    await hass.async_block_till_done()
+    client.open_channel.assert_awaited_once_with("test-fridge")
 
 
 @pytest.mark.parametrize("system_option", [False, True])

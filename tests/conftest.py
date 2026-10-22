@@ -54,6 +54,8 @@ async def cloud_appliance(hass, tokens, request, enable_custom_integrations):
             "tokens": token_state(tokens),
             "devices": {"appliance": {"name": "Kitchen", "temperature_unit": "F"}},
         },
+        # Timing tests count on five-minute checks; the default is ten.
+        options={"status_poll_interval": 300},
     )
     entry.add_to_hass(hass)
     updates = asyncio.Queue()
