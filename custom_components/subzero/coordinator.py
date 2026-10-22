@@ -279,13 +279,14 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         """Check a new alert or active condition without extending an existing window."""
         if self.entry.pref_disable_polling or not status_poll_interval(self.entry):
             return
-        self._followup_alert |= alert
         if (
             self._followup_task is not None
             and not self._followup_task.done()
             and not self._followup_task.cancelling()
         ):
+            self._followup_alert |= alert
             return
+        self._followup_alert = alert
         self._followup_task = self.entry.async_create_background_task(
             self.hass, self._async_followup(), "Sub-Zero event follow-up"
         )

@@ -440,6 +440,53 @@ async def test_rate_limits_stop_event_followups_without_claiming_new_state(hass,
     assert coordinator._followup_task is None
 
 
+@pytest.mark.parametrize("rate_limited", [False, True])
+async def test_failed_followup_does_not_keep_an_old_alert_pending(
+    hass, freezer, loaded, rate_limited
+):
+    entry, client, updates, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    reading, release = asyncio.Event(), asyncio.Event()
+
+    async def read(_device_id):
+        reading.set()
+        await release.wait()
+        raise RateLimited(60) if rate_limited else ApiError("Status read failed")
+
+    client.state.side_effect = read
+    client.state.return_value["ref_door_ajar"] = True
+    await updates.put(StateUpdate({"ref_door_ajar": True}, full=False))
+    await hass.async_block_till_done()
+    freezer.tick(3)
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await asyncio.wait_for(reading.wait(), 1)
+    await updates.put(
+        StateUpdate(
+            {
+                "notifs": [
+                    {"notif_seq": 1, "notif_type": 101, "timestamp": dt_util.utcnow().isoformat()}
+                ]
+            },
+            full=False,
+        )
+    )
+    await hass.async_block_till_done()
+    release.set()
+    await coordinator._read_task
+    client.state.side_effect = None
+    client.state.return_value["ref_door_ajar"] = False
+    await updates.put(StateUpdate(dict(client.state.return_value), full=True))
+    await hass.async_block_till_done()
+    assert coordinator._followup_task is None
+    client.state.reset_mock()
+    for opened in (True, False):
+        await updates.put(StateUpdate({"ref_door_ajar": opened}, full=False))
+        await hass.async_block_till_done()
+    await _advance_followup(hass, freezer, coordinator, 61)
+    client.state.assert_not_awaited()
+    assert coordinator._followup_task is None
+
+
 @pytest.mark.parametrize("system_option", [False, True])
 async def test_disabled_checks_also_disable_automatic_event_followups(
     hass, freezer, loaded, system_option
