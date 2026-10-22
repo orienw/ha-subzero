@@ -306,6 +306,9 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         finally:
             if self._followup_task is asyncio.current_task():
                 self._followup_task = None
+        if self._followup_alert:
+            # An alert that arrived during the last read starts its own window.
+            self.async_schedule_followup(alert=True)
 
     @callback
     def async_add_event_listener(self, listener: Callable[[dict], None]) -> Callable[[], None]:
