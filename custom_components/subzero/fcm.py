@@ -11,6 +11,7 @@ from contextlib import suppress
 from datetime import UTC, datetime
 
 from firebase_messaging import FcmPushClient, FcmRegisterConfig
+from firebase_messaging.fcmpushclient import ErrorType
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -200,11 +201,23 @@ class FcmAlerts:
                         or not self.push.tasks
                         or any(task.done() for task in self.push.tasks)
                     ):
+                        previous = self.push
                         await self._close_push()
+                        credentials = copy.deepcopy(self.entry.data.get("fcm_credentials"))
+                        if (
+                            previous is not None
+                            and previous.sequential_error_counters.get(ErrorType.LOGIN, 0) >= 3
+                        ):
+                            # 0.4.5 can keep rejected credentials after an anonymous check-in.
+                            self._save(fcm_credentials=None)
+                            credentials = None
+                            _LOGGER.warning(
+                                "Firebase login rejected saved credentials; registering again"
+                            )
                         self.push = FcmPushClient(
                             self._on_alert,
                             FcmRegisterConfig(**FIREBASE_CONFIG),
-                            copy.deepcopy(self.entry.data.get("fcm_credentials")),
+                            credentials,
                             self._save_credentials,
                             http_client_session=async_get_clientsession(self.hass),
                         )

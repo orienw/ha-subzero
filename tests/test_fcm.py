@@ -5,6 +5,7 @@ from datetime import timedelta
 from unittest.mock import AsyncMock
 
 import pytest
+from firebase_messaging.fcmpushclient import ErrorType
 from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import (
@@ -79,6 +80,8 @@ def push_clients(monkeypatch):
     class Push:
         def __init__(self, callback, config, credentials, save, **kwargs):
             self.callback = callback
+            self.initial_credentials = credentials
+            self.sequential_error_counters = {}
             self.credentials = credentials or {"fcm": {"registration": {"token": "test-token"}}}
             self.save = save
             self.tasks = []
@@ -414,3 +417,43 @@ async def test_door_alert_missed_close_and_delayed_reminder(
     assert [event.data["stage"] for event in notifications] == ["initial"]
     assert len(events) == 1
     assert hass.states.get("automation.door_reminder").attributes["current"] == 0
+
+
+@oven
+@pytest.mark.parametrize("registration_fails", [False, True])
+async def test_rejected_gcm_credentials_are_replaced_without_changing_our_subscription_identity(
+    hass, freezer, cloud_appliance, alerts, push_clients, monkeypatch, registration_fails
+):
+    old = {"fcm": {"registration": {"token": "rejected-token"}}}
+    alerts._save_credentials(old)
+    alerts.start()
+    await hass.async_block_till_done()
+    first = push_clients[0]
+    psid = alerts.entry.data["fcm_psid"]
+    ids = dict(alerts.entry.data["fcm_registration_ids"])
+    first.sequential_error_counters[ErrorType.LOGIN] = 3
+    first.do_listen = False
+    for task in first.tasks:
+        task.cancel()
+    await asyncio.gather(*first.tasks, return_exceptions=True)
+    if registration_fails:
+        original = type(first).checkin_or_register
+
+        async def checkin(push):
+            if len(push_clients) == 2:
+                raise RuntimeError("Registration temporarily failed")
+            return await original(push)
+
+        monkeypatch.setattr(type(first), "checkin_or_register", checkin)
+    freezer.tick(61)
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+    assert push_clients[1].initial_credentials is None
+    if registration_fails:
+        freezer.tick(301)
+        async_fire_time_changed(hass, dt_util.utcnow())
+        await hass.async_block_till_done()
+        assert push_clients[2].initial_credentials is None
+    assert alerts.entry.data["fcm_credentials"]["fcm"]["registration"]["token"] == "test-token"
+    assert alerts.entry.data["fcm_psid"] == psid
+    assert alerts.entry.data["fcm_registration_ids"] == ids
