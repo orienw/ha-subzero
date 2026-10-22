@@ -161,6 +161,23 @@ async def test_failed_read_cannot_be_rescued_by_an_old_full_push(loaded, freezer
     assert not coordinator.last_update_success
 
 
+async def test_old_incomplete_snapshot_during_read_is_ignored(loaded, freezer, dated_snapshots):
+    entry, client, _, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    fresh, older = dated_snapshots
+    del older["ref_set_temp"]
+
+    async def read(_device_id):
+        coordinator.apply_update(StateUpdate(older, full=True))
+        return fresh
+
+    client.state.side_effect = read
+    assert await coordinator.async_read_status() == dt_util.utcnow()
+    assert coordinator.data["ref_door_ajar"] is True
+    assert coordinator.data["time"] == fresh["time"]
+    assert coordinator.data["uptime"] == fresh["uptime"]
+
+
 async def test_old_full_push_does_not_satisfy_verification(loaded, dated_snapshots):
     entry, client, _, _, _ = loaded
     coordinator = entry.runtime_data.coordinators["test-fridge"]
@@ -312,8 +329,9 @@ async def test_debug_logs_distinguish_observed_and_published_state_without_priva
 
 
 @pytest.mark.parametrize("opened", [False, True])
-async def test_conflicting_partial_is_immediate_but_read_cannot_confirm_it(
-    hass, freezer, loaded, opened
+@pytest.mark.parametrize("full", [False, True], ids=["partial", "incomplete-snapshot"])
+async def test_conflicting_incomplete_push_is_immediate_but_read_cannot_confirm_it(
+    hass, freezer, loaded, opened, full
 ):
     entry, client, _, _, _ = loaded
     coordinator = entry.runtime_data.coordinators["test-fridge"]
@@ -324,7 +342,10 @@ async def test_conflicting_partial_is_immediate_but_read_cannot_confirm_it(
 
     async def read(_device_id):
         snapshot = dict(client.state.return_value)
-        coordinator.apply_update(StateUpdate({"ref_door_ajar": opened}, full=False))
+        properties = {"ref_door_ajar": opened}
+        if full:
+            properties["appliance_model"] = snapshot["appliance_model"]
+        coordinator.apply_update(StateUpdate(properties, full=full))
         reading.set()
         await release.wait()
         return snapshot
@@ -349,14 +370,18 @@ async def test_conflicting_partial_is_immediate_but_read_cannot_confirm_it(
     assert coordinator.confirmed_at > confirmed
 
 
-async def test_matching_partial_during_read_can_confirm_state(loaded, freezer):
+@pytest.mark.parametrize("full", [False, True], ids=["partial", "incomplete-snapshot"])
+async def test_matching_incomplete_push_during_read_can_confirm_state(loaded, freezer, full):
     entry, client, _, _, _ = loaded
     coordinator = entry.runtime_data.coordinators["test-fridge"]
     confirmed = coordinator.confirmed_at
     freezer.tick(1)
 
     async def read(_device_id):
-        coordinator.apply_update(StateUpdate({"ref_door_ajar": False}, full=False))
+        properties = {"ref_door_ajar": False}
+        if full:
+            properties["appliance_model"] = client.state.return_value["appliance_model"]
+        coordinator.apply_update(StateUpdate(properties, full=full))
         return dict(client.state.return_value)
 
     client.state.side_effect = read
@@ -364,14 +389,20 @@ async def test_matching_partial_during_read_can_confirm_state(loaded, freezer):
     assert coordinator.confirmed_at > confirmed
 
 
-async def test_conflicting_partial_does_not_claim_background_verification(loaded, freezer):
+@pytest.mark.parametrize("full", [False, True], ids=["partial", "incomplete-snapshot"])
+async def test_conflicting_incomplete_push_does_not_claim_background_verification(
+    loaded, freezer, full
+):
     entry, client, _, _, _ = loaded
     coordinator = entry.runtime_data.coordinators["test-fridge"]
     confirmed = coordinator.confirmed_at
     freezer.tick(1)
 
     async def read(_device_id):
-        coordinator.apply_update(StateUpdate({"ref_door_ajar": True}, full=False))
+        properties = {"ref_door_ajar": True}
+        if full:
+            properties["appliance_model"] = client.state.return_value["appliance_model"]
+        coordinator.apply_update(StateUpdate(properties, full=full))
         return dict(client.state.return_value)
 
     client.state.side_effect = read
@@ -380,6 +411,35 @@ async def test_conflicting_partial_does_not_claim_background_verification(loaded
     assert coordinator.verification_stats["last_success"] is None
     assert coordinator.last_update_success
     assert coordinator.data["ref_door_ajar"] is True
+
+
+@pytest.mark.parametrize("opened", [False, True])
+async def test_complete_snapshot_supersedes_an_incomplete_push_during_read(loaded, freezer, opened):
+    entry, client, _, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    confirmed = coordinator.confirmed_at
+    freezer.tick(1)
+
+    async def read(_device_id):
+        coordinator.apply_update(
+            StateUpdate(
+                {
+                    "appliance_model": client.state.return_value["appliance_model"],
+                    "ref_door_ajar": True,
+                },
+                full=True,
+            )
+        )
+        coordinator.apply_update(
+            StateUpdate({**client.state.return_value, "ref_door_ajar": opened}, full=True)
+        )
+        return dict(client.state.return_value)
+
+    client.state.side_effect = read
+    assert await coordinator.async_read_status() == dt_util.utcnow()
+    assert coordinator.confirmed_at > confirmed
+    assert not coordinator._completed_read.conflicted
+    assert coordinator.data["ref_door_ajar"] is opened
 
 
 @pytest.mark.parametrize("background", [False, True])

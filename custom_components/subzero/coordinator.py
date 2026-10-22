@@ -154,7 +154,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self._pending_read_error_requests: set[int] = set()
         self._read_task: asyncio.Task[StateRead] | None = None
         self._completed_read: StateRead | None = None
-        self._read_updates: list[StateUpdate] | None = None
+        self._read_updates: list[tuple[StateUpdate, bool]] | None = None
         self._read_snapshot: dict | None = None
         self._read_error: Exception | None = None
         self._channel_error: ApiError | None = None
@@ -818,7 +818,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
     def _pending_read_properties(self, reference: dict) -> tuple[dict, set[str]]:
         properties = {}
         partial_keys = set()
-        for update in self._read_updates or ():
+        for update, complete_snapshot in self._read_updates or ():
             if update.full:
                 if self._snapshot_is_older(update.properties, reference):
                     continue
@@ -826,6 +826,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                     properties.clear()
                     partial_keys.clear()
                     reference = {}
+            if complete_snapshot:
                 partial_keys.difference_update(update.properties)
             else:
                 partial_keys.update(update.properties)
@@ -894,7 +895,9 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             self._read_error = None
             self._channel_error = None
             if self._read_updates is not None:
-                self._read_updates.append(StateUpdate(properties, full=update.full))
+                self._read_updates.append(
+                    (StateUpdate(properties, full=update.full), complete_snapshot)
+                )
                 if complete_snapshot:
                     self._read_snapshot = properties
         if complete_snapshot:
