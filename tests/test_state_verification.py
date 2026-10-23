@@ -864,14 +864,18 @@ async def _advance_followup(hass, freezer, coordinator, seconds):
     await hass.async_block_till_done()
 
 
-async def test_push_only_cancels_a_followup_before_it_starts(hass, freezer, loaded):
+async def test_disabling_polling_cancels_a_followup_with_periodic_checks_already_off(
+    hass, freezer, loaded
+):
     entry, client, _, _, _ = loaded
     account = entry.runtime_data
     coordinator = account.coordinators["test-fridge"]
     client.state.reset_mock()
+    hass.config_entries.async_update_entry(entry, options={"status_poll_interval": 0})
+    account.async_update_state_checks()
     coordinator.async_receive_event(dt_util.utcnow(), 0, 101)
     followup = coordinator._followup_task
-    hass.config_entries.async_update_entry(entry, options={"status_poll_interval": 0})
+    hass.config_entries.async_update_entry(entry, pref_disable_polling=True)
     account.async_update_state_checks()
     await hass.async_block_till_done()
     assert followup.cancelled()
@@ -881,9 +885,8 @@ async def test_push_only_cancels_a_followup_before_it_starts(hass, freezer, load
     client.state.assert_not_awaited()
 
 
-@pytest.mark.parametrize("system_option", [False, True])
-async def test_disabling_checks_cancels_followups_but_finishes_the_status_read(
-    hass, freezer, loaded, system_option
+async def test_disabling_polling_cancels_followups_but_finishes_the_status_read(
+    hass, freezer, loaded
 ):
     entry, client, updates, _, _ = loaded
     account = entry.runtime_data
@@ -906,10 +909,7 @@ async def test_disabling_checks_cancels_followups_but_finishes_the_status_read(
     async_fire_time_changed(hass, dt_util.utcnow())
     await asyncio.wait_for(reading.wait(), 1)
     status_read = coordinator._read_task
-    if system_option:
-        hass.config_entries.async_update_entry(entry, pref_disable_polling=True)
-    else:
-        hass.config_entries.async_update_entry(entry, options={"status_poll_interval": 0})
+    hass.config_entries.async_update_entry(entry, pref_disable_polling=True)
     account.async_update_state_checks()
     await hass.async_block_till_done()
     assert followup.cancelled()
@@ -935,9 +935,11 @@ async def test_disabling_checks_cancels_followups_but_finishes_the_status_read(
     assert entry.runtime_data is account
 
 
-async def test_followups_repair_a_missed_door_close_and_stop(hass, freezer, loaded):
+@pytest.mark.parametrize("interval", [0, 300])
+async def test_followups_repair_a_missed_door_close_and_stop(hass, freezer, loaded, interval):
     entry, client, updates, _, _ = loaded
     coordinator = entry.runtime_data.coordinators["test-fridge"]
+    hass.config_entries.async_update_entry(entry, options={"status_poll_interval": interval})
     client.state.reset_mock()
     client.state.return_value["ref_door_ajar"] = True
     await updates.put(StateUpdate({"ref_door_ajar": True}, full=False))
@@ -1141,15 +1143,9 @@ async def test_alert_during_failed_final_followup_starts_a_new_window(
         assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
 
 
-@pytest.mark.parametrize("system_option", [False, True])
-async def test_disabled_checks_also_disable_automatic_event_followups(
-    hass, freezer, loaded, system_option
-):
+async def test_disabled_polling_also_disables_automatic_event_followups(hass, freezer, loaded):
     entry, client, updates, _, _ = loaded
-    if system_option:
-        hass.config_entries.async_update_entry(entry, pref_disable_polling=True)
-    else:
-        hass.config_entries.async_update_entry(entry, options={"status_poll_interval": 0})
+    hass.config_entries.async_update_entry(entry, pref_disable_polling=True)
     await hass.async_block_till_done()
     coordinator = entry.runtime_data.coordinators["test-fridge"]
     client.state.reset_mock()

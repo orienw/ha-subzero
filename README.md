@@ -61,7 +61,7 @@ Appliance settings change only when you use a control or automation. See the [re
 
 Normal updates arrive through push. By default, the integration also reads status every **ten minutes per appliance** to catch missed updates. Other push activity does not postpone these checks. Appliance alerts can trigger a few follow-up reads while the reported condition remains active.
 
-In **Configure**, choose a one-, two-, five-, or ten-minute check interval, or **Push only**. Push only and Home Assistant's option to disable polling turn off both scheduled checks and alert follow-ups.
+In **Configure**, choose a one-, two-, five-, or ten-minute check interval, or **No periodic checks**. Alert follow-up reads run independently of this interval. Home Assistant's option to disable polling turns off both scheduled checks and alert follow-ups.
 
 <img src="docs/images/configure.png" alt="Sub-Zero configuration with appliance selection, Firebase alerts, and a ten-minute state-check interval" width="500">
 

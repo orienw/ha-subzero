@@ -170,7 +170,7 @@ Selected appliances share tokens and one notification connection. Setup waits up
 
 State checks default to once every ten minutes per appliance, staggered across selected appliances. Incoming updates do not postpone them. Checks read status without reopening channels or restarting the shared connection. Known offline appliance channels wait for their existing channel retry before automatic checks resume.
 
-Configure offers one-, two-, five-, and ten-minute intervals. **Push only** disables checks and alert follow-up reads; Home Assistant's system option to disable polling does too.
+Configure offers one-, two-, five-, and ten-minute intervals. **No periodic checks** disables scheduled state checks while keeping alert follow-up reads. Home Assistant's system option to disable polling turns off both kinds of automatic reads.
 
 Changes to the check interval and Firebase alerts apply without reloading entities. Changing the appliance selection or its saved temperature units reloads the integration.
 

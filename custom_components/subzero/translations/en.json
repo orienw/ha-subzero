@@ -88,7 +88,7 @@
   "selector": {
     "status_poll_interval": {
       "options": {
-        "0": "Push only",
+        "0": "No periodic checks",
         "60": "1 minute",
         "120": "2 minutes",
         "300": "5 minutes",

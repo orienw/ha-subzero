@@ -26,7 +26,7 @@ async def test_delayed_door_reminder_requires_a_successful_current_observation(
     hass, loaded, freezer, outcome
 ):
     entry, client, updates, disconnected, _ = loaded
-    hass.config_entries.async_update_entry(entry, options={"status_poll_interval": 0})
+    hass.config_entries.async_update_entry(entry, pref_disable_polling=True)
     await hass.config_entries.async_reload(entry.entry_id)
     await hass.async_block_till_done()
     coordinator = entry.runtime_data.coordinators["test-fridge"]

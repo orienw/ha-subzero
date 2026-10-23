@@ -228,7 +228,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
     @callback
     def async_schedule_followup(self, *, alert: bool = False) -> None:
         """Check a new alert without extending an existing window."""
-        if self.entry.pref_disable_polling or not status_poll_interval(self.entry):
+        if self.entry.pref_disable_polling:
             return
         if (
             self._followup_task is not None
@@ -246,7 +246,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         try:
             for delay in FOLLOWUP_DELAYS:
                 await asyncio.sleep(max(delay, self._last_followup + 60 - time.monotonic()))
-                if self.entry.pref_disable_polling or not status_poll_interval(self.entry):
+                if self.entry.pref_disable_polling:
                     return
                 self._followup_alert = False
                 self._last_followup = time.monotonic()
@@ -1083,18 +1083,18 @@ class SubZeroAccount:
     @callback
     def async_update_state_checks(self) -> None:
         """Apply the state-check interval without interrupting appliance updates."""
-        interval = 0 if self.entry.pref_disable_polling else status_poll_interval(self.entry)
-        if interval == self._state_check_interval:
-            return
-        self._state_check_interval = interval
-        self._async_cancel_state_checks()
-        if not interval:
+        if self.entry.pref_disable_polling:
             for coordinator in self.coordinators.values():
                 coordinator._followup_alert = False
                 if coordinator._followup_task is not None:
                     coordinator._followup_task.cancel()
                     coordinator._followup_task = None
-        elif self.coordinators:
+        interval = 0 if self.entry.pref_disable_polling else status_poll_interval(self.entry)
+        if interval == self._state_check_interval:
+            return
+        self._state_check_interval = interval
+        self._async_cancel_state_checks()
+        if interval and self.coordinators:
             self._cancel_state_checks = async_track_time_interval(
                 self.hass,
                 self._verify_next_appliance,

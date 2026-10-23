@@ -1267,9 +1267,12 @@ async def test_configure_changes_state_checks_without_reloading(hass, freezer, l
         await hass.async_block_till_done()
 
     await configure(0)
-    assert followup.cancelled()
-    coordinator.async_receive_event(dt_util.utcnow(), 1, 101)
+    assert coordinator._followup_task is followup
+    assert not followup.cancelling()
+    await advance(3)
+    client.state.assert_awaited_once_with("test-fridge")
     assert coordinator._followup_task is None
+    client.state.reset_mock()
     await advance(601)
     client.state.assert_not_awaited()
 
