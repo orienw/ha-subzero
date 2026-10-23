@@ -1012,6 +1012,7 @@ class SubZeroAccount:
     async def async_setup(self) -> None:
         if not self.coordinators:
             return
+        selected = selected_devices(self.entry)
         metadata_error: ApiError | None = None
         try:
             appliances = await self.client.appliances()
@@ -1030,7 +1031,7 @@ class SubZeroAccount:
                 device_id: dict(coordinator.device)
                 for device_id, coordinator in self.coordinators.items()
             }
-            if devices != selected_devices(self.entry):
+            if selected_devices(self.entry) == selected and devices != selected:
                 if "devices" in self.entry.options:
                     self.hass.config_entries.async_update_entry(
                         self.entry, options={**self.entry.options, "devices": devices}

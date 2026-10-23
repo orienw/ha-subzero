@@ -1406,6 +1406,70 @@ async def test_configure_selection_during_setup_applies_after_setup(hass, loaded
     assert client.state.await_count == 2
 
 
+@pytest.mark.parametrize(
+    ("selected", "unit"),
+    [(["test-oven"], "F"), ([], "F"), (["test-fridge"], "C")],
+    ids=["swap-appliance", "clear-selection", "change-unit"],
+)
+async def test_startup_metadata_preserves_newer_configure_options(hass, loaded, selected, unit):
+    entry, client, _, _, _ = loaded
+    reading, release = asyncio.Event(), asyncio.Event()
+    initial = list(client.appliances.return_value)
+    refreshed = [Appliance("test-fridge", "Kitchen", unit), initial[1]]
+    client.appliances.reset_mock()
+    saved = []
+
+    async def capture_options(_hass, updated):
+        saved.append(
+            {device_id: dict(device) for device_id, device in updated.options["devices"].items()}
+        )
+
+    async def appliances():
+        if client.appliances.await_count == 1:
+            reading.set()
+            await release.wait()
+            return initial
+        return refreshed
+
+    client.appliances.side_effect = appliances
+    remove_listener = entry.add_update_listener(capture_options)
+    with patch("custom_components.subzero.FcmAlerts") as alerts:
+        alerts.return_value.stop = AsyncMock()
+        pending = asyncio.create_task(hass.config_entries.async_reload(entry.entry_id))
+        try:
+            await asyncio.wait_for(reading.wait(), 1)
+            assert entry.state is ConfigEntryState.SETUP_IN_PROGRESS
+            with patch("custom_components.subzero.config_flow.SubZeroClient", return_value=client):
+                result = await hass.config_entries.options.async_init(entry.entry_id)
+                result = await hass.config_entries.options.async_configure(
+                    result["flow_id"],
+                    {
+                        "device_ids": selected,
+                        "status_poll_interval": "60",
+                        "firebase_alerts": True,
+                    },
+                )
+            expected = dict(entry.options["devices"])
+            assert set(expected) == set(selected)
+        finally:
+            release.set()
+            await pending
+        await hass.async_block_till_done()
+        remove_listener()
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.state is ConfigEntryState.LOADED
+    assert entry.options == {
+        "devices": expected,
+        "status_poll_interval": 60,
+        "firebase_alerts": True,
+    }
+    assert saved and all(devices == expected for devices in saved)
+    assert {
+        device_id: coordinator.device
+        for device_id, coordinator in entry.runtime_data.coordinators.items()
+    } == expected
+
+
 async def test_configure_retries_failed_setup_with_the_new_selection(hass, loaded):
     entry, client, _, _, _ = loaded
     assert await hass.config_entries.async_unload(entry.entry_id)
