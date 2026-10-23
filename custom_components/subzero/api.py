@@ -355,6 +355,25 @@ def parse_notification(
     return device_id, StateUpdate(properties, full=full)
 
 
+def _log_notification_frame(
+    websocket: aiohttp.ClientWebSocketResponse, message: aiohttp.WSMessage, phase: str
+) -> None:
+    error = message.data if message.type == aiohttp.WSMsgType.ERROR else websocket.exception()
+    reason = (
+        message.extra[:256]
+        if message.type == aiohttp.WSMsgType.CLOSE and isinstance(message.extra, str)
+        else None
+    )
+    _LOGGER.debug(
+        "Notification %s: frame_type=%s close_code=%s reason=%r exception=%s",
+        phase,
+        message.type.name,
+        websocket.close_code,
+        reason,
+        type(error).__name__ if error is not None else None,
+    )
+
+
 class SubZeroClient:
     """One account's API token and connection; passwords are not needed."""
 
@@ -798,9 +817,21 @@ class SubZeroClient:
                 await websocket.send_str('{"protocol":"json","version":1}' + SEPARATOR)
                 first = await websocket.receive(timeout=20)
                 if first.type != aiohttp.WSMsgType.TEXT or SEPARATOR not in first.data:
+                    _log_notification_frame(websocket, first, "handshake incomplete")
                     raise ApiError("Sub-Zero did not complete the notification handshake.")
                 handshake, pending = first.data.split(SEPARATOR, 1)
-                if _object(handshake) != {}:
+                try:
+                    handshake = _object(handshake)
+                except ApiError:
+                    _log_notification_frame(websocket, first, "handshake invalid")
+                    raise
+                if handshake != {}:
+                    _log_notification_frame(websocket, first, "handshake rejected")
+                    error = handshake.get("error")
+                    _LOGGER.debug(
+                        "SignalR notification handshake rejected: error=%r",
+                        error[:256] if isinstance(error, str) else None,
+                    )
                     raise ApiError("Sub-Zero rejected the notification handshake.")
                 self.push_connected = True
                 connected_at = datetime.now(UTC).isoformat()
@@ -851,6 +882,14 @@ class SubZeroClient:
                                 _LOGGER.debug("Skipping invalid notification frame: %s", error)
                                 continue
                             if event.get("type") == 7:
+                                error = event.get("error")
+                                reconnect = event.get("allowReconnect")
+                                _LOGGER.debug(
+                                    "SignalR closed notification connection: "
+                                    "error=%r allowReconnect=%s",
+                                    error[:256] if isinstance(error, str) else None,
+                                    reconnect if isinstance(reconnect, bool) else None,
+                                )
                                 raise ApiError("Sub-Zero closed the notification connection.")
                             if (
                                 event.get("type") != 1
@@ -896,6 +935,7 @@ class SubZeroClient:
                             continue
                         message = receiving.result()
                         if message.type != aiohttp.WSMsgType.TEXT:
+                            _log_notification_frame(websocket, message, "disconnected")
                             raise ApiError("Sub-Zero's notification connection disconnected.")
                         tasks.remove(receiving)
                         receiving = asyncio.create_task(websocket.receive())
@@ -911,5 +951,10 @@ class SubZeroClient:
                     opening.cancel()
                     receiving.cancel()
                     await asyncio.gather(opening, receiving, return_exceptions=True)
-        except aiohttp.ClientError, TimeoutError:
+        except (aiohttp.ClientError, TimeoutError) as error:
+            _LOGGER.debug(
+                "Notification transport failed: exception=%s status=%s",
+                type(error).__name__,
+                error.status if isinstance(error, aiohttp.WSServerHandshakeError) else None,
+            )
             raise ApiError("Could not maintain Sub-Zero's notification connection.") from None

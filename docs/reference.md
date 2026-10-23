@@ -162,7 +162,7 @@ Diagnostics downloads use cached state. They omit account credentials, appliance
 
 Connection health and message counts do not prove that every state change arrived or was applied.
 
-Debug logging for `custom_components.subzero` records channel-open attempts, notification types and key names, source timestamps and sequence values with their runtime types, parsed updates, status-response timing and values, and published coordinator state. This distinguishes the returned status from the state published after concurrent updates. Logged state values are recognized scalar properties, excluding network identifiers.
+Debug logging for `custom_components.subzero` records channel-open attempts, notification types and key names, source timestamps and sequence values with their runtime types, parsed updates, status-response timing and values, and published coordinator state. Connection failures also record the WebSocket message type, close code/reason, and exception type when available. This distinguishes the returned status from the state published after concurrent updates. Logged state values are recognized scalar properties, excluding network identifiers.
 
 ## State checks and recovery
 

@@ -1332,6 +1332,178 @@ async def test_notification_protocol_failures_still_disconnect(
     assert not client.push_connected
 
 
+@pytest.mark.parametrize("handshake", [False, True])
+async def test_notification_websocket_close_logs_code_and_reason(
+    notification_stream, monkeypatch, caplog, handshake
+):
+    _, stream, _, _ = notification_stream
+    original_send = web.WebSocketResponse.send_str
+
+    async def send(socket, data, **kwargs):
+        if not handshake:
+            await original_send(socket, data, **kwargs)
+        if data == "{}" + api.SEPARATOR:
+            await socket.close(code=1012, message=b"Service restarting")
+
+    monkeypatch.setattr(web.WebSocketResponse, "send_str", send)
+    with caplog.at_level(logging.DEBUG, logger=api.__name__):
+        with pytest.raises(api.ApiError, match="handshake" if handshake else "disconnected"):
+            await anext(stream)
+    assert "frame_type=CLOSE" in caplog.text
+    assert "close_code=1012" in caplog.text
+    assert "Service restarting" in caplog.text
+
+
+@pytest.fixture
+def notification_socket(tokens):
+    socket = MagicMock(spec=aiohttp.ClientWebSocketResponse)
+    socket.close_code = None
+    socket.exception.return_value = None
+    session = MagicMock()
+    session.ws_connect.return_value.__aenter__.return_value = socket
+    client = api.SubZeroClient(session, "test-key", tokens)
+    client._request = AsyncMock(
+        return_value={"url": api.SIGNALR_ORIGIN + "/client/", "accessToken": "test-signalr"}
+    )
+    client._json = AsyncMock(return_value={"connectionToken": "test-connection"})
+    client.open_channel = AsyncMock()
+    return client, socket, session
+
+
+@pytest.mark.parametrize("handshake", [False, True])
+async def test_notification_error_frame_logs_exception_type_without_details(
+    notification_socket, caplog, handshake
+):
+    client, socket, session = notification_socket
+    socket.close_code = 1006
+    error = ConnectionResetError("private-error https://example.test/?token=private-token")
+    frames = (
+        [] if handshake else [aiohttp.WSMessage(aiohttp.WSMsgType.TEXT, "{}" + api.SEPARATOR, "")]
+    )
+    frames.append(aiohttp.WSMessage(aiohttp.WSMsgType.ERROR, error, ""))
+    socket.receive.side_effect = frames
+    with caplog.at_level(logging.DEBUG, logger=api.__name__):
+        with pytest.raises(api.ApiError, match="handshake" if handshake else "disconnected"):
+            async for _ in client.watch(["test-fridge"]):
+                pass
+    assert "frame_type=ERROR" in caplog.text
+    assert "close_code=1006" in caplog.text
+    assert "exception=ConnectionResetError" in caplog.text
+    for private in ("private-error", "example.test", "private-token"):
+        assert private not in caplog.text
+    session.ws_connect.return_value.__aexit__.assert_awaited_once()
+
+
+async def test_notification_binary_frame_logs_type_without_payload(notification_stream, caplog):
+    _, stream, frames, _ = notification_stream
+    frames.append(b"private-binary-payload")
+    with caplog.at_level(logging.DEBUG, logger=api.__name__):
+        with pytest.raises(api.ApiError, match="disconnected"):
+            await anext(stream)
+    assert "frame_type=BINARY" in caplog.text
+    assert "private-binary-payload" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("error", "reconnect", "logged_error", "logged_reconnect"),
+    [
+        ("Server connection closed", True, "Server connection closed", "True"),
+        ({"private-reason": "private-value"}, "private-hint", None, "None"),
+        ("Service restart" + "x" * 256 + "private-tail", False, "Service restart", "False"),
+    ],
+)
+async def test_signalr_close_logs_reason_and_reconnect_hint(
+    notification_stream, caplog, error, reconnect, logged_error, logged_reconnect
+):
+    _, stream, frames, _ = notification_stream
+    frames.append(
+        json.dumps(
+            {
+                "type": 7,
+                "error": error,
+                "allowReconnect": reconnect,
+                "extra": "private-frame-payload",
+            }
+        )
+        + api.SEPARATOR
+    )
+    with caplog.at_level(logging.DEBUG, logger=api.__name__):
+        with pytest.raises(api.ApiError, match="closed"):
+            await anext(stream)
+    assert (f"error='{logged_error}" if logged_error else "error=None") in caplog.text
+    assert f"allowReconnect={logged_reconnect}" in caplog.text
+    for private in (
+        "private-frame-payload",
+        "private-reason",
+        "private-value",
+        "private-hint",
+        "private-tail",
+    ):
+        assert private not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("response", "failure"),
+    [
+        ("private-incomplete-payload", "did not complete"),
+        ("private-invalid-json" + api.SEPARATOR, "invalid notification"),
+        (
+            json.dumps({"error": "Unsupported protocol", "extra": "private-handshake-payload"})
+            + api.SEPARATOR,
+            "rejected",
+        ),
+    ],
+)
+async def test_signalr_handshake_failure_logs_frame_type_without_raw_payload(
+    notification_socket, caplog, response, failure
+):
+    client, socket, _ = notification_socket
+    socket.receive.return_value = aiohttp.WSMessage(aiohttp.WSMsgType.TEXT, response, "")
+    with caplog.at_level(logging.DEBUG, logger=api.__name__):
+        with pytest.raises(api.ApiError, match=failure):
+            async for _ in client.watch(["test-fridge"]):
+                pass
+    assert "frame_type=TEXT" in caplog.text
+    if failure == "rejected":
+        assert "Unsupported protocol" in caplog.text
+    for private in (
+        "private-incomplete-payload",
+        "private-invalid-json",
+        "private-handshake-payload",
+    ):
+        assert private not in caplog.text
+
+
+@pytest.mark.parametrize("handshake", [False, True])
+async def test_notification_transport_logs_type_and_status_without_request_details(
+    notification_socket, caplog, handshake
+):
+    client, _, session = notification_socket
+    error = (
+        aiohttp.WSServerHandshakeError(
+            MagicMock(real_url="https://example.test/?token=private-token"),
+            (),
+            status=403,
+            message="private-error",
+            headers={"Authorization": "Bearer private-header"},
+        )
+        if handshake
+        else aiohttp.ClientConnectionError(
+            "private-error https://example.test/?token=private-token"
+        )
+    )
+    session.ws_connect.return_value.__aenter__.side_effect = error
+    with caplog.at_level(logging.DEBUG, logger=api.__name__):
+        with pytest.raises(api.ApiError, match="Could not maintain"):
+            async for _ in client.watch(["test-fridge"]):
+                pass
+    assert f"exception={type(error).__name__}" in caplog.text
+    if handshake:
+        assert "status=403" in caplog.text
+    for private in ("private-error", "example.test", "private-token", "private-header"):
+        assert private not in caplog.text
+
+
 @pytest.fixture
 async def fault_server(aiohttp_server, monkeypatch, socket_enabled, tokens):
     behavior = {
