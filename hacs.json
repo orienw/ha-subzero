@@ -1,7 +1,5 @@
 {
   "name": "Sub-Zero",
   "country": ["CA", "MX", "US"],
-  "homeassistant": "2026.8.0",
-  "zip_release": true,
-  "filename": "ha_subzero.zip"
+  "homeassistant": "2026.8.0"
 }
