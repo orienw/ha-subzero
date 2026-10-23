@@ -989,6 +989,7 @@ class SubZeroAccount:
         self.entry = entry
         self.client = client
         self.alerts = None
+        self.options_lock = asyncio.Lock()
         self.coordinators = {
             device_id: SubZeroCoordinator(hass, entry, client, device_id, device, self._read_failed)
             for device_id, device in selected_devices(entry).items()
@@ -1004,6 +1005,9 @@ class SubZeroAccount:
         self._recoveries: dict[str, asyncio.Task] = {}
         self._verification_order = cycle(self.coordinators.values())
         self._verifications: dict[str, asyncio.Task] = {}
+        self._state_check_interval: int | None = None
+        self._cancel_state_checks: Callable[[], None] | None = None
+        self.entry.async_on_unload(self._async_cancel_state_checks)
 
     async def async_setup(self) -> None:
         if not self.coordinators:
@@ -1073,15 +1077,35 @@ class SubZeroAccount:
             self.entry.async_create_background_task(
                 self.hass, coordinator.async_refresh(), "Sub-Zero faults"
             )
-        if interval := status_poll_interval(self.entry):
-            self.entry.async_on_unload(
-                async_track_time_interval(
-                    self.hass,
-                    self._verify_next_appliance,
-                    timedelta(seconds=interval / len(self.coordinators)),
-                    cancel_on_shutdown=True,
-                )
+        self.async_update_state_checks()
+
+    @callback
+    def async_update_state_checks(self) -> None:
+        """Apply the state-check interval without interrupting appliance updates."""
+        interval = 0 if self.entry.pref_disable_polling else status_poll_interval(self.entry)
+        if interval == self._state_check_interval:
+            return
+        self._state_check_interval = interval
+        self._async_cancel_state_checks()
+        if not interval:
+            for coordinator in self.coordinators.values():
+                coordinator._followup_alert = False
+                if coordinator._followup_task is not None:
+                    coordinator._followup_task.cancel()
+                    coordinator._followup_task = None
+        elif self.coordinators:
+            self._cancel_state_checks = async_track_time_interval(
+                self.hass,
+                self._verify_next_appliance,
+                timedelta(seconds=interval / len(self.coordinators)),
+                cancel_on_shutdown=True,
             )
+
+    @callback
+    def _async_cancel_state_checks(self) -> None:
+        if self._cancel_state_checks is not None:
+            self._cancel_state_checks()
+            self._cancel_state_checks = None
 
     @callback
     def _verify_next_appliance(self, _now: datetime) -> None:
@@ -1089,6 +1113,7 @@ class SubZeroAccount:
         pending = self._verifications.get(coordinator.device_id)
         if (
             self.entry.pref_disable_polling
+            or not status_poll_interval(self.entry)
             or (
                 not coordinator.last_update_success
                 and (

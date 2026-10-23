@@ -808,6 +808,29 @@ async def test_scheduled_reads_continue_when_push_is_disconnected(hass, loaded, 
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
 
 
+async def test_token_updates_do_not_postpone_state_checks(hass, freezer, loaded):
+    entry, client, _, _, _ = loaded
+    account = entry.runtime_data
+    client.state.reset_mock()
+    freezer.tick(200)
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+    hass.config_entries.async_update_entry(
+        entry,
+        data={
+            **entry.data,
+            "tokens": {**entry.data["tokens"], "refresh_token": "refreshed-token"},
+        },
+    )
+    account.async_update_state_checks()
+    await hass.async_block_till_done()
+    freezer.tick(101)
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+    client.state.assert_awaited_once_with("test-fridge")
+    assert entry.runtime_data is account
+
+
 async def test_rate_limited_checks_leave_confirmation_age_unchanged(
     hass, loaded, freezer, enabled_confirmation_sensor
 ):
@@ -839,6 +862,77 @@ async def _advance_followup(hass, freezer, coordinator, seconds):
     if coordinator._read_task is not None:
         await coordinator._read_task
     await hass.async_block_till_done()
+
+
+async def test_push_only_cancels_a_followup_before_it_starts(hass, freezer, loaded):
+    entry, client, _, _, _ = loaded
+    account = entry.runtime_data
+    coordinator = account.coordinators["test-fridge"]
+    client.state.reset_mock()
+    coordinator.async_receive_event(dt_util.utcnow(), 0, 101)
+    followup = coordinator._followup_task
+    hass.config_entries.async_update_entry(entry, options={"status_poll_interval": 0})
+    account.async_update_state_checks()
+    await hass.async_block_till_done()
+    assert followup.cancelled()
+    assert coordinator._followup_task is None
+    assert not coordinator._followup_alert
+    await _advance_followup(hass, freezer, coordinator, 601)
+    client.state.assert_not_awaited()
+
+
+@pytest.mark.parametrize("system_option", [False, True])
+async def test_disabling_checks_cancels_followups_but_finishes_the_status_read(
+    hass, freezer, loaded, system_option
+):
+    entry, client, updates, _, _ = loaded
+    account = entry.runtime_data
+    coordinator = account.coordinators["test-fridge"]
+    client.state.reset_mock()
+    client.state.return_value["ref_door_ajar"] = True
+    await updates.put(StateUpdate({"ref_door_ajar": True}, full=False))
+    await hass.async_block_till_done()
+    reading, release = asyncio.Event(), asyncio.Event()
+
+    async def read(_device_id):
+        reading.set()
+        await release.wait()
+        return dict(client.state.return_value)
+
+    client.state.side_effect = read
+    coordinator.async_receive_event(dt_util.utcnow(), 0, 101)
+    followup = coordinator._followup_task
+    freezer.tick(3)
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await asyncio.wait_for(reading.wait(), 1)
+    status_read = coordinator._read_task
+    if system_option:
+        hass.config_entries.async_update_entry(entry, pref_disable_polling=True)
+    else:
+        hass.config_entries.async_update_entry(entry, options={"status_poll_interval": 0})
+    account.async_update_state_checks()
+    await hass.async_block_till_done()
+    assert followup.cancelled()
+    assert coordinator._followup_task is None
+    assert not coordinator._followup_alert
+    assert not status_read.done()
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
+    assert client.watched == [["test-fridge"]]
+
+    client.state.return_value["ref_door_ajar"] = False
+    release.set()
+    await status_read
+    await _advance_followup(hass, freezer, coordinator, 301)
+    client.state.assert_awaited_once_with("test-fridge")
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
+
+    hass.config_entries.async_update_entry(
+        entry, pref_disable_polling=False, options={"status_poll_interval": 60}
+    )
+    account.async_update_state_checks()
+    await _advance_followup(hass, freezer, coordinator, 61)
+    assert client.state.await_count == 2
+    assert entry.runtime_data is account
 
 
 async def test_followups_repair_a_missed_door_close_and_stop(hass, freezer, loaded):

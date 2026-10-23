@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from firebase_messaging.fcmpushclient import ErrorType
+from homeassistant.config_entries import ConfigEntryState
 from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import (
@@ -324,31 +325,329 @@ async def test_saved_credentials_and_registration_ids_are_copied(alerts):
     assert alerts.entry.data["fcm_credentials"]["fcm"]["registration"]["token"] == "old-token"
 
 
-@oven
+@fridge
 async def test_enabling_and_disabling_starts_and_cleans_up_our_listener(
     hass, cloud_appliance, alerts, push_clients
 ):
     entry = cloud_appliance.entry
-    assert entry.runtime_data.alerts is None
-    hass.config_entries.async_update_entry(entry, options={"firebase_alerts": True})
-    await hass.config_entries.async_reload(entry.entry_id)
-    await hass.async_block_till_done()
-    manager = entry.runtime_data.alerts
+    account = entry.runtime_data
+    coordinator = cloud_appliance.coordinator
+    changes = async_capture_events(hass, "state_changed")
+    entity_id = "binary_sensor.kitchen_refrigerator_door"
+
+    async def configure(enabled):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {
+                "device_ids": ["appliance"],
+                "firebase_alerts": enabled,
+                "status_poll_interval": "300",
+            },
+        )
+        await hass.async_block_till_done()
+        assert entry.runtime_data is account
+        assert account.coordinators["appliance"] is coordinator
+        assert hass.states.get(entity_id).state != "unavailable"
+        return account.alerts
+
+    assert account.alerts is None
+    manager = await configure(True)
     assert manager is not None and manager.subscription_healthy
     assert len(push_clients) == 1
     own_psid = entry.data["fcm_psid"]
     assert len(own_psid) == 16
-    assert entry.data["fcm_credentials"] == push_clients[0].credentials
-    hass.config_entries.async_update_entry(entry, options={})
-    await hass.config_entries.async_reload(entry.entry_id)
-    await hass.async_block_till_done()
+    credentials = entry.data["fcm_credentials"]
+    assert credentials == push_clients[0].credentials
+    await cloud_appliance.update({"ref_door_ajar": True})
+    assert hass.states.get(entity_id).state == "on"
+    await configure(False)
     assert len(push_clients) == 1
     assert not push_clients[0].do_listen
     assert all(task.done() for task in push_clients[0].tasks)
     assert entry.data["fcm_registration_ids"] == {}
+    assert entry.data["fcm_credentials"] == credentials
     cloud_appliance.client.unsubscribe_all_alerts.assert_awaited_once_with(own_psid, "appliance")
     manager._on_alert(message(), "after-stop", None)
     assert manager.received == 0
+    await cloud_appliance.update({"ref_door_ajar": False})
+    assert hass.states.get(entity_id).state == "off"
+    resumed = await configure(True)
+    assert resumed is not None and resumed.subscription_healthy
+    assert len(push_clients) == 2
+    assert push_clients[1].initial_credentials == credentials
+    assert entry.data["fcm_psid"] == own_psid
+    assert not any(
+        event.data["entity_id"] == entity_id
+        and (event.data["new_state"] is None or event.data["new_state"].state == "unavailable")
+        for event in changes
+    )
+    await hass.config_entries.async_unload(entry.entry_id)
+    assert all(task.done() for push in push_clients for task in push.tasks)
+
+
+@fridge
+async def test_disabling_firebase_during_checkin_does_not_start_subscription_sync(
+    hass, cloud_appliance, alerts, push_clients, monkeypatch
+):
+    entry = cloud_appliance.entry
+    account = entry.runtime_data
+    client = cloud_appliance.client
+    checkin_started = asyncio.Event()
+    release_checkin = asyncio.Event()
+
+    async def delayed_checkin(push):
+        checkin_started.set()
+        await release_checkin.wait()
+        push.save(push.credentials)
+        return push.credentials["fcm"]["registration"]["token"]
+
+    monkeypatch.setattr(
+        "custom_components.subzero.fcm.FcmPushClient.checkin_or_register", delayed_checkin
+    )
+    hass.config_entries.async_update_entry(
+        entry, options={**entry.options, "firebase_alerts": True}
+    )
+    try:
+        await asyncio.wait_for(checkin_started.wait(), 1)
+        starting = account.alerts
+        hass.config_entries.async_update_entry(
+            entry, options={**entry.options, "firebase_alerts": False}
+        )
+        await asyncio.wait_for(starting._stop.wait(), 1)
+    finally:
+        release_checkin.set()
+    await asyncio.wait_for(hass.async_block_till_done(), 1)
+    for request in (
+        client.alert_registration,
+        client.register_for_alerts,
+        client.alert_types,
+        client.subscribe_alerts,
+        client.unsubscribe_all_alerts,
+    ):
+        request.assert_not_awaited()
+    assert entry.runtime_data is account
+    assert account.alerts is None
+    assert len(push_clients) == 1
+    assert not push_clients[0].do_listen
+    assert all(task.done() for task in push_clients[0].tasks)
+
+
+@fridge
+async def test_persisted_credentials_and_interval_changes_do_not_restart_firebase(
+    hass, cloud_appliance, alerts, push_clients
+):
+    entry = cloud_appliance.entry
+    account = entry.runtime_data
+    hass.config_entries.async_update_entry(
+        entry, options={**entry.options, "firebase_alerts": True}
+    )
+    await hass.async_block_till_done()
+    manager = account.alerts
+    assert manager is not None and manager.subscription_healthy
+    manager._save_credentials({**entry.data["fcm_credentials"], "persisted": True})
+    hass.config_entries.async_update_entry(
+        entry,
+        data={**entry.data, "tokens": {**entry.data["tokens"], "refresh_token": "renewed"}},
+        options={**entry.options, "status_poll_interval": 60},
+    )
+    await hass.async_block_till_done()
+    assert entry.runtime_data is account
+    assert account.alerts is manager
+    assert len(push_clients) == 1
+    assert push_clients[0].do_listen
+    cloud_appliance.client.subscribe_alerts.assert_awaited_once()
+    cloud_appliance.client.unsubscribe_all_alerts.assert_not_awaited()
+
+
+@fridge
+@pytest.mark.parametrize("unload", [False, True])
+async def test_firebase_changes_wait_for_stop_and_respect_unload(
+    hass, cloud_appliance, alerts, push_clients, monkeypatch, unload
+):
+    entry = cloud_appliance.entry
+    account = entry.runtime_data
+    hass.config_entries.async_update_entry(
+        entry, options={**entry.options, "firebase_alerts": True}
+    )
+    await hass.async_block_till_done()
+    assert account.alerts is not None and account.alerts.subscription_healthy
+    first = push_clients[0]
+    stop_started = asyncio.Event()
+    release_stop = asyncio.Event()
+    original_stop = type(first).stop
+
+    async def delayed_stop(push):
+        if push is first:
+            stop_started.set()
+            await release_stop.wait()
+        await original_stop(push)
+
+    monkeypatch.setattr(type(first), "stop", delayed_stop)
+    hass.config_entries.async_update_entry(
+        entry, options={**entry.options, "firebase_alerts": False}
+    )
+    try:
+        await asyncio.wait_for(stop_started.wait(), 1)
+        hass.config_entries.async_update_entry(
+            entry, options={**entry.options, "firebase_alerts": True}
+        )
+        await asyncio.sleep(0)
+        assert len(push_clients) == 1
+        if unload:
+            unloading = asyncio.create_task(hass.config_entries.async_unload(entry.entry_id))
+            await asyncio.sleep(0)
+            assert entry.state is ConfigEntryState.UNLOAD_IN_PROGRESS
+    finally:
+        release_stop.set()
+    await asyncio.wait_for(hass.async_block_till_done(), 1)
+    assert not first.do_listen
+    assert all(task.done() for task in first.tasks)
+    if unload:
+        assert await unloading
+        assert len(push_clients) == 1
+        assert entry.state is ConfigEntryState.NOT_LOADED
+    else:
+        assert entry.runtime_data is account
+        assert account.alerts.subscription_healthy
+        assert len(push_clients) == 2
+        assert push_clients[1].do_listen
+    cloud_appliance.client.unsubscribe_all_alerts.assert_not_awaited()
+
+
+@fridge
+async def test_reenabling_firebase_waits_for_server_cleanup_before_subscribing(
+    hass, cloud_appliance, alerts, push_clients
+):
+    entry = cloud_appliance.entry
+    account = entry.runtime_data
+    client = cloud_appliance.client
+    subscribed = set()
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    replacement_read = asyncio.Event()
+    cleanup_cancelled = False
+    server_cleanup = None
+
+    async def read_subscriptions(psid, device_id):
+        if cleanup_started.is_set():
+            replacement_read.set()
+        return set(subscribed)
+
+    async def subscribe(psid, device_id, keys):
+        subscribed.update(keys)
+
+    async def remote_cleanup():
+        await release_cleanup.wait()
+        if cleanup_cancelled:
+            await replacement_read.wait()
+        subscribed.clear()
+
+    async def delayed_cleanup(psid, device_id):
+        nonlocal cleanup_cancelled, server_cleanup
+        server_cleanup = asyncio.create_task(remote_cleanup())
+        cleanup_started.set()
+        try:
+            await asyncio.shield(server_cleanup)
+        except asyncio.CancelledError:
+            cleanup_cancelled = True
+            raise
+
+    client.alert_types.side_effect = read_subscriptions
+    client.subscribe_alerts.side_effect = subscribe
+    client.unsubscribe_all_alerts.side_effect = delayed_cleanup
+    hass.config_entries.async_update_entry(
+        entry, options={**entry.options, "firebase_alerts": True}
+    )
+    await hass.async_block_till_done()
+    assert account.alerts is not None and account.alerts.subscription_healthy
+    desired = set(subscribed)
+    assert desired
+    hass.config_entries.async_update_entry(
+        entry, options={**entry.options, "firebase_alerts": False}
+    )
+    try:
+        await asyncio.wait_for(cleanup_started.wait(), 1)
+        cleaning = account.alerts
+        hass.config_entries.async_update_entry(
+            entry, options={**entry.options, "firebase_alerts": True}
+        )
+        await asyncio.wait_for(cleaning._stop.wait(), 1)
+        await asyncio.sleep(0)
+        release_cleanup.set()
+        await asyncio.wait_for(hass.async_block_till_done(), 1)
+        await asyncio.wait_for(server_cleanup, 1)
+    finally:
+        release_cleanup.set()
+    assert entry.runtime_data is account
+    assert account.alerts.subscription_healthy
+    assert subscribed == desired
+    assert len(push_clients) == 2
+    assert not push_clients[0].do_listen
+    assert all(task.done() for task in push_clients[0].tasks)
+    assert push_clients[1].do_listen
+    assert client.subscribe_alerts.await_count == 2
+
+
+@fridge
+async def test_disabling_firebase_waits_for_server_subscription_before_cleanup(
+    hass, cloud_appliance, alerts, push_clients
+):
+    entry = cloud_appliance.entry
+    account = entry.runtime_data
+    client = cloud_appliance.client
+    subscribed = set()
+    subscribe_started = asyncio.Event()
+    release_subscribe = asyncio.Event()
+    cleanup_finished = asyncio.Event()
+    subscribe_cancelled = False
+    server_subscription = None
+
+    async def remote_subscribe(keys):
+        await release_subscribe.wait()
+        if subscribe_cancelled:
+            await cleanup_finished.wait()
+        subscribed.update(keys)
+
+    async def delayed_subscribe(psid, device_id, keys):
+        nonlocal subscribe_cancelled, server_subscription
+        server_subscription = asyncio.create_task(remote_subscribe(keys))
+        subscribe_started.set()
+        try:
+            await asyncio.shield(server_subscription)
+        except asyncio.CancelledError:
+            subscribe_cancelled = True
+            raise
+
+    async def cleanup(psid, device_id):
+        subscribed.clear()
+        cleanup_finished.set()
+
+    client.subscribe_alerts.side_effect = delayed_subscribe
+    client.unsubscribe_all_alerts.side_effect = cleanup
+    hass.config_entries.async_update_entry(
+        entry, options={**entry.options, "firebase_alerts": True}
+    )
+    try:
+        await asyncio.wait_for(subscribe_started.wait(), 1)
+        subscribing = account.alerts
+        hass.config_entries.async_update_entry(
+            entry, options={**entry.options, "firebase_alerts": False}
+        )
+        await asyncio.wait_for(subscribing._stop.wait(), 1)
+        await asyncio.sleep(0)
+        release_subscribe.set()
+        await asyncio.wait_for(hass.async_block_till_done(), 1)
+        await asyncio.wait_for(server_subscription, 1)
+    finally:
+        release_subscribe.set()
+    assert entry.runtime_data is account
+    assert cleanup_finished.is_set()
+    assert not subscribed
+    assert entry.data["fcm_registration_ids"] == {}
+    assert len(push_clients) == 1
+    assert not push_clients[0].do_listen
+    assert all(task.done() for task in push_clients[0].tasks)
 
 
 @oven

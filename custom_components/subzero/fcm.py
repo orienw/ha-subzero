@@ -146,10 +146,11 @@ class FcmAlerts:
             self.hass, self._cleanup_loop(), "Remove Sub-Zero Firebase alerts"
         )
 
-    async def stop(self) -> None:
+    async def stop(self, *, graceful: bool = False) -> None:
         self._stop.set()
         if self._task is not None:
-            self._task.cancel()
+            if not graceful:
+                self._task.cancel()
             with suppress(asyncio.CancelledError):
                 await self._task
         await self._close_push()
@@ -227,7 +228,7 @@ class FcmAlerts:
                         next_sync = 0.0
                     else:
                         token = self.push.credentials["fcm"]["registration"]["token"]
-                    if time.monotonic() >= next_sync:
+                    if not self._stop.is_set() and time.monotonic() >= next_sync:
                         self.subscription_healthy = await self._sync(psid, token)
                         if self.subscription_healthy:
                             self.last_sync = datetime.now(UTC).isoformat()

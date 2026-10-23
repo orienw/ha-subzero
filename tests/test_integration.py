@@ -5,16 +5,22 @@ import json
 import logging
 from datetime import timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, patch
 
 import pytest
+from homeassistant.components.sensor import DATA_COMPONENT as SENSOR_COMPONENT
 from homeassistant.config_entries import ConfigEntryState
+from homeassistant.const import EVENT_STATE_CHANGED, STATE_UNAVAILABLE
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_system import US_CUSTOMARY_SYSTEM
-from pytest_homeassistant_custom_component.common import MockConfigEntry, async_fire_time_changed
+from pytest_homeassistant_custom_component.common import (
+    MockConfigEntry,
+    async_capture_events,
+    async_fire_time_changed,
+)
 
 from custom_components.subzero.api import (
     ApiError,
@@ -1229,6 +1235,207 @@ async def test_configure_adds_appliances_with_the_saved_login(hass, loaded):
     await hass.async_block_till_done()
     assert hass.states.get("binary_sensor.wall_oven_service_required").state == "on"
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
+
+
+async def test_configure_changes_state_checks_without_reloading(hass, freezer, loaded):
+    entry, client, _, disconnected, factory = loaded
+    account = entry.runtime_data
+    coordinator = account.coordinators["test-fridge"]
+    entity_id = "sensor.kitchen_refrigerator_setpoint"
+    entity = hass.data[SENSOR_COMPONENT].get_entity(entity_id)
+    changes = async_capture_events(hass, EVENT_STATE_CHANGED)
+    coordinator.async_receive_event(dt_util.utcnow(), 0, 101)
+    followup = coordinator._followup_task
+    assert followup is not None
+    client.state.reset_mock()
+
+    async def configure(interval):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {"device_ids": ["test-fridge"], "status_poll_interval": str(interval)},
+        )
+        assert result["type"] is FlowResultType.CREATE_ENTRY
+        await hass.async_block_till_done()
+        assert entry.runtime_data is account
+        assert account.coordinators["test-fridge"] is coordinator
+        assert hass.data[SENSOR_COMPONENT].get_entity(entity_id) is entity
+
+    async def advance(seconds):
+        freezer.tick(seconds)
+        async_fire_time_changed(hass, dt_util.utcnow())
+        await hass.async_block_till_done()
+
+    await configure(0)
+    assert followup.cancelled()
+    coordinator.async_receive_event(dt_util.utcnow(), 1, 101)
+    assert coordinator._followup_task is None
+    await advance(601)
+    client.state.assert_not_awaited()
+
+    await configure(60)
+    await advance(61)
+    client.state.assert_awaited_once_with("test-fridge")
+
+    await configure(120)
+    await advance(61)
+    assert client.state.await_count == 1
+    await advance(60)
+    assert client.state.await_count == 2
+
+    await configure(0)
+    await advance(121)
+    assert client.state.await_count == 2
+    assert factory.call_count == 1
+    assert client.watched == [["test-fridge"]]
+    assert not disconnected.is_set()
+    assert all(
+        event.data["new_state"] is not None and event.data["new_state"].state != STATE_UNAVAILABLE
+        for event in changes
+        if event.data["entity_id"] == entity_id
+    )
+    await configure(60)
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    await advance(61)
+    assert client.state.await_count == 2
+    assert disconnected.is_set()
+
+
+async def test_configure_resumes_staggered_checks_without_duplicate_timers(
+    hass, freezer, oven_loaded
+):
+    entry, client, _ = oven_loaded
+    account = entry.runtime_data
+    coordinators = dict(account.coordinators)
+    connections = list(client.watched)
+    client.state.reset_mock()
+
+    async def configure(interval):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {
+                "device_ids": ["test-fridge", "test-oven"],
+                "status_poll_interval": str(interval),
+            },
+        )
+        await hass.async_block_till_done()
+        assert entry.runtime_data is account
+        assert account.coordinators == coordinators
+
+    async def advance(seconds):
+        freezer.tick(seconds)
+        async_fire_time_changed(hass, dt_util.utcnow())
+        await hass.async_block_till_done()
+
+    await configure(0)
+    await advance(301)
+    client.state.assert_not_awaited()
+    await configure(120)
+    await advance(59)
+    client.state.assert_not_awaited()
+    await advance(2)
+    client.state.assert_awaited_once_with("test-fridge")
+    await advance(61)
+    assert client.state.await_args_list == [call("test-fridge"), call("test-oven")]
+
+    await configure(300)
+    await advance(61)
+    assert client.state.await_count == 2
+    await advance(90)
+    assert client.state.await_count == 3
+    await advance(151)
+    assert client.state.await_count == 4
+    assert {args.args[0] for args in client.state.await_args_list[2:]} == {
+        "test-fridge",
+        "test-oven",
+    }
+    assert client.watched == connections
+
+
+async def test_configure_changed_selected_units_still_reload(hass, loaded):
+    entry, client, _, disconnected, _ = loaded
+    account = entry.runtime_data
+    client.appliances.return_value = [Appliance("test-fridge", "Kitchen", "C")]
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    await hass.config_entries.options.async_configure(
+        result["flow_id"], {"device_ids": ["test-fridge"], "status_poll_interval": "300"}
+    )
+    await hass.async_block_till_done()
+    assert entry.runtime_data is not account
+    assert entry.runtime_data.coordinators["test-fridge"].device["temperature_unit"] == "C"
+    assert entry.options["devices"]["test-fridge"]["temperature_unit"] == "C"
+    assert client.watched == [["test-fridge"], ["test-fridge"]]
+    assert disconnected.is_set()
+
+
+async def test_configure_selection_during_setup_applies_after_setup(hass, loaded):
+    entry, client, _, _, _ = loaded
+    reading, release = asyncio.Event(), asyncio.Event()
+    state = dict(client.state.return_value)
+    client.state.reset_mock()
+
+    async def read(device_id):
+        if client.state.await_count == 1:
+            reading.set()
+            await release.wait()
+        return dict(state)
+
+    client.state.side_effect = read
+    pending = asyncio.create_task(hass.config_entries.async_reload(entry.entry_id))
+    try:
+        await asyncio.wait_for(reading.wait(), 1)
+        assert entry.state is ConfigEntryState.SETUP_IN_PROGRESS
+        with patch("custom_components.subzero.config_flow.SubZeroClient", return_value=client):
+            result = await hass.config_entries.options.async_init(entry.entry_id)
+            result = await hass.config_entries.options.async_configure(
+                result["flow_id"],
+                {"device_ids": ["test-oven"], "status_poll_interval": "300"},
+            )
+        assert result["type"] is FlowResultType.CREATE_ENTRY
+        assert set(entry.options["devices"]) == {"test-oven"}
+    finally:
+        release.set()
+        await pending
+    await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.LOADED
+    assert set(entry.options["devices"]) == {"test-oven"}
+    assert set(entry.runtime_data.coordinators) == {"test-oven"}
+    assert client.watched == [["test-fridge"], ["test-fridge"], ["test-oven"]]
+    assert client.state.await_count == 2
+
+
+async def test_configure_retries_failed_setup_with_the_new_selection(hass, loaded):
+    entry, client, _, _, _ = loaded
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    client.state.side_effect = ApiError("Appliance unavailable")
+    assert not await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.SETUP_RETRY
+    client.state.side_effect = None
+    ready = asyncio.Event()
+
+    def mark_ready():
+        if entry.state is ConfigEntryState.LOADED:
+            ready.set()
+
+    remove_listener = entry.async_on_state_change(mark_ready)
+    try:
+        with patch("custom_components.subzero.config_flow.SubZeroClient", return_value=client):
+            result = await hass.config_entries.options.async_init(entry.entry_id)
+            result = await hass.config_entries.options.async_configure(
+                result["flow_id"], {"device_ids": ["test-oven"], "status_poll_interval": "300"}
+            )
+        await asyncio.wait_for(ready.wait(), 1)
+    finally:
+        remove_listener()
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.LOADED
+    assert set(entry.options["devices"]) == {"test-oven"}
+    assert set(entry.runtime_data.coordinators) == {"test-oven"}
+    assert client.watched == [["test-fridge"], ["test-fridge"], ["test-oven"]]
 
 
 async def test_deselecting_removes_only_that_appliance(hass, loaded):

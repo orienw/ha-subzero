@@ -4,7 +4,7 @@ import asyncio
 import logging
 from functools import partial
 
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed
@@ -89,21 +89,53 @@ async def async_setup_entry(hass: HomeAssistant, entry: SubZeroConfigEntry) -> b
     for entity in er.async_entries_for_config_entry(entities, entry.entry_id):
         if entity.unique_id in excluded:
             entities.async_remove(entity.entity_id)
+    devices = selected_devices(entry)
+    firebase_enabled = firebase_alerts_enabled(entry)
+
+    async def update_options(hass: HomeAssistant, entry: SubZeroConfigEntry) -> None:
+        nonlocal firebase_enabled
+        async with account.options_lock:
+            if entry.state is not ConfigEntryState.LOADED or entry.runtime_data is not account:
+                return
+            if selected_devices(entry) != devices:
+                hass.config_entries.async_schedule_reload(entry.entry_id)
+                return
+            account.async_update_state_checks()
+            if firebase_alerts_enabled(entry) == firebase_enabled:
+                return
+            if account.alerts is not None:
+                await account.alerts.stop(graceful=True)
+            if entry.state is not ConfigEntryState.LOADED or entry.runtime_data is not account:
+                return
+            firebase_enabled = firebase_alerts_enabled(entry)
+            _async_start_alerts(hass, entry)
+
+    entry.async_on_unload(entry.add_update_listener(update_options))
+    _async_start_alerts(hass, entry)
+    return True
+
+
+@callback
+def _async_start_alerts(hass: HomeAssistant, entry: SubZeroConfigEntry) -> None:
+    account = entry.runtime_data
+    account.alerts = None
     if (firebase_alerts_enabled(entry) and account.coordinators) or entry.data.get(
         "fcm_registration_ids"
     ):
-        account.alerts = FcmAlerts(hass, entry, client, account.coordinators)
+        account.alerts = FcmAlerts(hass, entry, account.client, account.coordinators)
         if firebase_alerts_enabled(entry) and account.coordinators:
             account.alerts.start()
         else:
             account.alerts.start_cleanup()
-    return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: SubZeroConfigEntry) -> bool:
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-    if unloaded and entry.runtime_data.alerts is not None:
-        await entry.runtime_data.alerts.stop()
+    if unloaded:
+        account = entry.runtime_data
+        async with account.options_lock:
+            if account.alerts is not None:
+                await account.alerts.stop()
     return unloaded
 
 

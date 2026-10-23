@@ -172,6 +172,8 @@ State checks default to once every ten minutes per appliance, staggered across s
 
 Configure offers one-, two-, five-, and ten-minute intervals. **Push only** disables checks and alert follow-up reads; Home Assistant's system option to disable polling does too.
 
+Changes to the check interval and Firebase alerts apply without reloading entities. Changing the appliance selection or its saved temperature units reloads the integration.
+
 A new appliance alert starts a status read after two seconds, then at most two more at one- and two-minute delays while a door, timer, or wash remains active. Reads stay at least one minute apart per appliance. Normal state changes do not start these reads. Alerts do not extend an existing window, except that an alert during its final read starts another window. Clear conditions, unavailability, or rate limits end it; a transient read failure uses the next attempt.
 
 An accepted channel or incoming state can trigger a status read for an unavailable appliance. Failed recovery reads back off while the stream and appliance channel remain open; stream disconnection stops recovery.

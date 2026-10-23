@@ -429,7 +429,7 @@ class SubZeroConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return await self.async_step_user()
 
 
-class SubZeroOptionsFlow(config_entries.OptionsFlowWithReload):
+class SubZeroOptionsFlow(config_entries.OptionsFlow):
     _devices: dict[str, dict] | None = None
 
     async def async_step_init(self, user_input=None):
@@ -502,6 +502,11 @@ class SubZeroOptionsFlow(config_entries.OptionsFlowWithReload):
                 }
                 if user_input.get(CONF_FIREBASE_ALERTS, firebase_alerts_enabled(entry)) is True:
                     options[CONF_FIREBASE_ALERTS] = True
+                if (
+                    entry.state is not config_entries.ConfigEntryState.LOADED
+                    and self.hass.config_entries.async_update_entry(entry, options=options)
+                ):
+                    self.hass.config_entries.async_schedule_reload(entry.entry_id)
                 return self.async_create_entry(data=options)
         return self.async_show_form(
             step_id="init",
