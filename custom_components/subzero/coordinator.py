@@ -252,12 +252,13 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 self._last_followup = time.monotonic()
                 result = await self._async_read_result(report_error=False)
                 if result.error is not None:
-                    self._followup_alert = False
                     if not self.last_update_success or (
                         isinstance(result.error, UpdateFailed)
                         and result.error.retry_after is not None
                     ):
+                        self._followup_alert = False
                         return
+                    self._followup_alert = self._followup_alert and delay == FOLLOWUP_DELAYS[-1]
                     continue
                 if not self._active_conditions() and not self._followup_alert:
                     return

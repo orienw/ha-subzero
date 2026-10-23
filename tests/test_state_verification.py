@@ -999,6 +999,54 @@ async def test_failed_followup_does_not_keep_an_old_alert_pending(
     assert coordinator._followup_task is None
 
 
+@pytest.mark.parametrize("failure", ["transient", "rate_limited", "unavailable"])
+@pytest.mark.parametrize("new_alert", [False, True])
+async def test_alert_during_failed_final_followup_starts_a_new_window(
+    hass, freezer, loaded, failure, new_alert
+):
+    entry, client, updates, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    client.state.reset_mock()
+    client.state.return_value["ref_door_ajar"] = True
+    await updates.put(StateUpdate({"ref_door_ajar": True}, full=False))
+    await hass.async_block_till_done()
+    coordinator.async_receive_event(dt_util.utcnow(), 0, 101)
+    await _advance_followup(hass, freezer, coordinator, 3)
+    await _advance_followup(hass, freezer, coordinator, 61)
+    assert client.state.await_count == 2
+    reading, release = asyncio.Event(), asyncio.Event()
+
+    async def read(_device_id):
+        reading.set()
+        await release.wait()
+        if failure == "unavailable":
+            client.push_connected = False
+            coordinator.async_set_update_error(ApiError("Disconnected"))
+        raise RateLimited(300) if failure == "rate_limited" else ApiError("Status read failed")
+
+    client.state.side_effect = read
+    freezer.tick(121)
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await asyncio.wait_for(reading.wait(), 1)
+    if new_alert:
+        coordinator.async_receive_event(dt_util.utcnow(), 1, 101)
+    release.set()
+    await coordinator._read_task
+    await hass.async_block_till_done()
+    restart = new_alert and failure == "transient"
+    assert (coordinator._followup_task is not None) is restart
+
+    client.state.side_effect = None
+    client.state.return_value["ref_door_ajar"] = False
+    await _advance_followup(hass, freezer, coordinator, 3)
+    assert client.state.await_count == 3
+    await _advance_followup(hass, freezer, coordinator, 58)
+    assert client.state.await_count == 3 + restart
+    assert coordinator._followup_task is None
+    if restart:
+        assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
+
+
 @pytest.mark.parametrize("system_option", [False, True])
 async def test_disabled_checks_also_disable_automatic_event_followups(
     hass, freezer, loaded, system_option
