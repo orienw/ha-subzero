@@ -126,7 +126,8 @@ class SubZeroConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             user_id = client.tokens["user_id"].lower()
             if self.source == config_entries.SOURCE_REAUTH:
                 original = self._get_reauth_entry()
-                if user_id != original.data["tokens"]["user_id"].lower():
+                original_id = original.data["tokens"].get("user_id") or original.unique_id
+                if original_id is None or user_id != original_id.lower():
                     return self.async_abort(reason="wrong_account")
                 return self.async_update_reload_and_abort(
                     original,
@@ -137,7 +138,7 @@ class SubZeroConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 )
             await self.async_set_unique_id(user_id)
             if any(
-                entry.data["tokens"]["user_id"].lower() == user_id
+                (entry.data["tokens"].get("user_id") or entry.unique_id or "").lower() == user_id
                 for entry in self._async_current_entries()
             ):
                 return self.async_abort(reason="already_configured")
@@ -442,18 +443,18 @@ class SubZeroOptionsFlow(config_entries.OptionsFlowWithReload):
                     entry, data={**entry.data, "tokens": tokens}
                 )
 
-            runtime = getattr(entry, "runtime_data", None)
-            client = (
-                runtime.client
-                if runtime is not None
-                else SubZeroClient(
-                    async_get_clientsession(self.hass),
-                    SUBSCRIPTION_KEY,
-                    entry.data["tokens"],
-                    save_tokens,
-                )
-            )
             try:
+                runtime = getattr(entry, "runtime_data", None)
+                client = (
+                    runtime.client
+                    if runtime is not None
+                    else SubZeroClient(
+                        async_get_clientsession(self.hass),
+                        SUBSCRIPTION_KEY,
+                        entry.data["tokens"],
+                        save_tokens,
+                    )
+                )
                 appliances = await client.appliances()
                 configured = configured_devices(self.hass, entry.entry_id)
                 self._devices = {

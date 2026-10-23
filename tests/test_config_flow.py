@@ -680,9 +680,9 @@ async def test_no_appliances(hass, tokens):
     assert result["reason"] == "no_appliances"
 
 
-@pytest.mark.parametrize("legacy", [True, False])
-async def test_second_setup_of_the_same_account_aborts(hass, tokens, legacy):
-    data = {"tokens": token_state(tokens)}
+@pytest.mark.parametrize(("legacy", "malformed"), [(True, False), (False, False), (False, True)])
+async def test_second_setup_of_the_same_account_aborts(hass, tokens, legacy, malformed):
+    data = {"tokens": {} if malformed else token_state(tokens)}
     data.update({"device_id": "test-fridge"} if legacy else {"devices": DEVICES})
     MockConfigEntry(
         domain=DOMAIN,
@@ -702,11 +702,12 @@ async def test_second_setup_of_the_same_account_aborts(hass, tokens, legacy):
     appliances.assert_not_awaited()
 
 
+@pytest.mark.parametrize("legacy", [False, True])
 @pytest.mark.parametrize("wrong_account", [False, True])
-async def test_reauth_keeps_the_appliance_selection(hass, tokens, wrong_account):
+async def test_reauth_keeps_the_appliance_selection(hass, tokens, wrong_account, legacy):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        unique_id="test-owner",
+        unique_id="test-fridge" if legacy else "test-owner",
         version=2,
         data={"devices": DEVICES, "tokens": token_state(tokens)},
         options={"devices": {"test-oven": DEVICES["test-oven"]}},
@@ -730,6 +731,21 @@ async def test_reauth_keeps_the_appliance_selection(hass, tokens, wrong_account)
     assert entry.options["devices"] == {"test-oven": DEVICES["test-oven"]}
     if not wrong_account:
         assert entry.data["username"] == CREDENTIALS["username"]
+
+
+async def test_reauth_without_saved_account_identity_is_rejected(hass, tokens):
+    entry = MockConfigEntry(
+        domain=DOMAIN, unique_id=None, version=2, data={"devices": DEVICES, "tokens": {}}
+    )
+    entry.add_to_hass(hass)
+    with patch("custom_components.subzero.config_flow.SubZeroLogin.login", return_value=tokens):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": "reauth", "entry_id": entry.entry_id}, data=entry.data
+        )
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], CREDENTIALS)
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "wrong_account"
+    assert entry.data["tokens"] == {}
 
 
 @pytest.mark.parametrize(
@@ -852,9 +868,15 @@ async def test_options_list_failure_limits_selection_to_available_saved_applianc
         assert entry.options == {}
 
 
-async def test_options_expired_tokens_start_reauth(hass, tokens):
+@pytest.mark.parametrize("malformed", [False, True])
+@pytest.mark.parametrize("wrong_account", [False, True])
+async def test_options_invalid_tokens_start_reauth(hass, tokens, malformed, wrong_account):
+    saved = {} if malformed else token_state(tokens)
     entry = MockConfigEntry(
-        domain=DOMAIN, version=2, data={"tokens": token_state(tokens), "devices": DEVICES}
+        domain=DOMAIN,
+        unique_id="TEST-OWNER",
+        version=2,
+        data={"tokens": saved, "devices": DEVICES},
     )
     entry.add_to_hass(hass)
     with patch(
@@ -864,10 +886,21 @@ async def test_options_expired_tokens_start_reauth(hass, tokens):
         await hass.async_block_till_done()
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "reauth_required"
-    assert (
-        hass.config_entries.flow.async_progress_by_handler(DOMAIN)[0]["context"]["source"]
-        == "reauth"
+    reauth = hass.config_entries.flow.async_progress_by_handler(DOMAIN)[0]
+    assert reauth["context"]["source"] == "reauth"
+    renewed = make_tokens(
+        "someone-else" if wrong_account else "test-owner", refresh_token="renewed"
     )
+    with (
+        patch("custom_components.subzero.config_flow.SubZeroLogin.login", return_value=renewed),
+        patch("custom_components.subzero.async_setup_entry", return_value=True),
+    ):
+        result = await hass.config_entries.flow.async_configure(reauth["flow_id"], CREDENTIALS)
+        await hass.async_block_till_done()
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == ("wrong_account" if wrong_account else "reauth_successful")
+    assert entry.data["tokens"] == (saved if wrong_account else token_state(renewed))
+    assert entry.data["devices"] == DEVICES
 
 
 async def test_options_list_keeps_selected_but_missing_appliances(hass, tokens):
