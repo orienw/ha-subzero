@@ -831,6 +831,61 @@ async def test_token_updates_do_not_postpone_state_checks(hass, freezer, loaded)
     assert entry.runtime_data is account
 
 
+async def test_a_read_started_before_disconnect_does_not_confirm_the_new_gap(hass, freezer, loaded):
+    entry, client, updates, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    confirmed = coordinator.confirmed_at
+    reading, release = asyncio.Event(), asyncio.Event()
+
+    async def read(_device_id):
+        reading.set()
+        await release.wait()
+        return dict(client.state.return_value)
+
+    client.state.side_effect = read
+    request = asyncio.create_task(coordinator.async_read_status())
+    await asyncio.wait_for(reading.wait(), 1)
+    client.push_connected = False
+    await updates.put(RateLimited(300))
+    await hass.async_block_till_done()
+    freezer.tick(1)
+    release.set()
+    with pytest.raises(HomeAssistantError, match="complete state"):
+        await request
+    assert coordinator.confirmed_at == confirmed
+    assert coordinator.last_update_success
+
+
+async def test_incomplete_observations_cannot_revive_expired_transport_state(hass, freezer, loaded):
+    entry, client, updates, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    complete = dict(client.state.return_value)
+    client.push_connected = False
+    await updates.put(RateLimited(300))
+    await hass.async_block_till_done()
+    freezer.tick(121)
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+    assert not coordinator.last_update_success
+
+    coordinator.apply_update(
+        StateUpdate({"appliance_model": complete["appliance_model"], "ref_set_temp": 39}, full=True)
+    )
+    assert not coordinator.last_update_success
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "unavailable"
+    client.state.return_value = {
+        key: value for key, value in complete.items() if key != "ref_door_ajar"
+    }
+    with pytest.raises(HomeAssistantError, match="complete state"):
+        await coordinator.async_read_status()
+    assert not coordinator.last_update_success
+
+    client.state.return_value = complete
+    assert await coordinator.async_read_status() == dt_util.utcnow()
+    assert coordinator.last_update_success
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
+
+
 async def test_rate_limited_checks_leave_confirmation_age_unchanged(
     hass, loaded, freezer, enabled_confirmation_sensor
 ):

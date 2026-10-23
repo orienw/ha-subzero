@@ -72,6 +72,7 @@ from .controls import (
 
 _LOGGER = logging.getLogger(__name__)
 INITIAL_STATE_TIMEOUT = 16
+TRANSPORT_GRACE_SECONDS = 120
 FOLLOWUP_DELAYS = (2, 60, 120)
 FOLLOWUP_KEYS = {key for key in BINARY_KEYS if key.endswith(("door_ajar", "timer_active"))} | {
     "kitchen_timer2_active",
@@ -148,6 +149,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             "last_received": None,
         }
         self._command_lock = asyncio.Lock()
+        self._command_generation = 0
         self._unsettled = False
         self._state_lock = asyncio.Lock()
         self._read_requests = 0
@@ -158,6 +160,9 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self._read_snapshot: dict | None = None
         self._read_error: Exception | None = None
         self._channel_error: ApiError | None = None
+        self._transport_error: ApiError | None = None
+        self._transport_generation = 0
+        self._transport_grace_task: asyncio.Task | None = None
         self._event_cutoff = dt_util.utcnow()
         self._event_ids: dict[tuple[datetime, int, int], str] = {}
         self._paired_events: set[tuple[datetime, int, int]] = set()
@@ -168,6 +173,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self._last_followup = 0.0
         self.confirmed_at: datetime | None = None
         self._confirmation = 0
+        self._confirmation_transport_generation = 0
         self._confirmation_model: str | None = None
         self._required_state_keys: set[str] = set()
         self._published = 0
@@ -190,6 +196,59 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             self.verification_stats["last_success"] = result.confirmed_at.isoformat()
 
     @callback
+    def async_transport_error(self, error: ApiError) -> None:
+        """Keep established state briefly while the shared stream reconnects."""
+        first = self._transport_error is None
+        self._transport_error = error
+        self._transport_generation += 1
+        healthy = (
+            self.last_update_success
+            and bool(self.data.get("appliance_model"))
+            and self._channel_error is None
+        )
+        if first and healthy:
+            self._async_start_transport_grace()
+        if healthy and self._transport_grace_task is not None:
+            self.async_update_listeners()
+        else:
+            self.async_set_update_error(error)
+
+    @callback
+    def _async_cancel_transport_grace(self) -> None:
+        if self._transport_grace_task is not None:
+            self._transport_grace_task.cancel()
+            self._transport_grace_task = None
+
+    @callback
+    def _async_start_transport_grace(self) -> None:
+        self._async_cancel_transport_grace()
+        self._transport_grace_task = self.entry.async_create_background_task(
+            self.hass, self._async_transport_grace(), "Sub-Zero reconnect grace"
+        )
+
+    async def _async_transport_grace(self) -> None:
+        await asyncio.sleep(TRANSPORT_GRACE_SECONDS)
+        self._transport_grace_task = None
+        if self._transport_error is not None:
+            self.async_set_update_error(self._transport_error)
+
+    @callback
+    def _async_confirm_transport_state(self) -> None:
+        if self._transport_error is None:
+            return
+        if self.client.push_connected:
+            self._transport_error = None
+            self._async_cancel_transport_grace()
+        else:
+            # A current read is useful while disconnected, but its values still age.
+            self._async_start_transport_grace()
+
+    @callback
+    def async_set_update_error(self, err: Exception) -> None:
+        self._async_cancel_transport_grace()
+        super().async_set_update_error(err)
+
+    @callback
     def _confirm_state(self, properties: dict, source: str) -> bool:
         # Incomplete replies must not erase the next confirmation's requirements.
         if self.data.get("appliance_model") == self._confirmation_model:
@@ -208,6 +267,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             return False
         self.confirmed_at = dt_util.utcnow()
         self._confirmation += 1
+        self._confirmation_transport_generation = self._transport_generation
         return True
 
     def _active_conditions(self) -> set[str]:
@@ -216,7 +276,11 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
     @callback
     def async_set_updated_data(self, data: dict) -> None:
         self._published += 1
-        super().async_set_updated_data(data)
+        if self._transport_error is not None and self._transport_grace_task is None:
+            self.data = data
+            self.async_update_listeners()
+        else:
+            super().async_set_updated_data(data)
         _LOGGER.debug("%s state published: %s", self.device["name"], _state_for_log(self.data))
         if (
             not self._active_conditions()
@@ -385,11 +449,22 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             if self._unsettled:
                 await self.async_refresh()
                 self._unsettled = False
+            if self._transport_error is not None or not self.client.push_connected:
+                try:
+                    await self.async_read_status()
+                except HomeAssistantError as error:
+                    raise ServiceValidationError(str(error)) from error
+            self._command_generation = self._transport_generation
             try:
                 yield
             except asyncio.CancelledError:
                 self._unsettled = True
                 raise
+
+    async def _async_confirm_command_generation(self) -> None:
+        if self._command_generation != self._transport_generation:
+            await self.async_read_status()
+            self._command_generation = self._transport_generation
 
     async def async_set_properties(self, properties: dict, *, force: bool = False) -> None:
         """Serialize writes and confirm their result from appliance state.
@@ -510,6 +585,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
     ) -> datetime:
         last_error = None
         for attempt in range(3):
+            await self._async_confirm_command_generation()
             if not self.last_update_success:
                 if attempt:
                     break
@@ -549,6 +625,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                             await asyncio.wait_for(confirmed.wait(), CONTROL_PUSH_TIMEOUT)
                 except TimeoutError:
                     pass
+                await self._async_confirm_command_generation()
                 if matched and not acknowledged:
                     # A value that already matched cannot confirm a write that
                     # failed or went unanswered.
@@ -626,7 +703,10 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             raise HomeAssistantError(str(error)) from error
         if result.conflicted:
             raise HomeAssistantError("Appliance state changed during the status read; try again.")
-        if result.confirmed_at is None:
+        if (
+            result.confirmed_at is None
+            or self._confirmation_transport_generation != self._transport_generation
+        ):
             raise HomeAssistantError("The appliance did not return a complete state snapshot.")
         return result.confirmed_at
 
@@ -667,7 +747,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 not report_error
                 and isinstance(error, UpdateFailed)
                 and self.last_update_success
-                and self.client.push_connected
+                and (self.client.push_connected or self._transport_grace_task is not None)
                 and self._channel_error is None
             )
             # Unpublished failures must not be adopted by an older refresh.
@@ -678,7 +758,11 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self.async_set_updated_data(data)
         self._process_events(data, history=True)
         confirmed = (
-            self.confirmed_at if not conflicted and self._confirmation > confirmation else None
+            self.confirmed_at
+            if not conflicted
+            and self._confirmation > confirmation
+            and self._confirmation_transport_generation == self._transport_generation
+            else None
         )
         result = self._completed_read = StateRead(
             request, confirmed, published=self._published, conflicted=conflicted
@@ -711,10 +795,13 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             isinstance(result.error, ConfigEntryAuthFailed) or self._published <= result.published
         ):
             raise result.error
+        if self._transport_error is not None and self._transport_grace_task is None:
+            raise UpdateFailed("The appliance did not return a complete state after reconnecting.")
         return self.data
 
     async def _async_fetch_state(self) -> tuple[dict, bool]:
         async with self._state_lock:
+            transport_generation = self._transport_generation
             self._read_updates = []
             self._read_snapshot = None
             self._read_error = None
@@ -763,9 +850,11 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 if (
                     received
                     and not conflicted
+                    and transport_generation == self._transport_generation
                     and (not model or model == data.get("appliance_model"))
                 ):
-                    self._confirm_state(data, "read")
+                    if self._confirm_state(data, "read"):
+                        self._async_confirm_transport_state()
                 self.unrecognized_keys.update(data.keys() - STATE_KEYS)
                 if "notifs" in data:
                     data = {**data, "notifs": notification_records(data)}
@@ -853,24 +942,31 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
     async def async_recover(self) -> None:
         """Restore unavailable state while the appliance is reporting again."""
         backoff = RECONNECT_DELAY
-        while not self.last_update_success:
+        while not self.last_update_success or self._transport_error is not None:
             _LOGGER.debug("Refreshing %s to recover appliance state", self.device["name"])
             try:
-                data = await self._async_update_data()
+                result = await self._async_read_result(report_error=False)
+                if result.error is not None:
+                    raise result.error
+                if self._transport_error is not None and result.confirmed_at is None:
+                    raise UpdateFailed(
+                        "The appliance did not return a complete state after reconnecting."
+                    )
             except ConfigEntryAuthFailed as error:
                 self.async_set_update_error(error)
                 self.entry.async_start_reauth(self.hass)
                 return
             except Exception as error:
-                if self.last_update_success:
+                if self.last_update_success and self._transport_error is None:
                     return
                 if not isinstance(error, UpdateFailed):
                     _LOGGER.exception("Sub-Zero state recovery failed unexpectedly")
-                self.async_set_update_error(error)
+                if self._transport_grace_task is None:
+                    self.async_set_update_error(error)
                 retry_after = (error.retry_after or 0) if isinstance(error, UpdateFailed) else 0
             else:
                 if not self.last_update_success:
-                    self.async_set_updated_data(data)
+                    self.async_set_updated_data(self.data)
                 return
             await asyncio.sleep(max(backoff, retry_after) + random.uniform(0, 5))
             backoff = min(backoff * 2, MAX_RECONNECT_DELAY)
@@ -887,6 +983,8 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             self.clock_zone = zone
         properties = {key: value for key, value in update.properties.items() if key in STATE_KEYS}
         complete_snapshot = update.full and self._confirm_state(properties, "snapshot")
+        if complete_snapshot:
+            self._async_confirm_transport_state()
         if "appliance_type" in properties and appliance_type(properties) is None:
             # Like the app, an unusable type does not replace the known one.
             del properties["appliance_type"]
@@ -1064,7 +1162,7 @@ class SubZeroAccount:
             self._initial_states.clear()
         for coordinator in self.coordinators.values():
             if (
-                not coordinator.last_update_success
+                (not coordinator.last_update_success or coordinator._transport_error is not None)
                 and coordinator._channel_error is None
                 and self.client.push_connected
             ):
@@ -1153,7 +1251,7 @@ class SubZeroAccount:
     def _read_failed(self, coordinator: SubZeroCoordinator) -> None:
         if (
             self.entry.state is ConfigEntryState.LOADED
-            and not coordinator.last_update_success
+            and (not coordinator.last_update_success or coordinator._transport_error is not None)
             and coordinator._channel_error is None
             and self.client.push_connected
             and not isinstance(coordinator.last_exception, ConfigEntryAuthFailed)
@@ -1179,7 +1277,10 @@ class SubZeroAccount:
                     else:
                         accepted = coordinator.apply_update(update)
                     if isinstance(update, ApiError) or (
-                        isinstance(update, StateUpdate) and update.full and accepted
+                        isinstance(update, StateUpdate)
+                        and update.full
+                        and accepted
+                        and coordinator._transport_error is None
                     ):
                         if recovery := recoveries.pop(device_id, None):
                             canceled.add(recovery)
@@ -1188,7 +1289,10 @@ class SubZeroAccount:
                         if ready := self._initial_states.get(device_id):
                             ready.set()
                     if (
-                        not coordinator.last_update_success
+                        (
+                            not coordinator.last_update_success
+                            or coordinator._transport_error is not None
+                        )
                         and device_id not in self._initial_states
                         and not isinstance(coordinator.last_exception, ConfigEntryAuthFailed)
                         and (
@@ -1207,7 +1311,10 @@ class SubZeroAccount:
                     canceled.add(recovery)
                 return
             except ApiError as error:
-                self.set_error(error)
+                for coordinator in self.coordinators.values():
+                    coordinator.async_transport_error(error)
+                for ready in self._initial_states.values():
+                    ready.set()
                 retry_after = error.retry_after if isinstance(error, RateLimited) else 0
             except Exception as error:
                 _LOGGER.exception("Sub-Zero's notification stream failed unexpectedly")

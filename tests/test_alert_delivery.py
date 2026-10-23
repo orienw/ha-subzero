@@ -209,7 +209,7 @@ async def test_channel_alert_then_missed_door_close(hass, freezer, loaded, monke
     elif failure == "reconnect":
         await updates.put(ApiError("Sub-Zero's notification connection stopped responding."))
         await settle()
-        assert door() == "unavailable"
+        assert door() == "on"
     await advance(450)
     if failure == "failed_read":
         client.state.side_effect = None

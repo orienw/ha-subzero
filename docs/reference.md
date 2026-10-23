@@ -176,9 +176,9 @@ Changes to the check interval and Firebase alerts apply without reloading entiti
 
 A new appliance alert starts a status read after two seconds, then at most two more at one- and two-minute delays while a door, timer, or wash remains active. Reads stay at least one minute apart per appliance. Normal state changes do not start these reads. Alerts do not extend an existing window, except that an alert during its final read starts another window. Clear conditions, unavailability, or rate limits end it; a transient read failure uses the next attempt.
 
-An accepted channel or incoming state can trigger a status read for an unavailable appliance. Failed recovery reads back off while the stream and appliance channel remain open; stream disconnection stops recovery.
+An accepted channel or incoming state can trigger a status read for an unavailable appliance or one awaiting reconfirmation after a push interruption, even with periodic checks disabled. Failed recovery reads back off while the stream and appliance channel remain open; stream disconnection stops recovery.
 
-Background read failures preserve otherwise available state while push remains connected. Authentication failures, channel errors, and disconnected streams still affect availability. Available cached values can therefore be old during cloud failures or rate limits. Sub-Zero publishes no API quota.
+Background read failures preserve otherwise available state while push remains connected. A transport interruption keeps established readings available for up to two minutes without a complete observation. Repeated disconnects, handshakes, and partial updates do not extend that window. Authentication failures and appliance-channel errors still affect availability immediately. Available cached values can therefore be old during cloud failures or rate limits. Sub-Zero publishes no API quota.
 
 ## Explicit status reads
 
@@ -197,5 +197,7 @@ Control changes require appliance-state confirmation. Property writes use up to 
 Repeated writes of an already-reported value also require a cloud acknowledgement. Ordered operations stop if a required write fails. Ice modes and remote starts preserve the app's write order, including repeated values. A start for an already-running oven changes only its setpoint.
 
 Commands are serialized and check the state left by earlier commands before deciding what to send. Cancelling a command can leave its appliance effect unsettled, so the next command reads status first.
+
+Controls require reconfirmed state after a push interruption. Cached availability during the reconnect window does not permit a write based on unverified interlocks. A complete status read or full push snapshot must reconfirm state before controls proceed; an unavailable push connection requires a fresh read before writing.
 
 Kitchen-timer confirmation requires a reported end time within 65 seconds of the request time plus the requested duration. This prevents an old timer state from confirming a restart. Failed confirmation includes the last command error when available.

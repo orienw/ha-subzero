@@ -65,7 +65,7 @@ In **Configure**, choose a one-, two-, five-, or ten-minute check interval, or *
 
 <img src="docs/images/configure.png" alt="Sub-Zero configuration with appliance selection, Firebase alerts, and a ten-minute state-check interval" width="500">
 
-Cloud outages or delayed messages can leave sensors stale. Status reads help recover the current state, but cannot recreate every brief door movement. The optional **State confirmed** diagnostic sensor shows the last complete observation; enable it in the entity settings when needed.
+Cloud outages or delayed messages can leave sensors stale. During a brief push interruption, established readings remain available for up to two minutes while reconnection runs. A complete observation reconfirms state; otherwise the readings become unavailable. Status reads help recover the current state, but cannot recreate every brief door movement. The optional **State confirmed** diagnostic sensor shows the last complete observation; enable it in the entity settings when needed.
 
 ### Check state before sending a reminder
 

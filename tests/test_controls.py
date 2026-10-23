@@ -64,8 +64,15 @@ async def controls(hass, tokens, request):
     behavior = {"push": True, "accept": True}
 
     async def watch(device_ids):
-        while True:
-            yield await updates.get()
+        client.push_connected = True
+        try:
+            while True:
+                update = await updates.get()
+                if isinstance(update, Exception):
+                    raise update
+                yield update
+        finally:
+            client.push_connected = False
 
     async def write(device_id, key, value):
         assert device_id == "test-fridge"
@@ -622,6 +629,115 @@ async def test_queued_write_revalidates_after_the_previous_one(hass, controls):
         call("test-fridge", "night_ice_on", False),
         call("test-fridge", "max_ice_on", True),
     ]
+
+
+async def test_control_reads_current_state_after_stream_loss(hass, controls):
+    coordinator = controls.entry.runtime_data.coordinators["test-fridge"]
+    reads = controls.client.state.await_count
+    controls.states["test-fridge"]["max_ice_on"] = True
+    await controls.updates.put(ApiError("Stream disconnected"))
+    await hass.async_block_till_done()
+    assert hass.states.get("number.kitchen_freezer_setpoint").state == "0"
+
+    with pytest.raises(ServiceValidationError, match="Max Ice"):
+        await coordinator.async_set_properties({"frz_set_temp": 1})
+
+    assert controls.client.state.await_count == reads + 1
+    controls.client.set_property.assert_not_awaited()
+    assert hass.states.get("number.kitchen_freezer_setpoint").state == "unavailable"
+
+
+async def test_every_command_reads_again_while_the_stream_is_down(hass, controls):
+    coordinator = controls.entry.runtime_data.coordinators["test-fridge"]
+    await controls.updates.put(ApiError("Stream disconnected"))
+    await hass.async_block_till_done()
+    reads = controls.client.state.await_count
+    await coordinator.async_set_properties({"air_filter_on": True})
+    assert not controls.client.push_connected
+    assert controls.client.state.await_count == reads + 1
+
+    controls.states["test-fridge"]["max_ice_on"] = True
+    with pytest.raises(ServiceValidationError, match="Max Ice"):
+        await coordinator.async_set_properties({"frz_set_temp": 1})
+
+    assert controls.client.state.await_count == reads + 2
+    controls.client.set_property.assert_not_awaited()
+
+
+@pytest.mark.parametrize("observation", ["failed", "incomplete", "conflicting"])
+async def test_control_requires_a_complete_conflict_free_post_disconnect_read(
+    hass, controls, observation
+):
+    coordinator = controls.entry.runtime_data.coordinators["test-fridge"]
+    await controls.updates.put(ApiError("Stream disconnected"))
+    await hass.async_block_till_done()
+    reads = controls.client.state.await_count
+
+    async def read(device_id):
+        if observation == "failed":
+            raise ApiError("Status unavailable")
+        state = dict(controls.states[device_id])
+        if observation == "incomplete":
+            del state["max_ice_on"]
+        else:
+            coordinator.apply_update(StateUpdate({"night_mode": 0}, full=False))
+        return state
+
+    controls.client.state.side_effect = read
+    with pytest.raises(HomeAssistantError):
+        await coordinator.async_set_properties({"air_filter_on": False})
+
+    assert controls.client.state.await_count == reads + 1
+    controls.client.set_property.assert_not_awaited()
+
+
+async def test_disconnect_between_ordered_writes_rechecks_the_next_setting(hass, controls):
+    coordinator = controls.entry.runtime_data.coordinators["test-fridge"]
+    original = controls.client.set_property.side_effect
+    reads = controls.client.state.await_count
+
+    async def write(device_id, key, value):
+        await original(device_id, key, value)
+        controls.states["test-fridge"]["max_ice_on"] = True
+        await controls.updates.put(ApiError("Stream disconnected"))
+        await hass.async_block_till_done()
+
+    controls.client.set_property.side_effect = write
+    with pytest.raises(ServiceValidationError, match="Max Ice"):
+        await coordinator.async_set_properties({"night_ice_on": False, "frz_set_temp": 1})
+
+    assert controls.client.state.await_count == reads + 1
+    controls.client.set_property.assert_awaited_once_with("test-fridge", "night_ice_on", False)
+
+
+async def test_read_started_before_disconnect_does_not_bypass_the_next_control_read(hass, controls):
+    coordinator = controls.entry.runtime_data.coordinators["test-fridge"]
+    reading, release = asyncio.Event(), asyncio.Event()
+    reads = controls.client.state.await_count
+
+    async def read(device_id):
+        state = dict(controls.states[device_id])
+        if controls.client.state.await_count == reads + 1:
+            reading.set()
+            await release.wait()
+        return state
+
+    controls.client.state.side_effect = read
+    pending = asyncio.create_task(coordinator.async_refresh())
+    try:
+        await asyncio.wait_for(reading.wait(), 1)
+        controls.states["test-fridge"]["max_ice_on"] = True
+        await controls.updates.put(ApiError("Stream disconnected"))
+        await hass.async_block_till_done()
+    finally:
+        release.set()
+        await pending
+
+    with pytest.raises(ServiceValidationError, match="Max Ice"):
+        await coordinator.async_set_properties({"frz_set_temp": 1})
+
+    assert controls.client.state.await_count == reads + 2
+    controls.client.set_property.assert_not_awaited()
 
 
 async def test_options_follow_reported_capabilities(hass, controls):
