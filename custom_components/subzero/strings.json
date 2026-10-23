@@ -76,8 +76,8 @@
       }
     },
     "error": {
-      "cannot_connect": "Could not refresh the appliance list. Try again later.",
-      "rate_limited": "Sub-Zero asked us to slow down. Wait before trying again.",
+      "cannot_connect": "Could not refresh the appliance list. You can configure any saved appliances listed below, or try again later.",
+      "rate_limited": "Sub-Zero asked us to slow down. You can configure any saved appliances listed below. Wait before refreshing the list.",
       "invalid_device": "Select appliances from this account."
     },
     "abort": {

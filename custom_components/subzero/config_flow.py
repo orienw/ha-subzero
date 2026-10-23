@@ -475,9 +475,17 @@ class SubZeroOptionsFlow(config_entries.OptionsFlowWithReload):
             except ApiError:
                 errors["base"] = "cannot_connect"
             if errors:
-                return self.async_show_form(
-                    step_id="init", data_schema=vol.Schema({}), errors=errors
-                )
+                configured = configured_devices(self.hass, entry.entry_id)
+                saved = {
+                    device_id: device
+                    for device_id, device in current.items()
+                    if device_id not in configured
+                }
+                if not saved:
+                    return self.async_show_form(
+                        step_id="init", data_schema=vol.Schema({}), errors=errors
+                    )
+                self._devices = saved
         if user_input is not None and "device_ids" in user_input:
             selected = user_input["device_ids"]
             if not set(selected).issubset(self._devices):

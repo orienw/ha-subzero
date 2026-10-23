@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import aiohttp
 import pytest
-from homeassistant.data_entry_flow import FlowResultType, UnknownFlow
+from homeassistant.data_entry_flow import FlowResultType, InvalidData, UnknownFlow
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.subzero.api import ApiError, Appliance, RateLimited, token_state
@@ -772,7 +772,7 @@ async def test_reauth_suggests_the_saved_email(hass, tokens, username, title, ex
 @pytest.mark.parametrize("error", [ApiError("Unavailable"), RateLimited(300)])
 async def test_options_list_failure_is_retryable(hass, tokens, error):
     entry = MockConfigEntry(
-        domain=DOMAIN, version=2, data={"tokens": token_state(tokens), "devices": DEVICES}
+        domain=DOMAIN, version=2, data={"tokens": token_state(tokens), "devices": {}}
     )
     entry.add_to_hass(hass)
     with patch(
@@ -781,10 +781,75 @@ async def test_options_list_failure_is_retryable(hass, tokens, error):
         result = await hass.config_entries.options.async_init(entry.entry_id)
         assert result["type"] is FlowResultType.FORM
         assert result["errors"]
+        assert not result["data_schema"].schema
         result = await hass.config_entries.options.async_configure(result["flow_id"], {})
     assert not result["errors"]
-    assert result["data_schema"]({})["device_ids"] == list(DEVICES)
+    assert result["data_schema"]({})["device_ids"] == []
+    selector = next(iter(result["data_schema"].schema.values()))
+    assert {option["value"] for option in selector.config["options"]} == set(DEVICES)
     assert entry.options == {}
+
+
+@pytest.mark.parametrize("error", [ApiError("Unavailable"), RateLimited(300)])
+@pytest.mark.parametrize("selected", [["test-fridge"], []])
+async def test_options_list_failure_allows_saved_appliance_settings(hass, tokens, error, selected):
+    saved = {"test-fridge": {"name": "Saved kitchen", "temperature_unit": "C"}}
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        version=2,
+        data={"tokens": token_state(tokens), "devices": DEVICES},
+        options={"devices": saved, "firebase_alerts": True, "status_poll_interval": 60},
+    )
+    entry.add_to_hass(hass)
+    with (
+        patch(
+            "custom_components.subzero.api.SubZeroClient.appliances", side_effect=error
+        ) as appliances,
+        patch("custom_components.subzero.async_setup_entry", return_value=True),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        assert result["errors"]
+        assert result["data_schema"]({}) == {
+            "device_ids": list(saved),
+            "firebase_alerts": True,
+            "status_poll_interval": "60",
+        }
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {"device_ids": selected, "firebase_alerts": False, "status_poll_interval": "600"},
+        )
+        await hass.async_block_till_done()
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options == {
+        "devices": {device_id: saved[device_id] for device_id in selected},
+        "status_poll_interval": 600,
+    }
+    appliances.assert_awaited_once()
+
+
+async def test_options_list_failure_limits_selection_to_available_saved_appliances(hass, tokens):
+    entry = MockConfigEntry(
+        domain=DOMAIN, version=2, data={"tokens": token_state(tokens), "devices": DEVICES}
+    )
+    entry.add_to_hass(hass)
+    MockConfigEntry(
+        domain=DOMAIN,
+        data={"tokens": token_state(tokens), "device_id": "test-oven", "temperature_unit": "F"},
+    ).add_to_hass(hass)
+    with patch(
+        "custom_components.subzero.api.SubZeroClient.appliances", side_effect=ApiError("Offline")
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        schema = result["data_schema"]
+        assert schema({})["device_ids"] == ["test-fridge"]
+        selector = next(iter(schema.schema.values()))
+        assert selector.config["options"] == [{"value": "test-fridge", "label": "Kitchen"}]
+        for device_id in ("test-oven", "undiscovered"):
+            with pytest.raises(InvalidData):
+                await hass.config_entries.options.async_configure(
+                    result["flow_id"], {"device_ids": [device_id]}
+                )
+        assert entry.options == {}
 
 
 async def test_options_expired_tokens_start_reauth(hass, tokens):
