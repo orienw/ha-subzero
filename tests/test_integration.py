@@ -50,7 +50,7 @@ async def loaded(hass, tokens, request):
             "temperature_unit": getattr(request, "param", "F"),
             "tokens": token_state(tokens),
         },
-        # Timing tests count on five-minute checks; the default is ten.
+        # Timing tests use five-minute checks explicitly.
         options={"status_poll_interval": 300},
     )
     entry.add_to_hass(hass)
@@ -144,9 +144,11 @@ async def test_reported_properties_drive_entity_discovery(hass, loaded):
     client.state.assert_awaited_once()
 
 
-async def test_state_checks_default_to_ten_minutes(hass, loaded):
-    entry, client, _, _, _ = loaded
-    hass.config_entries.async_update_entry(entry, options={})
+@pytest.mark.parametrize("saved_interval", [None, 600])
+async def test_state_checks_default_off_and_preserve_saved_interval(hass, loaded, saved_interval):
+    entry, client, updates, _, _ = loaded
+    options = {} if saved_interval is None else {"status_poll_interval": saved_interval}
+    hass.config_entries.async_update_entry(entry, options=options)
     await hass.config_entries.async_reload(entry.entry_id)
     await hass.async_block_till_done()
     client.state.reset_mock()
@@ -158,7 +160,15 @@ async def test_state_checks_default_to_ten_minutes(hass, loaded):
     client.state.assert_not_awaited()
     async_fire_time_changed(hass, started + timedelta(seconds=601))
     await hass.async_block_till_done()
-    client.state.assert_awaited_once_with("test-fridge")
+    if saved_interval is None:
+        async_fire_time_changed(hass, started + timedelta(hours=24))
+        await hass.async_block_till_done()
+        client.state.assert_not_awaited()
+    else:
+        client.state.assert_awaited_once_with("test-fridge")
+    await updates.put(StateUpdate({"ref_set_temp": 39}, full=False))
+    await hass.async_block_till_done()
+    assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "39"
     client.open_channel.assert_not_awaited()
     assert client.watched == connections
 

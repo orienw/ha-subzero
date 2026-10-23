@@ -926,18 +926,20 @@ async def test_options_list_keeps_selected_but_missing_appliances(hass, tokens):
     assert selector.config["options"] == [{"value": "test-fridge", "label": "Kitchen"}]
 
 
-@pytest.mark.parametrize("interval", [0, 60, 120, 300, 600])
-async def test_options_save_state_check_interval(hass, tokens, interval):
+@pytest.mark.parametrize(
+    ("saved_interval", "interval"), [(120, 0), (120, 60), (120, 120), (120, 300), (600, 600)]
+)
+async def test_options_save_state_check_interval(hass, tokens, saved_interval, interval):
     entry = MockConfigEntry(
         domain=DOMAIN,
         version=2,
         data={"tokens": token_state(tokens), "devices": DEVICES},
-        options={"status_poll_interval": 120},
+        options={"status_poll_interval": saved_interval},
     )
     entry.add_to_hass(hass)
     with patch("custom_components.subzero.api.SubZeroClient.appliances", return_value=APPLIANCES):
         result = await hass.config_entries.options.async_init(entry.entry_id)
-        assert result["data_schema"]({})["status_poll_interval"] == "120"
+        assert result["data_schema"]({})["status_poll_interval"] == str(saved_interval)
         result = await hass.config_entries.options.async_configure(
             result["flow_id"], {"device_ids": list(DEVICES), "status_poll_interval": str(interval)}
         )
@@ -957,8 +959,10 @@ async def test_options_toggle_firebase_alerts(hass, tokens, enabled):
     with patch("custom_components.subzero.api.SubZeroClient.appliances", return_value=APPLIANCES):
         result = await hass.config_entries.options.async_init(entry.entry_id)
         assert result["data_schema"]({})["firebase_alerts"] is not enabled
+        assert result["data_schema"]({})["status_poll_interval"] == "0"
         result = await hass.config_entries.options.async_configure(
             result["flow_id"], {"device_ids": list(DEVICES), "firebase_alerts": enabled}
         )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert entry.options.get("firebase_alerts", False) is enabled
+    assert entry.options["status_poll_interval"] == 0

@@ -168,9 +168,9 @@ Debug logging for `custom_components.subzero` records channel-open attempts, not
 
 Selected appliances share tokens and one notification connection. Setup waits up to 16 seconds for initial push state, then requests missing state. Lost connections reconnect with increasing delays, and rate-limit responses are honored.
 
-State checks default to once every ten minutes per appliance, staggered across selected appliances. Incoming updates do not postpone them. Checks read status without reopening channels or restarting the shared connection. Known offline appliance channels wait for their existing channel retry before automatic checks resume.
+Periodic state checks are disabled by default. When enabled, checks run at the selected interval per appliance, staggered across selected appliances. Incoming updates do not postpone them. Checks read status without reopening channels or restarting the shared connection. Known offline appliance channels wait for their existing channel retry before automatic checks resume.
 
-Configure offers one-, two-, five-, and ten-minute intervals. **No periodic checks** disables scheduled state checks while keeping alert follow-up reads. Home Assistant's system option to disable polling turns off both kinds of automatic reads.
+Configure offers one-, two-, five-, and ten-minute intervals. **No periodic checks** keeps alert follow-up and reconnect recovery reads; silently missed updates can leave stale values until those values are reported again. Existing saved intervals are preserved. Home Assistant's system option to disable polling turns off scheduled checks and alert follow-up reads.
 
 Changes to the check interval and Firebase alerts apply without reloading entities. Changing the appliance selection or its saved temperature units reloads the integration.
 
