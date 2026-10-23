@@ -28,6 +28,13 @@ For manual installation, copy `custom_components/subzero` into your Home Assista
 
 Available controls and sensors depend on what each appliance reports. Entities can appear as new properties arrive; there is no model allowlist.
 
+<table>
+  <tr>
+    <td valign="top"><img src="docs/images/refrigerator-controls.png" alt="Refrigerator controls in Home Assistant" width="370"></td>
+    <td valign="top"><img src="docs/images/refrigerator-sensors.png" alt="Refrigerator door states, temperatures, and filter readings in Home Assistant" width="370"></td>
+  </tr>
+</table>
+
 | Appliance | Controls and monitoring |
 | --- | --- |
 | [Refrigerators and freezers](docs/reference.md#refrigerators-and-wine-storage) | Temperature setpoints and climate entities, doors, filters, ice modes, Sabbath and vacation modes, crisper settings, humidity, lighting, and water dispenser |
@@ -55,6 +62,8 @@ Appliance settings change only when you use a control or automation. See the [re
 Normal updates arrive through push. By default, the integration also reads status every **ten minutes per appliance** to catch missed updates. Other push activity does not postpone these checks. Appliance alerts can trigger a few follow-up reads while the reported condition remains active.
 
 In **Configure**, choose a one-, two-, five-, or ten-minute check interval, or **Push only**. Push only and Home Assistant's option to disable polling turn off both scheduled checks and alert follow-ups.
+
+<img src="docs/images/configure.png" alt="Sub-Zero configuration with appliance selection, Firebase alerts, and a ten-minute state-check interval" width="500">
 
 Cloud outages or delayed messages can leave sensors stale. Status reads help recover the current state, but cannot recreate every brief door movement. The optional **State confirmed** diagnostic sensor shows the last complete observation; enable it in the entity settings when needed.
 
