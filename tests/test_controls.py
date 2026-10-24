@@ -665,8 +665,8 @@ async def test_every_command_reads_again_while_the_stream_is_down(hass, controls
     controls.client.set_property.assert_not_awaited()
 
 
-@pytest.mark.parametrize("observation", ["failed", "incomplete", "conflicting"])
-async def test_control_requires_a_complete_conflict_free_post_disconnect_read(
+@pytest.mark.parametrize("observation", ["failed", "missing_setting", "conflicting"])
+async def test_control_requires_a_conflict_free_post_disconnect_read_reporting_the_setting(
     hass, controls, observation
 ):
     coordinator = controls.entry.runtime_data.coordinators["test-fridge"]
@@ -678,14 +678,19 @@ async def test_control_requires_a_complete_conflict_free_post_disconnect_read(
         if observation == "failed":
             raise ApiError("Status unavailable")
         state = dict(controls.states[device_id])
-        if observation == "incomplete":
-            del state["max_ice_on"]
+        if observation == "missing_setting":
+            # The read confirms state without the setting, so the control is refused on
+            # that state rather than on the read.
+            del state["air_filter_on"]
         else:
             coordinator.apply_update(StateUpdate({"night_mode": 0}, full=False))
         return state
 
     controls.client.state.side_effect = read
-    with pytest.raises(HomeAssistantError):
+    with pytest.raises(
+        HomeAssistantError,
+        match="does not report this setting" if observation == "missing_setting" else None,
+    ):
         await coordinator.async_set_properties({"air_filter_on": False})
 
     assert controls.client.state.await_count == reads + 1

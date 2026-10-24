@@ -87,6 +87,8 @@ class StateRead:
     error: Exception | None = None
     published: int = 0
     conflicted: bool = False
+    # State keys status reads have reported that the published state lacks.
+    missing_keys: tuple[str, ...] = ()
 
 
 def status_poll_interval(entry: ConfigEntry) -> int:
@@ -156,7 +158,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self._pending_read_error_requests: set[int] = set()
         self._read_task: asyncio.Task[StateRead] | None = None
         self._completed_read: StateRead | None = None
-        # Updates during a status read, each with whether it was a complete snapshot
+        # Updates during a status read, each with whether it was a confirming snapshot
         # and whether it replaced cached state.
         self._read_updates: list[tuple[StateUpdate, bool, bool]] | None = None
         self._read_snapshot: dict | None = None
@@ -181,7 +183,10 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         # pushed snapshots can report different sets, so each is held to its own.
         self._required_state_keys: dict[str, set[str]] = {"snapshot": set(), "read": set()}
         self._published = 0
+        # What each source's latest observation lacked of the keys it is held to, and
+        # what the observation that last confirmed state lacked. Recorded, not enforced.
         self.missing_state_keys: dict[str, list[str]] = {"snapshot": [], "read": []}
+        self.confirmed_missing_keys: list[str] = []
         self.verification_stats: dict[str, int | str | None] = {
             "checks": 0,
             "complete_snapshots": 0,
@@ -256,7 +261,15 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
 
     @callback
     def _confirm_state(self, properties: dict, source: str, *, certify: bool = True) -> bool:
-        """Record what the source reports and certify the state when it is complete."""
+        """Record what the source reports and lacks, and certify the state.
+
+        A key the observation lacks is noted in missing_state_keys, for diagnostics
+        and the State confirmed sensor; it does not keep the observation from
+        confirming state. Sources do omit keys the integration has seen (the fridge's
+        status reply lacks the notification history its snapshots carry, an oven's
+        snapshots vary in `cav_remote_ready`), and refusing to confirm left appliances
+        unavailable and controls refused for one missing key.
+        """
         model = properties.get("appliance_model")
         if not isinstance(model, str) or not model:
             self.missing_state_keys[source] = ["appliance_model"]
@@ -272,10 +285,10 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         # known one; properties the app discards for it are not state.
         typed = properties if appliance_type(properties) is not None else self.data
         excluded = excluded_properties(typed) if typed.get("appliance_model") == model else set()
-        # A read replaces state, so it must cover what reads report. A snapshot
-        # merges into that state, so it must also cover what snapshots report. A
-        # key only ever pushed as a partial update is never required, since no
-        # read or snapshot can refresh it.
+        # A read replaces state, so it is held to what reads report. A snapshot
+        # merges into that state, so also to what snapshots report. A key only
+        # ever pushed as a partial update is never expected, since no read or
+        # snapshot can refresh it.
         required = set(self._required_state_keys["read"])
         if source == "snapshot":
             required |= self._required_state_keys["snapshot"]
@@ -285,9 +298,10 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             # An unusable type never reaches state.
             reported.discard("appliance_type")
         self._required_state_keys[source].update(reported)
-        if missing or not certify:
+        if not certify:
             return False
         self.confirmed_at = dt_util.utcnow()
+        self.confirmed_missing_keys = missing
         self._confirmation += 1
         self._confirmation_transport_generation = self._transport_generation
         return True
@@ -714,7 +728,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         """Wait for a completed read rather than a debounced request."""
         await self.async_read_status()
 
-    async def async_read_status(self) -> datetime:
+    async def async_read_status(self) -> StateRead:
         """Confirm state with a read that starts after this call."""
         result = await self._async_read_result()
         if error := result.error:
@@ -725,12 +739,13 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             raise HomeAssistantError(str(error)) from error
         if result.conflicted:
             raise HomeAssistantError("Appliance state changed during the status read; try again.")
-        if (
-            result.confirmed_at is None
-            or self._confirmation_transport_generation != self._transport_generation
-        ):
-            raise HomeAssistantError("The appliance did not return a complete state snapshot.")
-        return result.confirmed_at
+        if self._confirmation_transport_generation != self._transport_generation:
+            raise HomeAssistantError(
+                "The push connection changed during the status read; try again."
+            )
+        if result.confirmed_at is None:
+            raise HomeAssistantError("The appliance did not report a usable state.")
+        return result
 
     async def _async_read_result(self, *, report_error: bool = True) -> StateRead:
         self._read_requests += 1
@@ -761,7 +776,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self._pending_read_error_requests.clear()
         confirmation = self._confirmation
         try:
-            data, conflicted, complete = await self._async_fetch_state()
+            data, conflicted, missing = await self._async_fetch_state()
         except Exception as error:
             result = StateRead(request, None, error, self._published)
             deferred = isinstance(error, UpdateFailed) and error.retry_after is not None
@@ -781,14 +796,17 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self._process_events(data, history=True)
         confirmed = (
             self.confirmed_at
-            if complete
-            and not conflicted
+            if not conflicted
             and self._confirmation > confirmation
             and self._confirmation_transport_generation == self._transport_generation
             else None
         )
         result = self._completed_read = StateRead(
-            request, confirmed, published=self._published, conflicted=conflicted
+            request,
+            confirmed,
+            published=self._published,
+            conflicted=conflicted,
+            missing_keys=tuple(missing),
         )
         return result
 
@@ -819,10 +837,10 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         ):
             raise result.error
         if self._transport_error is not None and self._transport_grace_task is None:
-            raise UpdateFailed("The appliance did not return a complete state after reconnecting.")
+            raise UpdateFailed("The appliance state was not reconfirmed after reconnecting.")
         return self.data
 
-    async def _async_fetch_state(self) -> tuple[dict, bool]:
+    async def _async_fetch_state(self) -> tuple[dict, bool, list[str]]:
         async with self._state_lock:
             transport_generation = self._transport_generation
             self._read_updates = []
@@ -885,11 +903,10 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 if received and (not model or model == data.get("appliance_model")):
                     # A reply published after a conflict or a reconnect still shows
                     # what reads report, so it is recorded without certifying state.
-                    complete = self._confirm_state(data, "read", certify=current and not conflicted)
-                    # With push back, the reply and newer updates replace cached state,
-                    # so a key it lacks or a change during it cannot leave the
-                    # appliance waiting on reconnect forever.
-                    if current and (complete or self.client.push_connected):
+                    self._confirm_state(data, "read", certify=current and not conflicted)
+                    # The reply and newer updates replace cached state, so a current
+                    # reply ends the wait on reconnect whatever it lacks.
+                    if current:
                         self._async_confirm_transport_state()
                 self.unrecognized_keys.update(data.keys() - STATE_KEYS)
                 if "notifs" in data:
@@ -905,12 +922,13 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 if history is not None:
                     data["notifs"] = [*history, *updates.get("notifs", [])]
                 data = self._discard_excluded(data)
-                # A snapshot during the read may have certified state that the published
-                # result no longer carries, so the result must cover what reads report.
-                complete = self._required_state_keys["read"] <= (
-                    data.keys() | excluded_properties(data)
+                # What the published state lacks of the keys reads report, for the
+                # read_status response. A snapshot during the read may have confirmed
+                # state the result no longer carries.
+                missing = sorted(
+                    self._required_state_keys["read"] - data.keys() - excluded_properties(data)
                 )
-                return data, conflicted, complete
+                return data, conflicted, missing
             except InvalidAuth as error:
                 raise ConfigEntryAuthFailed(str(error)) from error
             except RateLimited as error:
@@ -958,7 +976,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         partial_keys = set()
         dropped = {}
         restarted = False
-        for update, complete_snapshot, replaced in self._read_updates or ():
+        for update, confirmed_snapshot, replaced in self._read_updates or ():
             if update.full:
                 if self._snapshot_is_older(update.properties, reference):
                     continue
@@ -975,7 +993,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                     dropped.update(properties)
                     properties.clear()
                     restarted = True
-            if complete_snapshot:
+            if confirmed_snapshot:
                 partial_keys.difference_update(update.properties)
             else:
                 partial_keys.update(update.properties)
@@ -1009,7 +1027,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                     raise result.error
                 if self._transport_error is not None and result.confirmed_at is None:
                     raise UpdateFailed(
-                        "The appliance did not return a complete state after reconnecting."
+                        "The appliance state was not reconfirmed after reconnecting."
                     )
             except ConfigEntryAuthFailed as error:
                 self.async_set_update_error(error)
@@ -1041,16 +1059,25 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         if zone := clock_zone(update.properties.get("time")):
             self.clock_zone = zone
         properties = {key: value for key, value in update.properties.items() if key in STATE_KEYS}
-        complete_snapshot = update.full and self._confirm_state(properties, "snapshot")
+        confirmed_snapshot = update.full and self._confirm_state(properties, "snapshot")
         # Like a read, the snapshot that ends a push interruption replaces cached
         # state, so values only pushed as partial updates do not outlive it.
         replace = update.full and (
             not self.last_update_success
             or properties.get("appliance_model") != self.data.get("appliance_model")
-            or (complete_snapshot and self._transport_error is not None)
+            or (confirmed_snapshot and self._transport_error is not None)
         )
-        if complete_snapshot:
+        if confirmed_snapshot:
             self._async_confirm_transport_state()
+        # The snapshot restores availability with what it carries; a read fills in
+        # the keys it lacked instead of holding the appliance back. A read already
+        # running publishes its own view of the state.
+        fill_gaps = (
+            confirmed_snapshot
+            and replace
+            and bool(self.missing_state_keys["snapshot"])
+            and self._read_updates is None
+        )
         if "appliance_type" in properties and appliance_type(properties) is None:
             # Like the app, an unusable type does not replace the known one.
             del properties["appliance_type"]
@@ -1061,11 +1088,11 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             self._channel_error = None
             if self._read_updates is not None:
                 self._read_updates.append(
-                    (StateUpdate(properties, full=update.full), complete_snapshot, replace)
+                    (StateUpdate(properties, full=update.full), confirmed_snapshot, replace)
                 )
-                if complete_snapshot:
+                if confirmed_snapshot:
                     self._read_snapshot = properties
-        if complete_snapshot:
+        if confirmed_snapshot and not self.missing_state_keys["snapshot"]:
             self.verification_stats["complete_snapshots"] += 1
         _LOGGER.debug(
             "%s %s: %s",
@@ -1086,6 +1113,11 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 self.async_set_updated_data(updated)
         if update.full or "notifs" in properties:
             self._process_events(properties, history=update.full)
+        if fill_gaps:
+            # Started after the snapshot is published, so the read replaces it.
+            self.entry.async_create_background_task(
+                self.hass, self._async_read_result(report_error=False), "Sub-Zero gap read"
+            )
         return True
 
 

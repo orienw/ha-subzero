@@ -562,7 +562,11 @@ async def test_setup_recovers_a_reconnected_appliance_while_another_initial_read
         freezer.tick(31)
         async_fire_time_changed(hass, dt_util.utcnow())
         await asyncio.wait_for(reconnected.wait(), 1)
-        client.state.assert_awaited_once_with("test-oven")
+        # The reconnect snapshot lacked the door, so a read filled it in at once.
+        assert [call.args[0] for call in client.state.await_args_list] == [
+            "test-oven",
+            "test-fridge",
+        ]
     finally:
         release.set()
         assert await setup
@@ -1056,7 +1060,7 @@ async def test_reconnect_confirms_state_when_periodic_checks_are_disabled(
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
 
 
-async def test_reconnects_and_incomplete_pushes_do_not_extend_the_grace(
+async def test_reconnects_and_partial_pushes_do_not_extend_the_grace(
     hass, freezer, loaded, monkeypatch
 ):
     entry, client, updates, _, _ = loaded
@@ -1071,9 +1075,6 @@ async def test_reconnects_and_incomplete_pushes_do_not_extend_the_grace(
     async_fire_time_changed(hass, dt_util.utcnow())
     await hass.async_block_till_done()
     await updates.put(StateUpdate({"ref_set_temp": 39}, full=False))
-    await updates.put(
-        StateUpdate({"appliance_model": "ANOTHER-MODEL", "ref_set_temp": 39}, full=True)
-    )
     await hass.async_block_till_done()
     assert coordinator.confirmed_at == confirmed
     recovery = entry.runtime_data._recoveries["test-fridge"]
@@ -1095,14 +1096,51 @@ async def test_reconnects_and_incomplete_pushes_do_not_extend_the_grace(
     freezer.tick(2)
     async_fire_time_changed(hass, dt_util.utcnow())
     await hass.async_block_till_done()
+    assert client.push_connected
+    await updates.put(StateUpdate(complete, full=True))
+    await hass.async_block_till_done()
+    assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "38"
+
+
+async def test_incomplete_snapshot_ends_a_reconnect_wait_and_a_read_fills_what_it_lacked(
+    hass, freezer, loaded, monkeypatch
+):
+    entry, client, updates, _, _ = loaded
+    monkeypatch.setattr("custom_components.subzero.coordinator.random.uniform", lambda *_: 0)
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    confirmed = coordinator.confirmed_at
+    reading, release = asyncio.Event(), asyncio.Event()
+
+    async def read(_device_id):
+        reading.set()
+        await release.wait()
+        return {**client.state.return_value, "ref_door_ajar": True}
+
+    client.state.side_effect = read
+    await updates.put(ApiError("Stream disconnected"))
+    await hass.async_block_till_done()
+    freezer.tick(31)
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+    assert client.push_connected
     await updates.put(
         StateUpdate({"appliance_model": "ANOTHER-MODEL", "ref_set_temp": 40}, full=True)
     )
     await hass.async_block_till_done()
-    assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "unavailable"
-    assert client.push_connected
-    await updates.put(StateUpdate(complete, full=True))
+    # The snapshot confirms state and ends the wait with what it carries.
+    assert coordinator.confirmed_at > confirmed
+    assert coordinator._transport_error is None
+    assert coordinator.last_update_success
+    assert "ref_door_ajar" in coordinator.missing_state_keys["snapshot"]
+    assert coordinator.confirmed_missing_keys == coordinator.missing_state_keys["snapshot"]
+    assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "40"
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "unavailable"
+    # A read fills in the keys the snapshot lacked.
+    await asyncio.wait_for(reading.wait(), 1)
+    release.set()
+    await coordinator._read_task
     await hass.async_block_till_done()
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
     assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "38"
 
 

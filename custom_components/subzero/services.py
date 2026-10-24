@@ -45,8 +45,11 @@ def async_setup_services(hass: HomeAssistant) -> None:
         coordinators = device_coordinators(hass, call.data["device_id"])
         if not coordinators:
             raise ServiceValidationError("Select an appliance from a loaded Sub-Zero integration.")
-        confirmed = await coordinators[0].async_read_status()
-        return {"confirmed_at": confirmed.isoformat()}
+        result = await coordinators[0].async_read_status()
+        return {
+            "confirmed_at": result.confirmed_at.isoformat(),
+            "missing_keys": list(result.missing_keys),
+        }
 
     hass.services.async_register(
         DOMAIN,

@@ -172,7 +172,7 @@ async def test_old_incomplete_snapshot_during_read_is_ignored(loaded, freezer, d
         return fresh
 
     client.state.side_effect = read
-    assert await coordinator.async_read_status() == dt_util.utcnow()
+    assert (await coordinator.async_read_status()).confirmed_at == dt_util.utcnow()
     assert coordinator.data["ref_door_ajar"] is True
     assert coordinator.data["time"] == fresh["time"]
     assert coordinator.data["uptime"] == fresh["uptime"]
@@ -328,9 +328,8 @@ async def test_debug_logs_distinguish_observed_and_published_state_without_priva
 
 
 @pytest.mark.parametrize("opened", [False, True])
-@pytest.mark.parametrize("full", [False, True], ids=["partial", "incomplete-snapshot"])
-async def test_conflicting_incomplete_push_is_immediate_but_read_cannot_confirm_it(
-    hass, freezer, loaded, opened, full
+async def test_conflicting_partial_push_is_immediate_but_read_cannot_confirm_it(
+    hass, freezer, loaded, opened
 ):
     entry, client, _, _, _ = loaded
     coordinator = entry.runtime_data.coordinators["test-fridge"]
@@ -341,10 +340,7 @@ async def test_conflicting_incomplete_push_is_immediate_but_read_cannot_confirm_
 
     async def read(_device_id):
         snapshot = dict(client.state.return_value)
-        properties = {"ref_door_ajar": opened}
-        if full:
-            properties["appliance_model"] = snapshot["appliance_model"]
-        coordinator.apply_update(StateUpdate(properties, full=full))
+        coordinator.apply_update(StateUpdate({"ref_door_ajar": opened}, full=False))
         reading.set()
         await release.wait()
         return snapshot
@@ -365,8 +361,40 @@ async def test_conflicting_incomplete_push_is_immediate_but_read_cannot_confirm_
 
     client.state.side_effect = None
     client.state.return_value["ref_door_ajar"] = opened
-    assert await coordinator.async_read_status() == dt_util.utcnow()
+    assert (await coordinator.async_read_status()).confirmed_at == dt_util.utcnow()
     assert coordinator.confirmed_at > confirmed
+
+
+@pytest.mark.parametrize("opened", [False, True])
+async def test_incomplete_snapshot_during_read_supersedes_the_reply(hass, freezer, loaded, opened):
+    entry, client, _, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    confirmed = coordinator.confirmed_at
+    client.state.return_value["ref_door_ajar"] = not opened
+    freezer.tick(1)
+
+    async def read(_device_id):
+        snapshot = dict(client.state.return_value)
+        # A snapshot is the appliance's own state publication, whatever keys it lacks.
+        coordinator.apply_update(
+            StateUpdate(
+                {"appliance_model": snapshot["appliance_model"], "ref_door_ajar": opened},
+                full=True,
+            )
+        )
+        return snapshot
+
+    client.state.side_effect = read
+    result = await coordinator.async_read_status()
+    assert result.confirmed_at == dt_util.utcnow()
+    assert not result.conflicted
+    assert result.missing_keys == ()
+    assert coordinator.confirmed_at > confirmed
+    assert "ref_set_temp" in coordinator.missing_state_keys["snapshot"]
+    assert coordinator.confirmed_missing_keys == []
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == (
+        "on" if opened else "off"
+    )
 
 
 @pytest.mark.parametrize("full", [False, True], ids=["partial", "incomplete-snapshot"])
@@ -384,24 +412,18 @@ async def test_matching_incomplete_push_during_read_can_confirm_state(loaded, fr
         return dict(client.state.return_value)
 
     client.state.side_effect = read
-    assert await coordinator.async_read_status() == dt_util.utcnow()
+    assert (await coordinator.async_read_status()).confirmed_at == dt_util.utcnow()
     assert coordinator.confirmed_at > confirmed
 
 
-@pytest.mark.parametrize("full", [False, True], ids=["partial", "incomplete-snapshot"])
-async def test_conflicting_incomplete_push_does_not_claim_background_verification(
-    loaded, freezer, full
-):
+async def test_conflicting_partial_push_does_not_claim_background_verification(loaded, freezer):
     entry, client, _, _, _ = loaded
     coordinator = entry.runtime_data.coordinators["test-fridge"]
     confirmed = coordinator.confirmed_at
     freezer.tick(1)
 
     async def read(_device_id):
-        properties = {"ref_door_ajar": True}
-        if full:
-            properties["appliance_model"] = client.state.return_value["appliance_model"]
-        coordinator.apply_update(StateUpdate(properties, full=full))
+        coordinator.apply_update(StateUpdate({"ref_door_ajar": True}, full=False))
         return dict(client.state.return_value)
 
     client.state.side_effect = read
@@ -435,7 +457,7 @@ async def test_complete_snapshot_supersedes_an_incomplete_push_during_read(loade
         return dict(client.state.return_value)
 
     client.state.side_effect = read
-    assert await coordinator.async_read_status() == dt_util.utcnow()
+    assert (await coordinator.async_read_status()).confirmed_at == dt_util.utcnow()
     assert coordinator.confirmed_at > confirmed
     assert not coordinator._completed_read.conflicted
     assert coordinator.data["ref_door_ajar"] is opened
@@ -489,14 +511,13 @@ async def test_partial_property_missing_from_status_reply_is_unconfirmed(loaded,
 
 
 @pytest.mark.parametrize("complete", [False, True])
-async def test_failed_read_only_confirms_a_complete_concurrent_snapshot(
+async def test_failed_read_is_rescued_by_a_concurrent_snapshot_whatever_it_lacks(
     hass, freezer, loaded, complete
 ):
     entry, client, updates, _, _ = loaded
     coordinator = entry.runtime_data.coordinators["test-fridge"]
     await updates.put(StateUpdate({"ref_door_ajar": True}, full=False))
     await hass.async_block_till_done()
-    confirmed = coordinator.confirmed_at
     freezer.tick(1)
 
     async def failed_read(_device_id):
@@ -510,74 +531,90 @@ async def test_failed_read_only_confirms_a_complete_concurrent_snapshot(
 
     client.state.side_effect = failed_read
     await coordinator.async_verify_state()
+    assert coordinator.confirmed_at == dt_util.utcnow()
+    assert coordinator.verification_stats["last_success"] is not None
     if complete:
-        assert coordinator.confirmed_at == dt_util.utcnow()
-        assert coordinator.verification_stats["last_success"] is not None
+        assert coordinator.missing_state_keys["snapshot"] == []
         assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
     else:
-        assert coordinator.confirmed_at == confirmed
-        assert coordinator.verification_stats["last_success"] is None
+        # The snapshot merged into available state, so the door keeps its pushed value
+        # and the gap is on record.
         assert "ref_door_ajar" in coordinator.missing_state_keys["snapshot"]
+        assert coordinator.confirmed_missing_keys == coordinator.missing_state_keys["snapshot"]
+        assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
     client.open_channel.assert_not_awaited()
 
 
-async def test_incomplete_status_reply_does_not_confirm_old_values(loaded, freezer):
+async def test_incomplete_status_reply_confirms_and_drops_the_keys_it_lacks(hass, loaded, freezer):
     entry, client, _, _, _ = loaded
     coordinator = entry.runtime_data.coordinators["test-fridge"]
     confirmed = coordinator.confirmed_at
     client.state.return_value = {"appliance_model": "ANOTHER-MODEL", "ref_set_temp": 39}
     freezer.tick(1)
     await coordinator.async_refresh()
-    assert coordinator.confirmed_at == confirmed
+    await hass.async_block_till_done()
+    assert coordinator.confirmed_at > confirmed
     assert "ref_door_ajar" in coordinator.missing_state_keys["read"]
+    assert coordinator.confirmed_missing_keys == coordinator.missing_state_keys["read"]
+    # A read replaces state, so the door is unknown rather than stale.
+    assert "ref_door_ajar" not in coordinator.data
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "unavailable"
+    assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "39"
 
 
 @pytest.mark.parametrize("source", ["read", "snapshot"])
-async def test_repeated_incomplete_observations_keep_known_state_requirements(
+async def test_repeated_incomplete_observations_confirm_and_keep_known_state_requirements(
     hass, loaded, freezer, source
 ):
     entry, client, _, _, _ = loaded
     coordinator = entry.runtime_data.coordinators["test-fridge"]
     complete = dict(client.state.return_value)
-    confirmed = coordinator.confirmed_at
     del client.state.return_value["ref_door_ajar"]
 
     for _ in range(2):
         freezer.tick(1)
         if source == "read":
-            with pytest.raises(HomeAssistantError, match="complete state"):
-                await coordinator.async_read_status()
+            result = await coordinator.async_read_status()
+            assert result.missing_keys == ("ref_door_ajar",)
         else:
             coordinator.apply_update(StateUpdate(dict(client.state.return_value), full=True))
         await hass.async_block_till_done()
-        assert coordinator.confirmed_at == confirmed
+        assert coordinator.confirmed_at == dt_util.utcnow()
         assert coordinator.missing_state_keys[source] == ["ref_door_ajar"]
+        assert coordinator.confirmed_missing_keys == ["ref_door_ajar"]
 
     client.state.return_value = complete
-    assert await coordinator.async_read_status() == dt_util.utcnow()
     freezer.tick(1)
+    assert (await coordinator.async_read_status()).confirmed_at == dt_util.utcnow()
+    assert coordinator.confirmed_missing_keys == []
+    freezer.tick(1)
+    # Another model starts its own requirements.
     client.state.return_value = {"appliance_model": "REPLACEMENT", "ref_set_temp": 40}
-    assert await coordinator.async_read_status() == dt_util.utcnow()
+    result = await coordinator.async_read_status()
+    assert result.confirmed_at == dt_util.utcnow()
+    assert result.missing_keys == ()
     assert not coordinator.missing_state_keys["read"]
 
 
-async def test_invalid_model_does_not_erase_known_state_requirements(loaded, freezer):
+async def test_unusable_model_does_not_confirm_or_erase_known_state_requirements(loaded, freezer):
     entry, client, _, _, _ = loaded
     coordinator = entry.runtime_data.coordinators["test-fridge"]
     confirmed = coordinator.confirmed_at
-    for reply in (
-        {"appliance_model": ""},
-        {"appliance_model": "ANOTHER-MODEL", "ref_set_temp": 39},
-    ):
-        client.state.return_value = reply
-        freezer.tick(1)
-        with pytest.raises(HomeAssistantError, match="complete state"):
-            await coordinator.async_read_status()
-        assert coordinator.confirmed_at == confirmed
+    client.state.return_value = {"appliance_model": ""}
+    freezer.tick(1)
+    with pytest.raises(HomeAssistantError, match="usable state"):
+        await coordinator.async_read_status()
+    assert coordinator.confirmed_at == confirmed
+    assert coordinator.missing_state_keys["read"] == ["appliance_model"]
+    freezer.tick(1)
+    client.state.return_value = {"appliance_model": "ANOTHER-MODEL", "ref_set_temp": 39}
+    result = await coordinator.async_read_status()
+    assert result.confirmed_at == dt_util.utcnow()
+    assert "ref_door_ajar" in result.missing_keys
 
 
 @pytest.mark.parametrize("complete", [False, True])
-async def test_status_confirmation_requires_door_state_but_not_notification_history(
+async def test_status_confirmation_notes_a_missing_door_but_not_notification_history(
     hass, loaded, freezer, complete
 ):
     entry, client, _, _, _ = loaded
@@ -585,20 +622,22 @@ async def test_status_confirmation_requires_door_state_but_not_notification_hist
     coordinator.apply_update(
         StateUpdate({**client.state.return_value, "ref_door_ajar": True, "notifs": []}, full=True)
     )
-    confirmed = coordinator.confirmed_at
     assert "notifs" in coordinator.data
     assert "notifs" not in client.state.return_value
     freezer.tick(1)
 
     if complete:
-        assert await coordinator.async_read_status() == dt_util.utcnow()
+        result = await coordinator.async_read_status()
+        assert result.confirmed_at == dt_util.utcnow()
+        assert result.missing_keys == ()
         assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
     else:
         del client.state.return_value["ref_door_ajar"]
-        with pytest.raises(HomeAssistantError, match="complete state"):
-            await coordinator.async_read_status()
-        assert coordinator.confirmed_at == confirmed
-        assert "ref_door_ajar" in coordinator.missing_state_keys["read"]
+        result = await coordinator.async_read_status()
+        assert result.confirmed_at == dt_util.utcnow()
+        assert result.missing_keys == ("ref_door_ajar",)
+        assert coordinator.missing_state_keys["read"] == ["ref_door_ajar"]
+        assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "unavailable"
 
 
 async def test_conflicted_read_still_records_the_keys_reads_report(loaded, freezer):
@@ -622,14 +661,16 @@ async def test_conflicted_read_still_records_the_keys_reads_report(loaded, freez
         coordinator.apply_update(StateUpdate(snapshot, full=True))
         raise ApiError("Status request failed")
 
-    # A snapshot without a key the conflicted reply reported cannot rescue a failed read.
+    # A snapshot without a key the conflicted reply reported still rescues the failed
+    # read. The gap is recorded, and the merged state keeps the reply's value.
     client.state.side_effect = failed_read
-    with pytest.raises(HomeAssistantError, match="complete state"):
-        await coordinator.async_read_status()
+    result = await coordinator.async_read_status()
+    assert result.confirmed_at == dt_util.utcnow()
     assert coordinator.missing_state_keys["snapshot"] == ["max_ice_on"]
+    assert coordinator.data["max_ice_on"] is False
 
 
-async def test_uncertified_read_for_another_model_keeps_known_requirements(loaded, freezer):
+async def test_uncertified_read_for_another_model_keeps_known_requirements(hass, loaded, freezer):
     entry, client, _, _, _ = loaded
     coordinator = entry.runtime_data.coordinators["test-fridge"]
     confirmed = coordinator.confirmed_at
@@ -645,7 +686,8 @@ async def test_uncertified_read_for_another_model_keeps_known_requirements(loade
     assert coordinator.data["appliance_model"] == "REPLACEMENT"
     freezer.tick(1)
     coordinator.apply_update(StateUpdate({"appliance_model": "ANOTHER-MODEL"}, full=True))
-    assert coordinator.confirmed_at == confirmed
+    await hass.async_block_till_done()
+    assert coordinator.confirmed_at > confirmed
     assert "ref_door_ajar" in coordinator.missing_state_keys["snapshot"]
 
 
@@ -785,7 +827,7 @@ async def test_replay_restart_keeps_the_reply_clock_for_ordering_later_snapshots
         return dict(fresh)
 
     client.state.side_effect = read
-    assert await coordinator.async_read_status() == dt_util.utcnow()
+    assert (await coordinator.async_read_status()).confirmed_at == dt_util.utcnow()
     assert coordinator.data["ref_door_ajar"] is True
 
 
@@ -816,7 +858,7 @@ async def test_reply_superseded_by_a_reconnect_snapshot_is_rescued_by_it(
     await updates.put(StateUpdate(dict(client.state.return_value), full=True))
     await hass.async_block_till_done()
     release.set()
-    assert await request == coordinator.confirmed_at
+    assert (await request).confirmed_at == coordinator.confirmed_at
     assert "frz_door_ajar" not in coordinator.data
     assert hass.states.get("binary_sensor.kitchen_freezer_door").state == "unavailable"
     # A superseded reply is not an observation later snapshots are held to.
@@ -847,14 +889,12 @@ async def test_replaced_snapshot_values_matching_the_reply_do_not_conflict(
         return reply
 
     client.state.side_effect = read
-    assert await coordinator.async_read_status() == dt_util.utcnow()
+    assert (await coordinator.async_read_status()).confirmed_at == dt_util.utcnow()
     assert coordinator.data["appliance_type"] == "1.2.6.1"
     assert coordinator.data["ref_door_ajar"] is False
 
 
-async def test_read_is_not_certified_when_its_published_state_lacks_a_read_key(
-    hass, loaded, freezer
-):
+async def test_read_reports_the_read_keys_its_published_state_lacks(hass, loaded, freezer):
     entry, client, updates, _, _ = loaded
     coordinator = entry.runtime_data.coordinators["test-fridge"]
     fixture = dict(client.state.return_value)
@@ -871,10 +911,10 @@ async def test_read_is_not_certified_when_its_published_state_lacks_a_read_key(
     async def read(_device_id):
         await updates.put(ApiError("Stream disconnected"))
         await hass.async_block_till_done()
-        # A complete snapshot certifies state after the reconnect, then an incomplete
+        # A complete snapshot confirms state after the reconnect, then an incomplete
         # one replaces the unavailable state. The reply is newer than the complete
         # snapshot, which the replay skips, and predates the reconnect, so it is
-        # superseded; what is published lacks the door.
+        # superseded; what is published lacks the door, and the result says so.
         coordinator.apply_update(StateUpdate(clocked(11), full=True))
         coordinator.async_set_update_error(ApiError("Channel error"))
         coordinator.apply_update(
@@ -883,12 +923,14 @@ async def test_read_is_not_certified_when_its_published_state_lacks_a_read_key(
         return clocked(12)
 
     client.state.side_effect = read
-    with pytest.raises(HomeAssistantError, match="complete state"):
-        await coordinator.async_read_status()
+    result = await coordinator.async_read_status()
+    assert result.confirmed_at == coordinator.confirmed_at
+    assert "ref_door_ajar" in result.missing_keys
     assert "ref_door_ajar" not in coordinator.data
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "unavailable"
 
 
-async def test_each_source_requires_only_the_keys_it_has_reported(hass, loaded, freezer):
+async def test_each_source_is_held_to_only_the_keys_it_has_reported(hass, loaded, freezer):
     entry, client, _, _, _ = loaded
     coordinator = entry.runtime_data.coordinators["test-fridge"]
     # Snapshots carry a key the status reply never does; another only arrives in partials.
@@ -898,13 +940,16 @@ async def test_each_source_requires_only_the_keys_it_has_reported(hass, loaded, 
     coordinator.apply_update(StateUpdate({"ice_maker_on": True}, full=False))
     await hass.async_block_till_done()
     freezer.tick(1)
-    assert await coordinator.async_read_status() == dt_util.utcnow()
+    result = await coordinator.async_read_status()
+    assert result.confirmed_at == dt_util.utcnow()
+    assert result.missing_keys == ()
     assert coordinator.missing_state_keys["read"] == []
     confirmed = coordinator.confirmed_at
     freezer.tick(1)
     coordinator.apply_update(StateUpdate(dict(client.state.return_value), full=True))
     assert coordinator.missing_state_keys["snapshot"] == ["frz_door_ajar"]
-    assert coordinator.confirmed_at == confirmed
+    assert coordinator.confirmed_at > confirmed
+    assert coordinator.confirmed_missing_keys == ["frz_door_ajar"]
 
 
 async def test_update_entity_waits_for_each_read_inside_the_old_cooldown(hass, loaded):
@@ -1058,7 +1103,21 @@ async def test_read_status_action_confirms_and_returns_after_state_is_published(
         response["confirmed_at"]
         == entry.runtime_data.coordinators["test-fridge"].confirmed_at.isoformat()
     )
+    assert response["missing_keys"] == []
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
+
+
+async def test_read_status_action_lists_the_read_keys_the_published_state_lacks(hass, loaded):
+    entry, client, _, _, _ = loaded
+    device = dr.async_get(hass).async_get_device_by_identifier(
+        ("subzero", "test-fridge"), entry.entry_id
+    )
+    del client.state.return_value["ref_door_ajar"]
+    response = await hass.services.async_call(
+        "subzero", "read_status", {"device_id": device.id}, blocking=True, return_response=True
+    )
+    assert response["missing_keys"] == ["ref_door_ajar"]
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "unavailable"
 
 
 async def test_read_status_action_rejects_an_unloaded_device(hass):
@@ -1071,7 +1130,7 @@ async def test_read_status_action_rejects_an_unloaded_device(hass):
         )
 
 
-@pytest.mark.parametrize("failure", ["error", "incomplete"])
+@pytest.mark.parametrize("failure", ["error", "unusable"])
 async def test_explicit_confirmation_fails_instead_of_trusting_cached_state(loaded, failure):
     entry, client, _, _, _ = loaded
     coordinator = entry.runtime_data.coordinators["test-fridge"]
@@ -1079,8 +1138,10 @@ async def test_explicit_confirmation_fails_instead_of_trusting_cached_state(load
     if failure == "error":
         client.state.side_effect = ApiError("Could not read status")
     else:
-        client.state.return_value = {"appliance_model": "ANOTHER-MODEL"}
-    with pytest.raises(HomeAssistantError):
+        client.state.return_value = {"appliance_model": ""}
+    with pytest.raises(
+        HomeAssistantError, match="Could not read status" if failure == "error" else "usable state"
+    ):
         await coordinator.async_read_status()
     assert coordinator.confirmed_at == confirmed
 
@@ -1094,6 +1155,21 @@ async def test_confirmation_sensor_keeps_the_last_observation_when_offline(
     assert timestamp == coordinator.confirmed_at.replace(microsecond=0).isoformat()
     coordinator.async_set_update_error(ApiError("Offline"))
     assert hass.states.get(enabled_confirmation_sensor).state == timestamp
+
+
+async def test_confirmation_sensor_lists_the_keys_the_confirming_observation_lacked(
+    hass, freezer, loaded, enabled_confirmation_sensor
+):
+    entry, client, _, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    assert hass.states.get(enabled_confirmation_sensor).attributes["missing_keys"] == []
+    del client.state.return_value["ref_door_ajar"]
+    freezer.tick(1)
+    await coordinator.async_read_status()
+    await hass.async_block_till_done()
+    state = hass.states.get(enabled_confirmation_sensor)
+    assert state.state == dt_util.utcnow().replace(microsecond=0).isoformat()
+    assert state.attributes["missing_keys"] == ["ref_door_ajar"]
 
 
 async def test_scheduled_reads_continue_when_push_is_disconnected(hass, loaded, freezer):
@@ -1154,16 +1230,19 @@ async def test_a_read_started_before_disconnect_does_not_confirm_the_new_gap(has
     await hass.async_block_till_done()
     freezer.tick(1)
     release.set()
-    with pytest.raises(HomeAssistantError, match="complete state"):
+    with pytest.raises(HomeAssistantError, match="push connection changed"):
         await request
     assert coordinator.confirmed_at == confirmed
     assert coordinator.last_update_success
 
 
-async def test_incomplete_observations_cannot_revive_expired_transport_state(hass, freezer, loaded):
+async def test_incomplete_observations_revive_expired_transport_state(hass, freezer, loaded):
     entry, client, updates, _, _ = loaded
     coordinator = entry.runtime_data.coordinators["test-fridge"]
     complete = dict(client.state.return_value)
+    client.state.return_value = {
+        key: value for key, value in complete.items() if key != "ref_door_ajar"
+    }
     client.push_connected = False
     await updates.put(RateLimited(300))
     await hass.async_block_till_done()
@@ -1172,20 +1251,27 @@ async def test_incomplete_observations_cannot_revive_expired_transport_state(has
     await hass.async_block_till_done()
     assert not coordinator.last_update_success
 
+    # The snapshot restores what it carries. The door it lacks is unknown, not stale,
+    # and the read that fills in gaps lacks it too.
     coordinator.apply_update(
         StateUpdate({"appliance_model": complete["appliance_model"], "ref_set_temp": 39}, full=True)
     )
-    assert not coordinator.last_update_success
+    await hass.async_block_till_done()
+    assert coordinator.last_update_success
+    assert "ref_door_ajar" in coordinator.missing_state_keys["snapshot"]
+    assert coordinator.missing_state_keys["read"] == ["ref_door_ajar"]
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "unavailable"
-    client.state.return_value = {
-        key: value for key, value in complete.items() if key != "ref_door_ajar"
-    }
-    with pytest.raises(HomeAssistantError, match="complete state"):
-        await coordinator.async_read_status()
-    assert not coordinator.last_update_success
+    assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "38"
+    freezer.tick(1)
+    result = await coordinator.async_read_status()
+    assert result.confirmed_at == dt_util.utcnow()
+    assert result.missing_keys == ("ref_door_ajar",)
+    assert coordinator.last_update_success
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "unavailable"
 
+    freezer.tick(1)
     client.state.return_value = complete
-    assert await coordinator.async_read_status() == dt_util.utcnow()
+    assert (await coordinator.async_read_status()).confirmed_at == dt_util.utcnow()
     assert coordinator.last_update_success
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
 
@@ -1223,7 +1309,7 @@ async def test_clock_and_signal_readings_in_an_incomplete_snapshot_do_not_confli
         return dict(reply)
 
     client.state.side_effect = read
-    assert await coordinator.async_read_status() > confirmed
+    assert (await coordinator.async_read_status()).confirmed_at > confirmed
 
 
 async def test_conflicted_read_after_push_returns_ends_the_reconnect_wait(freezer, loaded):
@@ -1638,8 +1724,10 @@ async def test_an_older_refresh_cannot_overwrite_a_newer_read_or_snapshot(hass, 
     if subsequent:
         await subsequent[0]
     assert coordinator.last_update_success is (newer != "failed_read")
+    if newer in {"snapshot", "incomplete_snapshot"}:
+        assert coordinator.confirmed_at > confirmed
     if newer == "incomplete_snapshot":
-        assert coordinator.confirmed_at == confirmed
+        assert coordinator.confirmed_missing_keys == ["ref_door_ajar"]
     if newer == "rate_limited":
         client.state.side_effect = RateLimited(60)
         with pytest.raises(UpdateFailed):

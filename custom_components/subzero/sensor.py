@@ -348,6 +348,13 @@ class SubZeroSensor(SubZeroEntity, SensorEntity):
         )
 
     @property
+    def extra_state_attributes(self) -> dict[str, list[str]] | None:
+        if self.entity_description.key != "state_confirmed_at":
+            return None
+        # The state keys the confirming observation lacked of those its source reports.
+        return {"missing_keys": list(self.coordinator.confirmed_missing_keys)}
+
+    @property
     def native_value(self) -> int | float | str | datetime | None:
         key = self.entity_description.key
         if key == "state_confirmed_at":

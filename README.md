@@ -67,7 +67,7 @@ Appliance alerts can trigger follow-up status reads while the reported condition
 
 <img src="docs/images/configure.png" alt="Sub-Zero configuration with appliance selection, Firebase alerts, and a ten-minute state-check interval" width="500">
 
-Cloud outages or missed messages can leave sensors stale. During a brief push interruption, existing readings remain available for up to two minutes while reconnection runs. Readings become unavailable if state is not reconfirmed within that time. While push stays down, each status check that confirms the state keeps readings available for another two minutes, so check intervals longer than two minutes make readings alternate between available and unavailable until push returns. Status reads can recover the current state, but cannot recreate every brief door movement. Enable the optional **State confirmed** diagnostic sensor to see when a full snapshot or status read last confirmed the appliance state.
+Cloud outages or missed messages can leave sensors stale. During a brief push interruption, existing readings remain available for up to two minutes while reconnection runs. Readings become unavailable if state is not reconfirmed within that time. While push stays down, each status check that confirms the state keeps readings available for another two minutes, so check intervals longer than two minutes make readings alternate between available and unavailable until push returns. Status reads can recover the current state, but cannot recreate every brief door movement. Enable the optional **State confirmed** diagnostic sensor to see when a full snapshot or status read last confirmed the appliance state, and which state keys that observation lacked.
 
 ### Check state before sending a reminder
 
