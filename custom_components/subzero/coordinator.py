@@ -487,7 +487,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 self._unsettled = False
             if self._transport_error is not None or not self.client.push_connected:
                 try:
-                    await self.async_read_status()
+                    await self._async_read_for_control()
                 except HomeAssistantError as error:
                     raise ServiceValidationError(str(error)) from error
             self._command_generation = self._transport_generation
@@ -497,9 +497,21 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 self._unsettled = True
                 raise
 
+    async def _async_read_for_control(self) -> None:
+        """Refresh state before a write, and refuse one based on a reduced observation.
+
+        A write's interlock checks skip keys the state does not carry, so a reply
+        that lacks a key status reads have reported cannot vouch for them.
+        """
+        result = await self.async_read_status()
+        if result.missing_keys:
+            raise HomeAssistantError(
+                "The status read did not report every known appliance setting; try again."
+            )
+
     async def _async_confirm_command_generation(self) -> None:
         if self._command_generation != self._transport_generation:
-            await self.async_read_status()
+            await self._async_read_for_control()
             self._command_generation = self._transport_generation
 
     async def async_set_properties(self, properties: dict, *, force: bool = False) -> None:
@@ -776,7 +788,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self._pending_read_error_requests.clear()
         confirmation = self._confirmation
         try:
-            data, conflicted, missing = await self._async_fetch_state()
+            data, conflicted, missing, superseded = await self._async_fetch_state()
         except Exception as error:
             result = StateRead(request, None, error, self._published)
             deferred = isinstance(error, UpdateFailed) and error.retry_after is not None
@@ -808,6 +820,12 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             conflicted=conflicted,
             missing_keys=tuple(missing),
         )
+        if superseded and missing:
+            # The snapshot that replaced state superseded the reply, and lacks keys
+            # the reply would have supplied, so a fresh read fills them in.
+            self.entry.async_create_background_task(
+                self.hass, self._async_read_result(report_error=False), "Sub-Zero gap read"
+            )
         return result
 
     @callback
@@ -840,7 +858,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             raise UpdateFailed("The appliance state was not reconfirmed after reconnecting.")
         return self.data
 
-    async def _async_fetch_state(self) -> tuple[dict, bool, list[str]]:
+    async def _async_fetch_state(self) -> tuple[dict, bool, list[str], bool]:
         async with self._state_lock:
             transport_generation = self._transport_generation
             self._read_updates = []
@@ -848,6 +866,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             self._read_error = None
             try:
                 received = True
+                superseded = False
                 started = time.monotonic()
                 _LOGGER.debug("Reading status for %s", self.device["name"])
                 try:
@@ -861,7 +880,10 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                     )
                     updates, _, _, _ = self._pending_read_properties(self.data)
                     model = updates.get("appliance_model")
-                    if not isinstance(model, str) or not model:
+                    # Only a complete snapshot rescues a failed request: the rescue
+                    # merges into cached state, so a snapshot lacking a key would
+                    # confirm whatever that key last held.
+                    if not isinstance(model, str) or not model or self._read_snapshot is None:
                         raise
                     data = self.data
                     received = False
@@ -880,7 +902,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                     # The reply predates a snapshot that replaced state after a reconnect.
                     # Like the updates before that snapshot it does not survive, and the
                     # snapshot rescues the read as if the request had failed.
-                    data, received = self.data, False
+                    data, received, superseded = self.data, False, True
                 # Arrival during a GET does not establish when a partial change
                 # happened. Publish it immediately, but do not certify the merged
                 # state when it contradicts the status reply or a complete pushed
@@ -928,7 +950,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 missing = sorted(
                     self._required_state_keys["read"] - data.keys() - excluded_properties(data)
                 )
-                return data, conflicted, missing
+                return data, conflicted, missing, superseded
             except InvalidAuth as error:
                 raise ConfigEntryAuthFailed(str(error)) from error
             except RateLimited as error:
@@ -1090,7 +1112,8 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 self._read_updates.append(
                     (StateUpdate(properties, full=update.full), confirmed_snapshot, replace)
                 )
-                if confirmed_snapshot:
+                if confirmed_snapshot and not self.missing_state_keys["snapshot"]:
+                    # The reference a failed request is rescued and checked against.
                     self._read_snapshot = properties
         if confirmed_snapshot and not self.missing_state_keys["snapshot"]:
             self.verification_stats["complete_snapshots"] += 1
