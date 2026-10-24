@@ -34,6 +34,7 @@ API_BASE = "https://prod.iot.subzero.com"
 SIGNALR_ORIGIN = "https://sznacasigprod.service.signalr.net"
 SEPARATOR = "\x1e"
 PING_INTERVAL = 15
+CHANNEL_REOPEN_INTERVAL = 30 * 60
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -862,9 +863,36 @@ class SubZeroClient:
                             await asyncio.sleep(backoff + random.uniform(0, 5))
                             backoff = min(backoff * 2, MAX_RECONNECT_DELAY)
 
+                async def reopen_channels() -> None:
+                    delay = CHANNEL_REOPEN_INTERVAL
+                    while True:
+                        await asyncio.sleep(delay)
+                        delay = CHANNEL_REOPEN_INTERVAL
+                        for index, device_id in enumerate(device_ids, 1):
+                            if device_id in pending_channels:
+                                continue
+                            _LOGGER.debug("Reopening update channel for appliance %d", index)
+                            try:
+                                await self.open_channel(device_id)
+                            except RateLimited as error:
+                                delay = max(delay, error.retry_after)
+                                _LOGGER.debug("Update channel reopen deferred: %s", error)
+                                break
+                            except ApiError as error:
+                                _LOGGER.debug(
+                                    "Could not reopen update channel for appliance %d: %s",
+                                    index,
+                                    error,
+                                )
+                            else:
+                                _LOGGER.debug(
+                                    "Update channel reopen accepted for appliance %d", index
+                                )
+
                 opening = asyncio.create_task(open_channels())
+                reopening = asyncio.create_task(reopen_channels())
                 receiving = asyncio.create_task(websocket.receive())
-                tasks = {opening, receiving}
+                tasks = {opening, reopening, receiving}
                 try:
                     next_ping = time.monotonic() + PING_INTERVAL
                     last_received = time.monotonic()
@@ -931,6 +959,8 @@ class SubZeroClient:
                         if opening.done():
                             opening.result()
                             tasks.discard(opening)
+                        if reopening.done():
+                            reopening.result()
                         if not receiving.done():
                             continue
                         message = receiving.result()
@@ -949,8 +979,9 @@ class SubZeroClient:
                             raise ApiError("Sub-Zero sent an oversized notification.")
                 finally:
                     opening.cancel()
+                    reopening.cancel()
                     receiving.cancel()
-                    await asyncio.gather(opening, receiving, return_exceptions=True)
+                    await asyncio.gather(opening, reopening, receiving, return_exceptions=True)
         except (aiohttp.ClientError, TimeoutError) as error:
             _LOGGER.debug(
                 "Notification transport failed: exception=%s status=%s",

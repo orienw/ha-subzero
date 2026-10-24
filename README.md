@@ -61,6 +61,8 @@ Appliance settings change only when you use a control or automation. See the [re
 
 Normal updates arrive through push. **No periodic checks** is the default. Appliance alerts can trigger a few follow-up reads while the reported condition remains active, and reconnection can trigger a recovery read.
 
+While connected, the integration reissues `open_cloud_async` every 30 minutes for opened appliance channels. This runs independently of periodic state checks and keeps the existing notification connection open. The interval is being tested for recovery from silently stalled updates.
+
 In **Configure**, choose a one-, two-, five-, or ten-minute check interval to help recover silently missed updates. Other push activity does not postpone these checks. Alert follow-up reads run independently of this interval. Home Assistant's option to disable polling turns off both scheduled checks and alert follow-ups.
 
 <img src="docs/images/configure.png" alt="Sub-Zero configuration with appliance selection, Firebase alerts, and a ten-minute state-check interval" width="500">

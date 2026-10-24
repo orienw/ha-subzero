@@ -168,6 +168,8 @@ Debug logging for `custom_components.subzero` records channel-open attempts, not
 
 Selected appliances share tokens and one notification connection. Setup waits up to 16 seconds for initial push state, then requests missing state. Lost connections reconnect with increasing delays, and rate-limit responses are honored.
 
+While the notification connection is open, accepted appliance channels receive another `open_cloud_async` command every 30 minutes. Incoming messages do not postpone this schedule. This does not request status or restart the shared connection, and runs even when periodic state checks or Home Assistant polling are disabled. A new connection starts the channel schedule again. Reopen failures are logged without marking an otherwise working channel unavailable; rate limits defer further reopens. The 30-minute interval is an experimental recovery policy, not a measured appliance-channel expiration time.
+
 Periodic state checks are disabled by default. When enabled, checks run at the selected interval per appliance, staggered across selected appliances. Incoming updates do not postpone them. Checks read status without reopening channels or restarting the shared connection. Known offline appliance channels wait for their existing channel retry before automatic checks resume.
 
 Configure offers one-, two-, five-, and ten-minute intervals. **No periodic checks** keeps alert follow-up and reconnect recovery reads; silently missed updates can leave stale values until those values are reported again. Existing saved intervals are preserved. Home Assistant's system option to disable polling turns off scheduled checks and alert follow-up reads.

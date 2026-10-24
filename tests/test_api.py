@@ -945,7 +945,7 @@ def test_notification_expiry_is_independent_of_account_token(monkeypatch):
 
 @pytest.mark.parametrize("user_id", ["test-owner", "TEST-OWNER"])
 async def test_live_signalr_socket_is_renewed_before_token_expiry(
-    hass, aiohttp_server, monkeypatch, socket_enabled, user_id
+    hass, aiohttp_server, monkeypatch, socket_enabled, user_id, channel_reopen_waits
 ):
     sockets = []
     commands = []
@@ -1007,9 +1007,33 @@ async def test_live_signalr_socket_is_renewed_before_token_expiry(
         assert len(sockets) == 2 and sockets[0].closed
         assert commands == ["open_cloud_async", "open_cloud_async"]
         assert pings
+        first_delay, first_reopen = await channel_reopen_waits.get()
+        second_delay, second_reopen = await channel_reopen_waits.get()
+        assert first_delay == second_delay == 1800
+        assert first_reopen.cancelled()
+        assert not second_reopen.done()
     finally:
         await stream.aclose()
     assert not client.push_connected
+    assert second_reopen.cancelled()
+
+
+@pytest.fixture
+def channel_reopen_waits(monkeypatch):
+    waits = asyncio.Queue()
+    original_sleep = asyncio.sleep
+
+    async def sleep(delay):
+        if delay < api.CHANNEL_REOPEN_INTERVAL:
+            await original_sleep(delay)
+            return
+        resume = asyncio.get_running_loop().create_future()
+        waits.put_nowait((delay, resume))
+        await resume
+
+    monkeypatch.setattr(api.asyncio, "sleep", sleep)
+    monkeypatch.setattr(api, "PING_INTERVAL", 0.01)
+    return waits
 
 
 @pytest.fixture
@@ -1056,6 +1080,148 @@ async def notification_stream(hass, aiohttp_server, monkeypatch, socket_enabled,
     finally:
         await stream.aclose()
         await watch.aclose()
+
+
+async def test_appliance_channels_reopen_without_reconnecting(
+    notification_stream, channel_reopen_waits
+):
+    client, _, _, sockets = notification_stream
+    stream = client.watch(["test-fridge", "test-oven"])
+    try:
+        async with asyncio.timeout(5):
+            assert await anext(stream) == ("test-fridge", api.ChannelOpened())
+            assert await anext(stream) == ("test-oven", api.ChannelOpened())
+            delay, resume = await channel_reopen_waits.get()
+            assert delay == 1800
+
+            # Appliance traffic and heartbeats do not postpone the scheduled reopen.
+            await sockets[0].send_str(
+                '{"type":6}'
+                + api.SEPARATOR
+                + json.dumps(notification({"ref_door_ajar": True}))
+                + api.SEPARATOR
+            )
+            assert await anext(stream) == (
+                "test-fridge",
+                api.StateUpdate({"ref_door_ajar": True}, full=False),
+            )
+            assert client.open_channel.await_count == 2
+            assert not resume.done()
+
+            async def reopen(device_id):
+                await sockets[0].send_str(
+                    json.dumps(notification({"unit_on": True}, device=device_id)) + api.SEPARATOR
+                )
+
+            client.open_channel.side_effect = reopen
+            for cycle in range(2):
+                resume.set_result(None)
+                for device_id in ("test-fridge", "test-oven"):
+                    assert await anext(stream) == (
+                        device_id,
+                        api.StateUpdate({"unit_on": True}, full=False),
+                    )
+                assert client.open_channel.await_count == 4 + cycle * 2
+                delay, resume = await channel_reopen_waits.get()
+                assert delay == 1800
+            assert len(sockets) == 1
+            assert client.push_connected
+            client._request.assert_awaited_once()
+            client._json.assert_awaited_once()
+    finally:
+        await stream.aclose()
+    assert resume.cancelled()
+
+
+async def test_channel_reopen_skips_pending_initial_channels(
+    notification_stream, channel_reopen_waits
+):
+    client, _, _, sockets = notification_stream
+
+    async def open_channel(device_id):
+        if device_id == "test-oven":
+            raise api.ApiError("Offline")
+
+    client.open_channel.side_effect = open_channel
+    stream = client.watch(["test-fridge", "test-oven"])
+    try:
+        async with asyncio.timeout(5):
+            assert await anext(stream) == ("test-fridge", api.ChannelOpened())
+            device_id, error = await anext(stream)
+            assert device_id == "test-oven"
+            assert isinstance(error, api.ApiError)
+            _, resume = await channel_reopen_waits.get()
+            resume.set_result(None)
+            _, deferred = await channel_reopen_waits.get()
+            assert [call.args[0] for call in client.open_channel.await_args_list] == [
+                "test-fridge",
+                "test-oven",
+                "test-fridge",
+            ]
+            await sockets[0].send_str(
+                json.dumps(notification({"ref_door_ajar": False})) + api.SEPARATOR
+            )
+            assert await anext(stream) == (
+                "test-fridge",
+                api.StateUpdate({"ref_door_ajar": False}, full=False),
+            )
+            assert len(sockets) == 1
+    finally:
+        await stream.aclose()
+    assert deferred.cancelled()
+
+
+@pytest.mark.parametrize("rate_limited", [False, True])
+async def test_channel_reopen_failures_preserve_delivery(
+    notification_stream, channel_reopen_waits, rate_limited
+):
+    client, _, _, sockets = notification_stream
+    stream = client.watch(["test-fridge", "test-oven"])
+    try:
+        async with asyncio.timeout(5):
+            assert await anext(stream) == ("test-fridge", api.ChannelOpened())
+            assert await anext(stream) == ("test-oven", api.ChannelOpened())
+            _, resume = await channel_reopen_waits.get()
+            error = api.RateLimited(3600) if rate_limited else api.ApiError("Rejected")
+            client.open_channel.side_effect = [error, None]
+            resume.set_result(None)
+            delay, deferred = await channel_reopen_waits.get()
+            assert delay == (3600 if rate_limited else 1800)
+            assert client.open_channel.await_count == (3 if rate_limited else 4)
+
+            await sockets[0].send_str(
+                json.dumps(notification({"ref_door_ajar": False})) + api.SEPARATOR
+            )
+            # Maintenance failures do not emit channel errors or stop push delivery.
+            assert await anext(stream) == (
+                "test-fridge",
+                api.StateUpdate({"ref_door_ajar": False}, full=False),
+            )
+            assert len(sockets) == 1
+            assert client.push_connected
+            assert not deferred.done()
+    finally:
+        await stream.aclose()
+    assert deferred.cancelled()
+
+
+async def test_channel_reopen_auth_failure_reaches_the_listener(
+    notification_stream, channel_reopen_waits
+):
+    client, _, _, sockets = notification_stream
+    stream = client.watch(["test-fridge"])
+    try:
+        async with asyncio.timeout(5):
+            assert await anext(stream) == ("test-fridge", api.ChannelOpened())
+            _, resume = await channel_reopen_waits.get()
+            client.open_channel.side_effect = InvalidAuth("Expired")
+            resume.set_result(None)
+            with pytest.raises(InvalidAuth, match="Expired"):
+                await anext(stream)
+            assert len(sockets) == 1
+            assert not client.push_connected
+    finally:
+        await stream.aclose()
 
 
 @pytest.mark.parametrize("rejected", [False, True])
