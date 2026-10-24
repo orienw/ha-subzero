@@ -819,9 +819,9 @@ async def test_reply_superseded_by_a_reconnect_snapshot_is_rescued_by_it(
     assert await request == coordinator.confirmed_at
     assert "frz_door_ajar" not in coordinator.data
     assert hass.states.get("binary_sensor.kitchen_freezer_door").state == "unavailable"
-    # The superseded reply still showed that reads report the freezer door.
+    # A superseded reply is not an observation later snapshots are held to.
     coordinator.apply_update(StateUpdate(dict(client.state.return_value), full=True))
-    assert coordinator.missing_state_keys["snapshot"] == ["frz_door_ajar"]
+    assert coordinator.missing_state_keys["snapshot"] == []
 
 
 async def test_replaced_snapshot_values_matching_the_reply_do_not_conflict(loaded, freezer):

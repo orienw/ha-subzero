@@ -859,9 +859,8 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 current = transport_generation == self._transport_generation
                 if received and restarted and not current:
                     # The reply predates a snapshot that replaced state after a reconnect.
-                    # It still shows what reads report, but like the updates before that
-                    # snapshot it does not survive, and the snapshot rescues the read.
-                    self._confirm_state(data, "read", certify=False)
+                    # Like the updates before that snapshot it does not survive, and the
+                    # snapshot rescues the read as if the request had failed.
                     data, received = self.data, False
                 # Arrival during a GET does not establish when a partial change
                 # happened. Publish it immediately, but do not certify the merged
