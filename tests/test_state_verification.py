@@ -845,6 +845,42 @@ async def test_replaced_snapshot_values_matching_the_reply_do_not_conflict(loade
     assert coordinator.data["ref_door_ajar"] is False
 
 
+async def test_read_is_not_certified_when_its_published_state_lacks_a_read_key(
+    hass, loaded, freezer
+):
+    entry, client, updates, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    fixture = dict(client.state.return_value)
+
+    def clocked(hour: int) -> dict:
+        return {
+            **fixture,
+            "time": f"2026-10-24T{hour:02d}:00:00+00:00",
+            "uptime": f"{hour:02d}:00:00",
+        }
+
+    freezer.tick(1)
+
+    async def read(_device_id):
+        await updates.put(ApiError("Stream disconnected"))
+        await hass.async_block_till_done()
+        # A complete snapshot certifies state after the reconnect, then an incomplete
+        # one replaces the unavailable state. The reply is newer than the complete
+        # snapshot, which the replay skips, and predates the reconnect, so it is
+        # superseded; what is published lacks the door.
+        coordinator.apply_update(StateUpdate(clocked(11), full=True))
+        coordinator.async_set_update_error(ApiError("Channel error"))
+        coordinator.apply_update(
+            StateUpdate({"appliance_model": "ANOTHER-MODEL", "ref_set_temp": 38}, full=True)
+        )
+        return clocked(12)
+
+    client.state.side_effect = read
+    with pytest.raises(HomeAssistantError, match="complete state"):
+        await coordinator.async_read_status()
+    assert "ref_door_ajar" not in coordinator.data
+
+
 async def test_each_source_requires_only_the_keys_it_has_reported(hass, loaded, freezer):
     entry, client, _, _, _ = loaded
     coordinator = entry.runtime_data.coordinators["test-fridge"]

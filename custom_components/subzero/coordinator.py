@@ -761,7 +761,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self._pending_read_error_requests.clear()
         confirmation = self._confirmation
         try:
-            data, conflicted = await self._async_fetch_state()
+            data, conflicted, complete = await self._async_fetch_state()
         except Exception as error:
             result = StateRead(request, None, error, self._published)
             deferred = isinstance(error, UpdateFailed) and error.retry_after is not None
@@ -781,7 +781,8 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self._process_events(data, history=True)
         confirmed = (
             self.confirmed_at
-            if not conflicted
+            if complete
+            and not conflicted
             and self._confirmation > confirmation
             and self._confirmation_transport_generation == self._transport_generation
             else None
@@ -901,7 +902,13 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 }
                 if history is not None:
                     data["notifs"] = [*history, *updates.get("notifs", [])]
-                return self._discard_excluded(data), conflicted
+                data = self._discard_excluded(data)
+                # A snapshot during the read may have certified state that the published
+                # result no longer carries, so the result must cover what reads report.
+                complete = self._required_state_keys["read"] <= (
+                    data.keys() | excluded_properties(data)
+                )
+                return data, conflicted, complete
             except InvalidAuth as error:
                 raise ConfigEntryAuthFailed(str(error)) from error
             except RateLimited as error:
