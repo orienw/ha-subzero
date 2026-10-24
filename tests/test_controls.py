@@ -665,10 +665,8 @@ async def test_every_command_reads_again_while_the_stream_is_down(hass, controls
     controls.client.set_property.assert_not_awaited()
 
 
-@pytest.mark.parametrize("observation", ["failed", "incomplete", "conflicting"])
-async def test_control_requires_a_complete_conflict_free_post_disconnect_read(
-    hass, controls, observation
-):
+@pytest.mark.parametrize("observation", ["failed", "conflicting"])
+async def test_control_requires_a_conflict_free_post_disconnect_read(hass, controls, observation):
     coordinator = controls.entry.runtime_data.coordinators["test-fridge"]
     await controls.updates.put(ApiError("Stream disconnected"))
     await hass.async_block_till_done()
@@ -677,27 +675,21 @@ async def test_control_requires_a_complete_conflict_free_post_disconnect_read(
     async def read(device_id):
         if observation == "failed":
             raise ApiError("Status unavailable")
-        state = dict(controls.states[device_id])
-        if observation == "incomplete":
-            # The read confirms state, but a write's interlock checks skip keys the
-            # state does not carry, so it cannot vouch for the Max Ice interlock.
-            del state["max_ice_on"]
-        else:
-            coordinator.apply_update(StateUpdate({"night_mode": 0}, full=False))
-        return state
+        coordinator.apply_update(StateUpdate({"night_mode": 0}, full=False))
+        return dict(controls.states[device_id])
 
     controls.client.state.side_effect = read
-    with pytest.raises(
-        HomeAssistantError,
-        match="did not report every known" if observation == "incomplete" else None,
-    ):
+    with pytest.raises(HomeAssistantError):
         await coordinator.async_set_properties({"air_filter_on": False})
 
     assert controls.client.state.await_count == reads + 1
     controls.client.set_property.assert_not_awaited()
 
 
-async def test_control_reads_first_while_the_state_lacks_a_key_reads_have_reported(hass, controls):
+@pytest.mark.parametrize("reply", ["complete", "reduced"])
+async def test_control_reads_first_while_the_state_lacks_a_key_reads_have_reported(
+    hass, controls, reply
+):
     coordinator = controls.entry.runtime_data.coordinators["test-fridge"]
     controls.states["test-fridge"]["max_ice_on"] = True
     reading, release = asyncio.Event(), asyncio.Event()
@@ -725,22 +717,24 @@ async def test_control_reads_first_while_the_state_lacks_a_key_reads_have_report
     assert coordinator._transport_error is None
     assert "max_ice_on" not in coordinator.data
 
-    # The fill-in read and the control's own read both come back without the key.
-    reduced_replies.extend([True, True])
+    # The fill-in read comes back without the key; the control's own read follows.
+    reduced_replies.extend([True, reply == "reduced"])
     command = asyncio.create_task(coordinator.async_set_properties({"frz_set_temp": 1}))
     await asyncio.sleep(0)
     release.set()
-    with pytest.raises(HomeAssistantError, match="did not report every known"):
+    if reply == "complete":
+        # The read restored the interlock, and the write is checked against it.
+        with pytest.raises(ServiceValidationError, match="Max Ice"):
+            await command
+        controls.client.set_property.assert_not_awaited()
+        assert coordinator.data["max_ice_on"] is True
+    else:
+        # A reply that still lacks the key does not block the write: the appliance
+        # enforces its own interlocks, and refusing would refuse every control for as
+        # long as replies lack the key.
         await command
-    controls.client.set_property.assert_not_awaited()
+        controls.client.set_property.assert_awaited_once_with("test-fridge", "frz_set_temp", 1)
     assert controls.client.state.await_count == 2
-
-    # A retry reads again, and the complete reply restores the interlock the write checks.
-    with pytest.raises(ServiceValidationError, match="Max Ice"):
-        await coordinator.async_set_properties({"frz_set_temp": 1})
-    controls.client.set_property.assert_not_awaited()
-    assert controls.client.state.await_count == 3
-    assert coordinator.data["max_ice_on"] is True
 
 
 async def test_disconnect_between_ordered_writes_rechecks_the_next_setting(hass, controls):

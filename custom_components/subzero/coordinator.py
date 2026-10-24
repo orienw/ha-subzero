@@ -506,22 +506,20 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         return sorted(self._required_state_keys["read"] - data.keys() - excluded_properties(data))
 
     async def _async_read_for_control(self) -> None:
-        """Refresh state before a write, and refuse one based on a reduced observation.
+        """Refresh state before a write that would otherwise check reduced state.
 
-        A write's interlock checks skip keys the state does not carry, so state that
-        lacks a key status reads have reported cannot vouch for them, whether a
-        reduced reply or a reduced snapshot that replaced state left it that way.
+        A write's interlock checks skip keys the state does not carry, so when the
+        state lacks a key status reads have reported, whether a reduced reply or a
+        reduced snapshot that replaced state left it that way, a read restores it
+        first. The write then proceeds on what the read returned: a reply that still
+        lacks the key does not block it, since the appliance enforces its own
+        interlocks and refusing would refuse every control for as long as replies
+        lack that key.
         """
-        result = await self.async_read_status()
-        if result.missing_keys:
-            raise HomeAssistantError(
-                "The status read did not report every known appliance setting; try again."
-            )
+        await self.async_read_status()
 
     async def _async_confirm_command_generation(self) -> None:
-        if self._command_generation != self._transport_generation or self._missing_read_keys(
-            self.data
-        ):
+        if self._command_generation != self._transport_generation:
             await self._async_read_for_control()
             self._command_generation = self._transport_generation
 
