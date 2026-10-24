@@ -7,8 +7,9 @@ from unittest.mock import AsyncMock, call, patch
 import pytest
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import entity_registry as er
+from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_system import METRIC_SYSTEM, US_CUSTOMARY_SYSTEM
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant_custom_component.common import MockConfigEntry, async_fire_time_changed
 
 from custom_components.subzero.api import ApiError, Appliance, StateUpdate, token_state
 from custom_components.subzero.auth import InvalidAuth
@@ -738,6 +739,48 @@ async def test_read_started_before_disconnect_does_not_bypass_the_next_control_r
 
     assert controls.client.state.await_count == reads + 2
     controls.client.set_property.assert_not_awaited()
+
+
+async def test_failed_reconnect_attempt_during_a_control_read_keeps_the_read(
+    hass, freezer, controls, monkeypatch
+):
+    monkeypatch.setattr("custom_components.subzero.coordinator.random.uniform", lambda *_: 0)
+    coordinator = controls.entry.runtime_data.coordinators["test-fridge"]
+    await controls.updates.put(ApiError("Stream disconnected"))
+    await hass.async_block_till_done()
+    attempts = []
+
+    async def failing_watch(device_ids):
+        attempts.append(device_ids)
+        raise ApiError("Could not maintain Sub-Zero's notification connection.")
+        yield
+
+    controls.client.watch = failing_watch
+    reading, release = asyncio.Event(), asyncio.Event()
+
+    async def read(device_id):
+        reading.set()
+        await release.wait()
+        return dict(controls.states[device_id])
+
+    controls.client.state.side_effect = read
+    command = asyncio.create_task(coordinator.async_set_properties({"air_filter_on": False}))
+    await asyncio.wait_for(reading.wait(), 1)
+    freezer.tick(31)
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+    assert attempts
+    release.set()
+    # With push down, the write waits out its push confirmation before reading.
+    for _ in range(10):
+        if command.done():
+            break
+        freezer.tick(1)
+        async_fire_time_changed(hass, dt_util.utcnow())
+        await hass.async_block_till_done()
+    await command
+
+    controls.client.set_property.assert_awaited_once_with("test-fridge", "air_filter_on", False)
 
 
 async def test_options_follow_reported_capabilities(hass, controls):

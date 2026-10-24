@@ -1064,7 +1064,7 @@ async def test_reconnects_and_incomplete_pushes_do_not_extend_the_grace(
     coordinator = entry.runtime_data.coordinators["test-fridge"]
     confirmed = coordinator.confirmed_at
     complete = dict(client.state.return_value)
-    client.state.return_value = {"appliance_model": "ANOTHER-MODEL", "ref_set_temp": 39}
+    client.state.side_effect = ApiError("Status unavailable")
     await updates.put(ApiError("Stream disconnected"))
     await hass.async_block_till_done()
     freezer.tick(31)
@@ -1104,6 +1104,31 @@ async def test_reconnects_and_incomplete_pushes_do_not_extend_the_grace(
     await updates.put(StateUpdate(complete, full=True))
     await hass.async_block_till_done()
     assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "38"
+
+
+async def test_reconnected_read_restores_state_without_a_key_it_lacks(
+    hass, freezer, loaded, monkeypatch
+):
+    entry, client, updates, _, _ = loaded
+    monkeypatch.setattr("custom_components.subzero.coordinator.random.uniform", lambda *_: 0)
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    confirmed = coordinator.confirmed_at
+    await updates.put(StateUpdate({"frz_door_ajar": False}, full=False))
+    await updates.put(ApiError("Stream disconnected"))
+    await hass.async_block_till_done()
+    freezer.tick(31)
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+    reads = client.state.await_count
+    await updates.put(ChannelOpened())
+    await hass.async_block_till_done()
+    freezer.tick(91)
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+    assert client.state.await_count > reads
+    assert coordinator.missing_state_keys["read"] == ["frz_door_ajar"]
+    assert coordinator.confirmed_at == confirmed
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
 
 
 async def test_manual_status_during_a_stream_outage_has_bounded_freshness(hass, freezer, loaded):

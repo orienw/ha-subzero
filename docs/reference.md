@@ -180,7 +180,7 @@ A new appliance alert starts a status read after two seconds, then at most two m
 
 An accepted channel or incoming state can trigger a status read for an unavailable appliance or one awaiting reconfirmation after a push interruption, even with periodic checks disabled. Failed recovery reads back off while the stream and appliance channel remain open; stream disconnection stops recovery.
 
-Background read failures preserve otherwise available state while push remains connected. A transport interruption keeps established readings available for up to two minutes without a complete observation. Repeated disconnects, handshakes, and partial updates do not extend that window. Authentication failures and appliance-channel errors still affect availability immediately. Available cached values can therefore be old during cloud failures or rate limits. Sub-Zero publishes no API quota.
+Background read failures preserve otherwise available state while push remains connected. A transport interruption keeps established readings available for up to two minutes without a complete observation. Repeated disconnects, handshakes, and partial updates do not extend that window. While push stays down, each complete status read restarts it, so check intervals longer than two minutes alternate availability. Once push reconnects, any successful status read restores state, even one lacking a previously reported key; a pushed snapshot must still be complete. Authentication failures and appliance-channel errors still affect availability immediately. Available cached values can therefore be old during cloud failures or rate limits. Sub-Zero publishes no API quota.
 
 ## Explicit status reads
 
@@ -200,6 +200,6 @@ Repeated writes of an already-reported value also require a cloud acknowledgemen
 
 Commands are serialized and check the state left by earlier commands before deciding what to send. Cancelling a command can leave its appliance effect unsettled, so the next command reads status first.
 
-Controls require reconfirmed state after a push interruption. Cached availability during the reconnect window does not permit a write based on unverified interlocks. A complete status read or full push snapshot must reconfirm state before controls proceed; an unavailable push connection requires a fresh read before writing.
+Controls require reconfirmed state after a push interruption. Cached availability during the reconnect window does not permit a write based on unverified interlocks. A complete push snapshot, any status read after push reconnects, or a complete status read must refresh state before controls proceed; a control's own read must be complete. An unavailable push connection requires a fresh complete read before writing. A reconnect attempt that fails before delivering anything does not invalidate a read in progress.
 
 Kitchen-timer confirmation requires a reported end time within 65 seconds of the request time plus the requested duration. This prevents an old timer state from confirming a restart. Failed confirmation includes the last command error when available.

@@ -196,11 +196,13 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             self.verification_stats["last_success"] = result.confirmed_at.isoformat()
 
     @callback
-    def async_transport_error(self, error: ApiError) -> None:
+    def async_transport_error(self, error: ApiError, *, lost: bool = True) -> None:
         """Keep established state briefly while the shared stream reconnects."""
         first = self._transport_error is None
         self._transport_error = error
-        self._transport_generation += 1
+        if first or lost:
+            # A failed attempt that delivered nothing cannot have changed state.
+            self._transport_generation += 1
         healthy = (
             self.last_update_success
             and bool(self.data.get("appliance_model"))
@@ -853,7 +855,9 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                     and transport_generation == self._transport_generation
                     and (not model or model == data.get("appliance_model"))
                 ):
-                    if self._confirm_state(data, "read"):
+                    # With push back, the reply replaces cached state, so a key it
+                    # lacks cannot leave the appliance waiting on reconnect forever.
+                    if self._confirm_state(data, "read") or self.client.push_connected:
                         self._async_confirm_transport_state()
                 self.unrecognized_keys.update(data.keys() - STATE_KEYS)
                 if "notifs" in data:
@@ -1264,8 +1268,10 @@ class SubZeroAccount:
             started = time.monotonic()
             recoveries = self._recoveries
             canceled: set[asyncio.Task] = set()
+            delivered = False
             try:
                 async for device_id, update in self.client.watch(list(self.coordinators)):
+                    delivered = True
                     coordinator = self.coordinators[device_id]
                     accepted = True
                     if isinstance(update, ApiError):
@@ -1312,7 +1318,7 @@ class SubZeroAccount:
                 return
             except ApiError as error:
                 for coordinator in self.coordinators.values():
-                    coordinator.async_transport_error(error)
+                    coordinator.async_transport_error(error, lost=delivered)
                 for ready in self._initial_states.values():
                     ready.set()
                 retry_after = error.retry_after if isinstance(error, RateLimited) else 0
