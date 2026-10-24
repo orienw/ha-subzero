@@ -697,6 +697,52 @@ async def test_control_requires_a_complete_conflict_free_post_disconnect_read(
     controls.client.set_property.assert_not_awaited()
 
 
+async def test_control_reads_first_while_the_state_lacks_a_key_reads_have_reported(hass, controls):
+    coordinator = controls.entry.runtime_data.coordinators["test-fridge"]
+    controls.states["test-fridge"]["max_ice_on"] = True
+    reading, release = asyncio.Event(), asyncio.Event()
+    reduced_replies = []
+
+    async def read(device_id):
+        reading.set()
+        await release.wait()
+        state = dict(controls.states[device_id])
+        if reduced_replies and reduced_replies.pop(0):
+            del state["max_ice_on"]
+        return state
+
+    controls.client.state.reset_mock()
+    controls.client.state.side_effect = read
+    coordinator.async_set_update_error(ApiError("Channel error"))
+    # A snapshot lacking Max Ice replaces the unavailable state; push is up and the
+    # appliance is available, so nothing but the missing key says a write needs a read.
+    snapshot = {
+        key: value for key, value in controls.states["test-fridge"].items() if key != "max_ice_on"
+    }
+    await controls.updates.put(("test-fridge", StateUpdate(snapshot, full=True)))
+    await asyncio.wait_for(reading.wait(), 1)
+    assert coordinator.last_update_success
+    assert coordinator._transport_error is None
+    assert "max_ice_on" not in coordinator.data
+
+    # The fill-in read and the control's own read both come back without the key.
+    reduced_replies.extend([True, True])
+    command = asyncio.create_task(coordinator.async_set_properties({"frz_set_temp": 1}))
+    await asyncio.sleep(0)
+    release.set()
+    with pytest.raises(HomeAssistantError, match="did not report every known"):
+        await command
+    controls.client.set_property.assert_not_awaited()
+    assert controls.client.state.await_count == 2
+
+    # A retry reads again, and the complete reply restores the interlock the write checks.
+    with pytest.raises(ServiceValidationError, match="Max Ice"):
+        await coordinator.async_set_properties({"frz_set_temp": 1})
+    controls.client.set_property.assert_not_awaited()
+    assert controls.client.state.await_count == 3
+    assert coordinator.data["max_ice_on"] is True
+
+
 async def test_disconnect_between_ordered_writes_rechecks_the_next_setting(hass, controls):
     coordinator = controls.entry.runtime_data.coordinators["test-fridge"]
     original = controls.client.set_property.side_effect

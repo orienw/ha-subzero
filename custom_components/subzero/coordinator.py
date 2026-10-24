@@ -485,7 +485,11 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             if self._unsettled:
                 await self.async_refresh()
                 self._unsettled = False
-            if self._transport_error is not None or not self.client.push_connected:
+            if (
+                self._transport_error is not None
+                or not self.client.push_connected
+                or self._missing_read_keys(self.data)
+            ):
                 try:
                     await self._async_read_for_control()
                 except HomeAssistantError as error:
@@ -497,11 +501,16 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 self._unsettled = True
                 raise
 
+    def _missing_read_keys(self, data: dict) -> list[str]:
+        """The keys status reads have reported for the model that this state lacks."""
+        return sorted(self._required_state_keys["read"] - data.keys() - excluded_properties(data))
+
     async def _async_read_for_control(self) -> None:
         """Refresh state before a write, and refuse one based on a reduced observation.
 
-        A write's interlock checks skip keys the state does not carry, so a reply
-        that lacks a key status reads have reported cannot vouch for them.
+        A write's interlock checks skip keys the state does not carry, so state that
+        lacks a key status reads have reported cannot vouch for them, whether a
+        reduced reply or a reduced snapshot that replaced state left it that way.
         """
         result = await self.async_read_status()
         if result.missing_keys:
@@ -510,7 +519,9 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             )
 
     async def _async_confirm_command_generation(self) -> None:
-        if self._command_generation != self._transport_generation:
+        if self._command_generation != self._transport_generation or self._missing_read_keys(
+            self.data
+        ):
             await self._async_read_for_control()
             self._command_generation = self._transport_generation
 
@@ -947,9 +958,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 # What the published state lacks of the keys reads report, for the
                 # read_status response. A snapshot during the read may have confirmed
                 # state the result no longer carries.
-                missing = sorted(
-                    self._required_state_keys["read"] - data.keys() - excluded_properties(data)
-                )
+                missing = self._missing_read_keys(data)
                 return data, conflicted, missing, superseded
             except InvalidAuth as error:
                 raise ConfigEntryAuthFailed(str(error)) from error
