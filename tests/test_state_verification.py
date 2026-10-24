@@ -824,20 +824,27 @@ async def test_reply_superseded_by_a_reconnect_snapshot_is_rescued_by_it(
     assert coordinator.missing_state_keys["snapshot"] == []
 
 
-async def test_replaced_snapshot_values_matching_the_reply_do_not_conflict(loaded, freezer):
+@pytest.mark.parametrize("reply_type", ["1.2.6.1", None, "bad"], ids=["same", "absent", "unusable"])
+async def test_replaced_snapshot_values_matching_the_reply_do_not_conflict(
+    loaded, freezer, reply_type
+):
     entry, client, _, _, _ = loaded
     coordinator = entry.runtime_data.coordinators["test-fridge"]
     typed = {**client.state.return_value, "appliance_type": "1.2.6.1"}
+    reply = (
+        {**typed, "appliance_type": reply_type} if reply_type else dict(client.state.return_value)
+    )
     freezer.tick(1)
 
     async def read(_device_id):
         coordinator.apply_update(StateUpdate(typed, full=True))
         coordinator.async_set_update_error(ApiError("Channel error"))
-        # The replacing snapshot omits the type, which the known one stands in for.
+        # The replacing snapshot omits the type, which the known one stands in for,
+        # as it does for a reply without a usable type.
         coordinator.apply_update(
             StateUpdate({"appliance_model": "ANOTHER-MODEL", "ref_set_temp": 38}, full=True)
         )
-        return dict(typed)
+        return reply
 
     client.state.side_effect = read
     assert await coordinator.async_read_status() == dt_util.utcnow()

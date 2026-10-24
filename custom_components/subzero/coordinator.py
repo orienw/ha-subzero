@@ -871,13 +871,15 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 reference = data if received else self._read_snapshot
                 observed_keys = partial_keys if received else updates.keys() | partial_keys
                 observed = {**dropped, **updates} if received else updates
-                # Clock and signal readings differ between any two observations.
+                # Clock and signal readings differ between any two observations, and
+                # an observation without a usable type keeps the known one.
                 conflicted = reference is not None and any(
                     key not in reference
                     or key not in observed
                     or observed[key] != reference[key]
                     or type(observed[key]) is not type(reference[key])
-                    for key in observed_keys - {"notifs", "time", "uptime", "ap_rssi"}
+                    for key in observed_keys
+                    - {"notifs", "time", "uptime", "ap_rssi", "appliance_type"}
                 )
                 model = updates.get("appliance_model")
                 if received and (not model or model == data.get("appliance_model")):
