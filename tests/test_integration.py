@@ -1106,6 +1106,34 @@ async def test_reconnects_and_incomplete_pushes_do_not_extend_the_grace(
     assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "38"
 
 
+async def test_snapshot_ending_a_reconnect_drops_values_only_pushed_as_partials(
+    hass, freezer, loaded, monkeypatch
+):
+    entry, client, updates, _, _ = loaded
+    monkeypatch.setattr("custom_components.subzero.coordinator.random.uniform", lambda *_: 0)
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    await updates.put(StateUpdate({"frz_door_ajar": True}, full=False))
+    await hass.async_block_till_done()
+    assert hass.states.get("binary_sensor.kitchen_freezer_door").state == "on"
+    await updates.put(ApiError("Stream disconnected"))
+    await hass.async_block_till_done()
+    freezer.tick(31)
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+    reads = client.state.await_count
+    await updates.put(StateUpdate(dict(client.state.return_value), full=True))
+    await hass.async_block_till_done()
+    # The snapshot ends the interruption without a read, but a value only a partial
+    # update reported may have changed meanwhile, so it does not survive.
+    assert client.state.await_count == reads
+    assert coordinator.confirmed_at == dt_util.utcnow()
+    assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "38"
+    assert hass.states.get("binary_sensor.kitchen_freezer_door").state == "unavailable"
+    await updates.put(StateUpdate({"frz_door_ajar": False}, full=False))
+    await hass.async_block_till_done()
+    assert hass.states.get("binary_sensor.kitchen_freezer_door").state == "off"
+
+
 async def test_reconnected_read_restores_state_without_a_key_it_lacks(
     hass, freezer, loaded, monkeypatch
 ):
@@ -1126,8 +1154,9 @@ async def test_reconnected_read_restores_state_without_a_key_it_lacks(
     async_fire_time_changed(hass, dt_util.utcnow())
     await hass.async_block_till_done()
     assert client.state.await_count > reads
-    assert coordinator.missing_state_keys["read"] == ["frz_door_ajar"]
-    assert coordinator.confirmed_at == confirmed
+    # A key only ever pushed as a partial update is not required of a read.
+    assert coordinator.missing_state_keys["read"] == []
+    assert coordinator.confirmed_at > confirmed
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
 
 

@@ -156,7 +156,9 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self._pending_read_error_requests: set[int] = set()
         self._read_task: asyncio.Task[StateRead] | None = None
         self._completed_read: StateRead | None = None
-        self._read_updates: list[tuple[StateUpdate, bool]] | None = None
+        # Updates during a status read, each with whether it was a complete snapshot
+        # and whether it replaced cached state.
+        self._read_updates: list[tuple[StateUpdate, bool, bool]] | None = None
         self._read_snapshot: dict | None = None
         self._read_error: Exception | None = None
         self._channel_error: ApiError | None = None
@@ -175,7 +177,9 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self._confirmation = 0
         self._confirmation_transport_generation = 0
         self._confirmation_model: str | None = None
-        self._required_state_keys: set[str] = set()
+        # The state keys each source has reported for the model. Status reads and
+        # pushed snapshots can report different sets, so each is held to its own.
+        self._required_state_keys: dict[str, set[str]] = {"snapshot": set(), "read": set()}
         self._published = 0
         self.missing_state_keys: dict[str, list[str]] = {"snapshot": [], "read": []}
         self.verification_stats: dict[str, int | str | None] = {
@@ -251,21 +255,37 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         super().async_set_update_error(err)
 
     @callback
-    def _confirm_state(self, properties: dict, source: str) -> bool:
-        # Incomplete replies must not erase the next confirmation's requirements.
-        if self.data.get("appliance_model") == self._confirmation_model:
-            self._required_state_keys.update(self.data.keys() - {"notifs"})
+    def _confirm_state(self, properties: dict, source: str, *, certify: bool = True) -> bool:
+        """Record what the source reports and certify the state when it is complete."""
         model = properties.get("appliance_model")
         if not isinstance(model, str) or not model:
             self.missing_state_keys[source] = ["appliance_model"]
             return False
         if model != self._confirmation_model:
+            if not certify:
+                # A reply that concurrent updates contradict does not switch models.
+                return False
             self._confirmation_model = model
-            self._required_state_keys = {"appliance_model"}
-        missing = self.missing_state_keys[source] = sorted(
-            self._required_state_keys - properties.keys()
-        )
-        if missing:
+            for reported in self._required_state_keys.values():
+                reported.clear()
+        # Like _discard_excluded, an observation without a usable type keeps the
+        # known one; properties the app discards for it are not state.
+        typed = properties if appliance_type(properties) is not None else self.data
+        excluded = excluded_properties(typed) if typed.get("appliance_model") == model else set()
+        # A read replaces state, so it must cover what reads report. A snapshot
+        # merges into that state, so it must also cover what snapshots report. A
+        # key only ever pushed as a partial update is never required, since no
+        # read or snapshot can refresh it.
+        required = set(self._required_state_keys["read"])
+        if source == "snapshot":
+            required |= self._required_state_keys["snapshot"]
+        missing = self.missing_state_keys[source] = sorted(required - properties.keys() - excluded)
+        reported = properties.keys() & (STATE_KEYS - {"notifs"} - excluded)
+        if appliance_type(properties) is None:
+            # An unusable type never reaches state.
+            reported.discard("appliance_type")
+        self._required_state_keys[source].update(reported)
+        if missing or not certify:
             return False
         self.confirmed_at = dt_util.utcnow()
         self._confirmation += 1
@@ -820,7 +840,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                         time.monotonic() - started,
                         type(error).__name__,
                     )
-                    updates, _ = self._pending_read_properties(self.data)
+                    updates, _, _, _ = self._pending_read_properties(self.data)
                     model = updates.get("appliance_model")
                     if not isinstance(model, str) or not model:
                         raise
@@ -835,31 +855,39 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                     )
                 if error := self._read_error:
                     raise error
-                updates, partial_keys = self._pending_read_properties(data)
+                updates, partial_keys, dropped, restarted = self._pending_read_properties(data)
+                current = transport_generation == self._transport_generation
+                if received and restarted and not current:
+                    # The reply predates a snapshot that replaced state after a reconnect.
+                    # It still shows what reads report, but like the updates before that
+                    # snapshot it does not survive, and the snapshot rescues the read.
+                    self._confirm_state(data, "read", certify=False)
+                    data, received = self.data, False
                 # Arrival during a GET does not establish when a partial change
                 # happened. Publish it immediately, but do not certify the merged
                 # state when it contradicts the status reply or a complete pushed
-                # snapshot that rescued a failed GET.
+                # snapshot that rescued a failed GET. Against a reply, dropped values
+                # stand in for keys it supplies; a rescue must keep every key.
                 reference = data if received else self._read_snapshot
-                observed_keys = partial_keys if received else updates.keys()
+                observed_keys = partial_keys if received else updates.keys() | partial_keys
+                observed = {**dropped, **updates} if received else updates
                 # Clock and signal readings differ between any two observations.
                 conflicted = reference is not None and any(
                     key not in reference
-                    or updates[key] != reference[key]
-                    or type(updates[key]) is not type(reference[key])
+                    or key not in observed
+                    or observed[key] != reference[key]
+                    or type(observed[key]) is not type(reference[key])
                     for key in observed_keys - {"notifs", "time", "uptime", "ap_rssi"}
                 )
                 model = updates.get("appliance_model")
-                if (
-                    received
-                    and transport_generation == self._transport_generation
-                    and (not model or model == data.get("appliance_model"))
-                ):
+                if received and (not model or model == data.get("appliance_model")):
+                    # A reply published after a conflict or a reconnect still shows
+                    # what reads report, so it is recorded without certifying state.
+                    complete = self._confirm_state(data, "read", certify=current and not conflicted)
                     # With push back, the reply and newer updates replace cached state,
                     # so a key it lacks or a change during it cannot leave the
                     # appliance waiting on reconnect forever.
-                    complete = not conflicted and self._confirm_state(data, "read")
-                    if complete or self.client.push_connected:
+                    if current and (complete or self.client.push_connected):
                         self._async_confirm_transport_state()
                 self.unrecognized_keys.update(data.keys() - STATE_KEYS)
                 if "notifs" in data:
@@ -911,24 +939,41 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             and observed <= previous - timedelta(minutes=1)
         )
 
-    def _pending_read_properties(self, reference: dict) -> tuple[dict, set[str]]:
+    def _pending_read_properties(self, reference: dict) -> tuple[dict, set[str], dict, bool]:
+        """Replay the updates received during a read over its reference state.
+
+        Returns the properties to publish, the keys whose timing against the
+        reference is unknown, the values a replacing snapshot dropped, and whether
+        such a snapshot restarted the replay.
+        """
         properties = {}
         partial_keys = set()
-        for update, complete_snapshot in self._read_updates or ():
+        dropped = {}
+        restarted = False
+        for update, complete_snapshot, replaced in self._read_updates or ():
             if update.full:
                 if self._snapshot_is_older(update.properties, reference):
                     continue
                 if update.properties["appliance_model"] != reference.get("appliance_model"):
                     properties.clear()
                     partial_keys.clear()
+                    dropped.clear()
                     reference = {}
+                elif replaced:
+                    # The replay starts over from a snapshot that replaced state. What it
+                    # drops was still observed, so it stays recorded for the conflict
+                    # check, and the reference keeps its clocks to order later snapshots.
+                    partial_keys.update(properties)
+                    dropped.update(properties)
+                    properties.clear()
+                    restarted = True
             if complete_snapshot:
                 partial_keys.difference_update(update.properties)
             else:
                 partial_keys.update(update.properties)
             properties.update(update.properties)
             reference = {**reference, **update.properties}
-        return properties, partial_keys
+        return properties, partial_keys, dropped, restarted
 
     def _discard_excluded(self, data: dict) -> dict:
         """Drop the properties the app discards for the appliance type.
@@ -989,6 +1034,13 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             self.clock_zone = zone
         properties = {key: value for key, value in update.properties.items() if key in STATE_KEYS}
         complete_snapshot = update.full and self._confirm_state(properties, "snapshot")
+        # Like a read, the snapshot that ends a push interruption replaces cached
+        # state, so values only pushed as partial updates do not outlive it.
+        replace = update.full and (
+            not self.last_update_success
+            or properties.get("appliance_model") != self.data.get("appliance_model")
+            or (complete_snapshot and self._transport_error is not None)
+        )
         if complete_snapshot:
             self._async_confirm_transport_state()
         if "appliance_type" in properties and appliance_type(properties) is None:
@@ -1001,7 +1053,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             self._channel_error = None
             if self._read_updates is not None:
                 self._read_updates.append(
-                    (StateUpdate(properties, full=update.full), complete_snapshot)
+                    (StateUpdate(properties, full=update.full), complete_snapshot, replace)
                 )
                 if complete_snapshot:
                     self._read_snapshot = properties
@@ -1014,10 +1066,6 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             _state_for_log(properties),
         )
         if self.last_update_success or update.full:
-            replace = update.full and (
-                not self.last_update_success
-                or properties.get("appliance_model") != self.data.get("appliance_model")
-            )
             updated = self._discard_excluded(properties if replace else {**self.data, **properties})
             if (
                 update.full

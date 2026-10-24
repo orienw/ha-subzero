@@ -601,6 +601,269 @@ async def test_status_confirmation_requires_door_state_but_not_notification_hist
         assert "ref_door_ajar" in coordinator.missing_state_keys["read"]
 
 
+async def test_conflicted_read_still_records_the_keys_reads_report(loaded, freezer):
+    entry, client, _, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    snapshot = dict(client.state.return_value)
+    client.state.return_value["max_ice_on"] = False
+    freezer.tick(1)
+
+    async def conflicted_read(_device_id):
+        coordinator.apply_update(StateUpdate({"ref_door_ajar": True}, full=False))
+        return dict(client.state.return_value)
+
+    client.state.side_effect = conflicted_read
+    with pytest.raises(HomeAssistantError, match="state changed during"):
+        await coordinator.async_read_status()
+    assert coordinator.data["max_ice_on"] is False
+    freezer.tick(1)
+
+    async def failed_read(_device_id):
+        coordinator.apply_update(StateUpdate(snapshot, full=True))
+        raise ApiError("Status request failed")
+
+    # A snapshot without a key the conflicted reply reported cannot rescue a failed read.
+    client.state.side_effect = failed_read
+    with pytest.raises(HomeAssistantError, match="complete state"):
+        await coordinator.async_read_status()
+    assert coordinator.missing_state_keys["snapshot"] == ["max_ice_on"]
+
+
+async def test_uncertified_read_for_another_model_keeps_known_requirements(loaded, freezer):
+    entry, client, _, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    confirmed = coordinator.confirmed_at
+    freezer.tick(1)
+
+    async def conflicted_read(_device_id):
+        coordinator.apply_update(StateUpdate({"ref_door_ajar": True}, full=False))
+        return {"appliance_model": "REPLACEMENT", "ref_set_temp": 40, "ref_door_ajar": False}
+
+    client.state.side_effect = conflicted_read
+    with pytest.raises(HomeAssistantError, match="state changed during"):
+        await coordinator.async_read_status()
+    assert coordinator.data["appliance_model"] == "REPLACEMENT"
+    freezer.tick(1)
+    coordinator.apply_update(StateUpdate({"appliance_model": "ANOTHER-MODEL"}, full=True))
+    assert coordinator.confirmed_at == confirmed
+    assert "ref_door_ajar" in coordinator.missing_state_keys["snapshot"]
+
+
+async def test_failed_read_does_not_replay_updates_a_replacing_snapshot_superseded(
+    hass, freezer, loaded, monkeypatch
+):
+    entry, client, updates, _, _ = loaded
+    monkeypatch.setattr("custom_components.subzero.coordinator.random.uniform", lambda *_: 0)
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    reading, release = asyncio.Event(), asyncio.Event()
+
+    async def failed_read(_device_id):
+        reading.set()
+        await release.wait()
+        raise ApiError("Status request failed")
+
+    client.state.side_effect = failed_read
+    request = asyncio.create_task(coordinator.async_read_status())
+    await asyncio.wait_for(reading.wait(), 1)
+    coordinator.apply_update(StateUpdate({"frz_door_ajar": True}, full=False))
+    await updates.put(ApiError("Stream disconnected"))
+    await hass.async_block_till_done()
+    freezer.tick(31)
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+    await updates.put(StateUpdate(dict(client.state.return_value), full=True))
+    await hass.async_block_till_done()
+    assert "frz_door_ajar" not in coordinator.data
+    release.set()
+    # The snapshot could not refresh the door, so the rescued read is not certified.
+    with pytest.raises(HomeAssistantError, match="state changed during"):
+        await request
+    assert "frz_door_ajar" not in coordinator.data
+    assert hass.states.get("binary_sensor.kitchen_freezer_door").state == "unavailable"
+    assert coordinator.last_update_success
+    assert coordinator._transport_error is None
+
+
+async def test_partial_superseded_by_a_replacing_snapshot_still_conflicts_with_the_reply(
+    loaded, freezer
+):
+    entry, client, _, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    coordinator.async_set_update_error(ApiError("Status request failed"))
+    assert not coordinator.last_update_success
+    freezer.tick(1)
+
+    async def read(_device_id):
+        coordinator.apply_update(StateUpdate({"ref_door_ajar": True}, full=False))
+        # An incomplete snapshot replaces the unavailable state, but it says nothing
+        # about the door, so the partial still contradicts the reply's closed door.
+        coordinator.apply_update(
+            StateUpdate({"appliance_model": "ANOTHER-MODEL", "ref_set_temp": 38}, full=True)
+        )
+        assert coordinator.last_update_success
+        return dict(client.state.return_value)
+
+    client.state.side_effect = read
+    with pytest.raises(HomeAssistantError, match="state changed during"):
+        await coordinator.async_read_status()
+    assert coordinator.last_update_success
+    assert coordinator.data["ref_door_ajar"] is False
+
+
+@pytest.mark.parametrize("door_changed", [False, True])
+async def test_failed_read_is_not_certified_when_a_later_snapshot_replaces_its_rescue(
+    loaded, freezer, door_changed
+):
+    entry, client, _, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    freezer.tick(1)
+
+    async def failed_read(_device_id):
+        coordinator.apply_update(StateUpdate(dict(client.state.return_value), full=True))
+        if door_changed:
+            coordinator.apply_update(StateUpdate({"ref_door_ajar": True}, full=False))
+        coordinator.async_set_update_error(ApiError("Channel error"))
+        # Replacing the unavailable state drops the door the complete snapshot certified.
+        coordinator.apply_update(
+            StateUpdate({"appliance_model": "ANOTHER-MODEL", "ref_set_temp": 38}, full=True)
+        )
+        raise ApiError("Status request failed")
+
+    client.state.side_effect = failed_read
+    with pytest.raises(HomeAssistantError, match="state changed during"):
+        await coordinator.async_read_status()
+    assert coordinator.last_update_success
+    assert "ref_door_ajar" not in coordinator.data
+
+
+async def test_read_lacking_a_key_a_superseded_snapshot_certified_is_not_confirmed(loaded, freezer):
+    entry, client, _, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    freezer.tick(1)
+
+    async def read(_device_id):
+        coordinator.apply_update(
+            StateUpdate({**client.state.return_value, "ref_door_ajar": True}, full=True)
+        )
+        coordinator.async_set_update_error(ApiError("Channel error"))
+        coordinator.apply_update(
+            StateUpdate({"appliance_model": "ANOTHER-MODEL", "ref_set_temp": 38}, full=True)
+        )
+        return {
+            key: value for key, value in client.state.return_value.items() if key != "ref_door_ajar"
+        }
+
+    client.state.side_effect = read
+    with pytest.raises(HomeAssistantError, match="state changed during"):
+        await coordinator.async_read_status()
+    assert "ref_door_ajar" not in coordinator.data
+
+
+async def test_replay_restart_keeps_the_reply_clock_for_ordering_later_snapshots(loaded, freezer):
+    entry, client, _, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    coordinator.async_set_update_error(ApiError("Channel error"))
+    fresh = {
+        **client.state.return_value,
+        "ref_door_ajar": True,
+        "time": "2026-10-24T12:00:00+00:00",
+        "uptime": "13:00:00",
+    }
+    stale = {
+        **client.state.return_value,
+        "ref_door_ajar": False,
+        "time": "2026-10-24T11:00:00+00:00",
+        "uptime": "12:00:00",
+    }
+    freezer.tick(1)
+
+    async def read(_device_id):
+        coordinator.apply_update(
+            StateUpdate({"appliance_model": "ANOTHER-MODEL", "ref_set_temp": 38}, full=True)
+        )
+        coordinator.apply_update(StateUpdate(stale, full=True))
+        return dict(fresh)
+
+    client.state.side_effect = read
+    assert await coordinator.async_read_status() == dt_util.utcnow()
+    assert coordinator.data["ref_door_ajar"] is True
+
+
+async def test_reply_superseded_by_a_reconnect_snapshot_is_rescued_by_it(
+    hass, freezer, loaded, monkeypatch
+):
+    entry, client, updates, _, _ = loaded
+    monkeypatch.setattr("custom_components.subzero.coordinator.random.uniform", lambda *_: 0)
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    await updates.put(StateUpdate({"frz_door_ajar": True}, full=False))
+    await hass.async_block_till_done()
+    reading, release = asyncio.Event(), asyncio.Event()
+
+    async def read(_device_id):
+        reading.set()
+        await release.wait()
+        # Answered before the interruption, while the freezer door was still open.
+        return {**client.state.return_value, "frz_door_ajar": True}
+
+    client.state.side_effect = read
+    request = asyncio.create_task(coordinator.async_read_status())
+    await asyncio.wait_for(reading.wait(), 1)
+    await updates.put(ApiError("Stream disconnected"))
+    await hass.async_block_till_done()
+    freezer.tick(31)
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+    await updates.put(StateUpdate(dict(client.state.return_value), full=True))
+    await hass.async_block_till_done()
+    release.set()
+    assert await request == coordinator.confirmed_at
+    assert "frz_door_ajar" not in coordinator.data
+    assert hass.states.get("binary_sensor.kitchen_freezer_door").state == "unavailable"
+    # The superseded reply still showed that reads report the freezer door.
+    coordinator.apply_update(StateUpdate(dict(client.state.return_value), full=True))
+    assert coordinator.missing_state_keys["snapshot"] == ["frz_door_ajar"]
+
+
+async def test_replaced_snapshot_values_matching_the_reply_do_not_conflict(loaded, freezer):
+    entry, client, _, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    typed = {**client.state.return_value, "appliance_type": "1.2.6.1"}
+    freezer.tick(1)
+
+    async def read(_device_id):
+        coordinator.apply_update(StateUpdate(typed, full=True))
+        coordinator.async_set_update_error(ApiError("Channel error"))
+        # The replacing snapshot omits the type, which the known one stands in for.
+        coordinator.apply_update(
+            StateUpdate({"appliance_model": "ANOTHER-MODEL", "ref_set_temp": 38}, full=True)
+        )
+        return dict(typed)
+
+    client.state.side_effect = read
+    assert await coordinator.async_read_status() == dt_util.utcnow()
+    assert coordinator.data["appliance_type"] == "1.2.6.1"
+    assert coordinator.data["ref_door_ajar"] is False
+
+
+async def test_each_source_requires_only_the_keys_it_has_reported(hass, loaded, freezer):
+    entry, client, _, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    # Snapshots carry a key the status reply never does; another only arrives in partials.
+    coordinator.apply_update(
+        StateUpdate({**client.state.return_value, "frz_door_ajar": False}, full=True)
+    )
+    coordinator.apply_update(StateUpdate({"ice_maker_on": True}, full=False))
+    await hass.async_block_till_done()
+    freezer.tick(1)
+    assert await coordinator.async_read_status() == dt_util.utcnow()
+    assert coordinator.missing_state_keys["read"] == []
+    confirmed = coordinator.confirmed_at
+    freezer.tick(1)
+    coordinator.apply_update(StateUpdate(dict(client.state.return_value), full=True))
+    assert coordinator.missing_state_keys["snapshot"] == ["frz_door_ajar"]
+    assert coordinator.confirmed_at == confirmed
+
+
 async def test_update_entity_waits_for_each_read_inside_the_old_cooldown(hass, loaded):
     _, client, _, _, _ = loaded
     assert await async_setup_component(hass, "homeassistant", {})
