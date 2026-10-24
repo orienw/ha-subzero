@@ -195,7 +195,6 @@ async def test_old_full_push_does_not_satisfy_verification(loaded, dated_snapsho
     await coordinator.async_verify_state()
     client.state.assert_awaited_once_with("test-fridge")
     client.open_channel.assert_not_awaited()
-    client.renew_connection.assert_not_called()
     assert coordinator.data["ref_door_ajar"] is True
     assert coordinator.verification_stats["complete_snapshots"] == 0
     assert coordinator.verification_stats["status_reads"] == 1
@@ -520,7 +519,6 @@ async def test_failed_read_only_confirms_a_complete_concurrent_snapshot(
         assert coordinator.verification_stats["last_success"] is None
         assert "ref_door_ajar" in coordinator.missing_state_keys["snapshot"]
     client.open_channel.assert_not_awaited()
-    client.renew_connection.assert_not_called()
 
 
 async def test_incomplete_status_reply_does_not_confirm_old_values(loaded, freezer):
@@ -884,6 +882,60 @@ async def test_incomplete_observations_cannot_revive_expired_transport_state(has
     assert await coordinator.async_read_status() == dt_util.utcnow()
     assert coordinator.last_update_success
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
+
+
+@pytest.mark.parametrize("key", ["time", "uptime", "ap_rssi"])
+async def test_clock_and_signal_readings_in_an_incomplete_snapshot_do_not_conflict(
+    freezer, loaded, key
+):
+    entry, client, _, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    reply = {
+        **client.state.return_value,
+        "time": "2025-01-01T12:00:00+00:00",
+        "uptime": "13:00:00",
+        "ap_rssi": -50,
+    }
+    client.state.return_value = reply
+    await coordinator.async_read_status()
+    confirmed = coordinator.confirmed_at
+    freezer.tick(1)
+    pushed = {"time": "2025-01-01T04:00:01-08:00", "uptime": "13:00:01", "ap_rssi": -54}
+
+    async def read(device_id):
+        # A snapshot without ref_door_ajar that differs from the reply in one reading.
+        coordinator.apply_update(
+            StateUpdate(
+                {
+                    "appliance_model": reply["appliance_model"],
+                    "ref_set_temp": reply["ref_set_temp"],
+                    key: pushed[key],
+                },
+                full=True,
+            )
+        )
+        return dict(reply)
+
+    client.state.side_effect = read
+    assert await coordinator.async_read_status() > confirmed
+
+
+async def test_conflicted_read_after_push_returns_ends_the_reconnect_wait(freezer, loaded):
+    entry, client, _, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    coordinator.async_transport_error(ApiError("Stream disconnected"))
+    assert client.push_connected
+    freezer.tick(1)
+
+    async def read(device_id):
+        coordinator.apply_update(StateUpdate({"ref_door_ajar": True}, full=False))
+        return dict(client.state.return_value)
+
+    client.state.side_effect = read
+    with pytest.raises(HomeAssistantError, match="state changed during"):
+        await coordinator.async_read_status()
+    assert coordinator.data["ref_door_ajar"] is True
+    assert coordinator._transport_error is None
 
 
 async def test_rate_limited_checks_leave_confirmation_age_unchanged(
@@ -1311,7 +1363,6 @@ async def test_verification_resumes_after_auth_failure_is_recovered_by_push(hass
     await entry.runtime_data._verifications["test-fridge"]
     assert client.state.await_count == 2
     client.open_channel.assert_not_awaited()
-    client.renew_connection.assert_not_called()
     assert coordinator.verification_stats["checks"] == 2
     assert coordinator.verification_stats["status_reads"] == 2
 

@@ -842,22 +842,24 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 # snapshot that rescued a failed GET.
                 reference = data if received else self._read_snapshot
                 observed_keys = partial_keys if received else updates.keys()
+                # Clock and signal readings differ between any two observations.
                 conflicted = reference is not None and any(
                     key not in reference
                     or updates[key] != reference[key]
                     or type(updates[key]) is not type(reference[key])
-                    for key in observed_keys - {"notifs"}
+                    for key in observed_keys - {"notifs", "time", "uptime", "ap_rssi"}
                 )
                 model = updates.get("appliance_model")
                 if (
                     received
-                    and not conflicted
                     and transport_generation == self._transport_generation
                     and (not model or model == data.get("appliance_model"))
                 ):
-                    # With push back, the reply replaces cached state, so a key it
-                    # lacks cannot leave the appliance waiting on reconnect forever.
-                    if self._confirm_state(data, "read") or self.client.push_connected:
+                    # With push back, the reply and newer updates replace cached state,
+                    # so a key it lacks or a change during it cannot leave the
+                    # appliance waiting on reconnect forever.
+                    complete = not conflicted and self._confirm_state(data, "read")
+                    if complete or self.client.push_connected:
                         self._async_confirm_transport_state()
                 self.unrecognized_keys.update(data.keys() - STATE_KEYS)
                 if "notifs" in data:

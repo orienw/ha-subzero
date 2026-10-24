@@ -188,7 +188,7 @@ Background read failures preserve otherwise available state while push remains c
 
 Concurrent callers share reads. Cancelling a caller does not interrupt a read needed by others. `homeassistant.update_entity` also waits for a read; use the Sub-Zero action when failed confirmation must stop an automation.
 
-**State confirmed** advances for a successful status read or full push snapshot covering known state. Notification history is not required. Individual updates and cached data retained after failed reads do not advance it. A conflicting partial still reaches Home Assistant, but prevents the read from certifying the merged state. Later conflicting updates also prevent confirmation when a complete push snapshot rescues a failed GET.
+**State confirmed** advances for a successful status read or full push snapshot covering known state. Notification history is not required. Individual updates and cached data retained after failed reads do not advance it. A conflicting partial still reaches Home Assistant, but prevents the read from certifying the merged state. Later conflicting updates also prevent confirmation when a complete push snapshot rescues a failed GET. Clock, uptime, and Wi-Fi signal readings change between any two observations, so they never count as conflicts.
 
 A full snapshot for the same model is ignored when its usable clock and uptime both regress by at least one minute. This guard does not order partial updates, which retain arrival order. Periodic checks can repair current state; they cannot reconstruct undelivered brief events or guarantee freshness during cloud failures.
 
