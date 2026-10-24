@@ -523,8 +523,12 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         result = await self.async_read_status()
         for _ in range(2):
             if not (result.superseded and result.missing_keys):
-                break
+                return
             result = await self.async_read_status()
+        if result.superseded and result.missing_keys:
+            raise HomeAssistantError(
+                "The push connection kept changing during the status read; try again."
+            )
 
     async def _async_confirm_command_generation(self) -> None:
         if self._command_generation != self._transport_generation:

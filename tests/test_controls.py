@@ -15,6 +15,7 @@ from custom_components.subzero.api import ApiError, Appliance, StateUpdate, toke
 from custom_components.subzero.auth import InvalidAuth
 from custom_components.subzero.const import DOMAIN
 from custom_components.subzero.controls import is_wine, supports_control, temperature_range
+from custom_components.subzero.coordinator import StateRead
 
 pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
 
@@ -776,6 +777,57 @@ async def test_control_waits_for_a_read_that_stands_when_a_reduced_snapshot_supe
     controls.client.set_property.assert_not_awaited()
     assert coordinator.data["max_ice_on"] is True
     assert controls.client.state.await_count >= 2
+
+
+async def test_control_gives_up_after_three_superseded_reads(controls):
+    coordinator = controls.entry.runtime_data.coordinators["test-fridge"]
+    superseded = StateRead(1, dt_util.utcnow(), missing_keys=("max_ice_on",), superseded=True)
+    coordinator.async_read_status = AsyncMock(return_value=superseded)
+    with pytest.raises(HomeAssistantError, match="kept changing"):
+        await coordinator._async_read_for_control()
+    assert coordinator.async_read_status.await_count == 3
+
+    standing = StateRead(2, dt_util.utcnow())
+    coordinator.async_read_status = AsyncMock(side_effect=[superseded, superseded, standing])
+    await coordinator._async_read_for_control()
+    assert coordinator.async_read_status.await_count == 3
+
+
+async def test_control_does_not_write_while_every_read_is_superseded_by_a_reduced_snapshot(
+    hass, controls
+):
+    coordinator = controls.entry.runtime_data.coordinators["test-fridge"]
+    controls.states["test-fridge"]["max_ice_on"] = True
+    flapping = True
+
+    async def read(device_id):
+        state = dict(controls.states[device_id])
+        if flapping and controls.client.state.await_count <= 8:
+            # The connection drops and a snapshot lacking Max Ice replaces state
+            # during every request, superseding each complete reply. The follow-up
+            # reads those snapshots start interleave with the control's own.
+            coordinator.async_transport_error(ApiError("Stream disconnected"))
+            coordinator.apply_update(
+                StateUpdate(
+                    {key: value for key, value in state.items() if key != "max_ice_on"}, full=True
+                )
+            )
+        return state
+
+    controls.client.state.reset_mock()
+    controls.client.state.side_effect = read
+    coordinator.async_transport_error(ApiError("Stream disconnected"))
+    # Whether the control runs out of reads, sees the connection change under one, or
+    # finally gets a read that stands and shows Max Ice on, no write goes out against
+    # state without the key.
+    with pytest.raises(ServiceValidationError, match="try again|Max Ice"):
+        await coordinator.async_set_properties({"frz_set_temp": 1})
+    flapping = False
+    controls.client.set_property.assert_not_awaited()
+    assert controls.client.state.await_count >= 2
+    await hass.async_block_till_done()
+    assert coordinator.data["max_ice_on"] is True
+    assert coordinator.last_update_success
 
 
 async def test_disconnect_between_ordered_writes_rechecks_the_next_setting(hass, controls):
