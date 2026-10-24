@@ -43,6 +43,27 @@ def is_finite_number(value) -> bool:
     return type(value) in (int, float) and math.isfinite(value)
 
 
+def uptime_seconds(value: str) -> int | None:
+    """Read hours:minutes:seconds uptime.
+
+    Appliances cut uptime to eight characters, so from 100 hours they drop its last
+    digits, such as 387:52:1 for 387:52:1x. The missing digits count as zeros.
+    """
+    hours, separator, rest = value.partition(":")
+    if not separator:
+        return None
+    if len(value) == 8 and len(hours) > 2:
+        rest += "00:00"[len(rest) :]
+    try:
+        minutes, seconds = map(int, rest.split(":"))
+        total_hours = int(hours)
+    except ValueError:
+        return None
+    if total_hours < 0 or not 0 <= minutes < 60 or not 0 <= seconds < 60:
+        return None
+    return total_hours * 3600 + minutes * 60 + seconds
+
+
 def appliance_type(data: dict) -> tuple[int, int, int, int] | None:
     value = data.get("appliance_type")
     if not isinstance(value, str):
@@ -297,6 +318,13 @@ def control_matches(
             ready = key.replace("unit_on", "remote_ready")
             if ready in data and data[ready] is not False:
                 return False
+        if (
+            key == "wash_cycle_on"
+            and value is False
+            and data.get("delay_start_timer_active") is True
+        ):
+            # A delayed start can report the cycle off before cancellation.
+            return False
         return data.get(key) == value and isinstance(data.get(key), bool) == isinstance(value, bool)
     prefix = KITCHEN_TIMERS[key]
     if value == 0:

@@ -1,6 +1,8 @@
 """Dedicated ice-maker discovery, scheduling, and read-only cleaning state."""
 
 import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 import voluptuous as vol
@@ -297,7 +299,10 @@ async def test_schedule_service_tries_the_devices_own_account_then_the_others(
         if broken.get(name) == "unavailable":
             coordinator.last_update_success = False
         elif broken.get(name) == "no delay settings":
+            # An appliance without delay settings never reported them in a status read,
+            # so their absence is not a gap a control should read to fill.
             del coordinator.data["delay_duration"]
+            coordinator._required_state_keys["read"].discard("delay_duration")
         original = coordinator.async_set_ice_delay
 
         async def attempt(*args, name=name, original=original):
@@ -324,6 +329,74 @@ async def test_schedule_service_tries_the_devices_own_account_then_the_others(
         cloud_appliance.client.set_ice_delay.assert_awaited_once_with("appliance", 7200, 0, False)
     assert attempts == tried
     await hass.config_entries.async_unload(other.entry_id)
+
+
+@pytest.mark.parametrize("failure", ["failed_read", "incomplete_read", "after_write"])
+async def test_schedule_service_uses_another_account_only_before_sending(
+    hass, cloud_appliance, tokens, failure
+):
+    other = MockConfigEntry(
+        domain=DOMAIN,
+        version=2,
+        minor_version=3,
+        title="Other account",
+        data={
+            "tokens": token_state(tokens),
+            "devices": {"appliance": {"name": "Kitchen", "temperature_unit": "F"}},
+        },
+    )
+    other.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(other.entry_id)
+    await hass.async_block_till_done()
+    own = cloud_appliance.coordinator
+    stale_client = SimpleNamespace(
+        push_connected=False,
+        state=AsyncMock(return_value=dict(cloud_appliance.state)),
+        set_ice_delay=AsyncMock(),
+    )
+    if failure == "failed_read":
+        stale_client.state.side_effect = ApiError("Status unavailable")
+    elif failure == "incomplete_read":
+        del stale_client.state.return_value["delay_duration"]
+    else:
+        stale_client.set_ice_delay.side_effect = ApiError("Write rejected")
+    own.client = stale_client
+    own.async_transport_error(ApiError("Stream disconnected"))
+    attempts = []
+    for name, coordinator in (
+        ("own", own),
+        ("other", other.runtime_data.coordinators["appliance"]),
+    ):
+        original = coordinator.async_set_ice_delay
+
+        async def attempt(*args, name=name, original=original):
+            attempts.append(name)
+            await original(*args)
+
+        coordinator.async_set_ice_delay = attempt
+    try:
+        request = hass.services.async_call(
+            DOMAIN,
+            "schedule_ice_delay",
+            {"device_id": cloud_appliance.device_id, "duration": 2},
+            blocking=True,
+        )
+        if failure == "after_write":
+            with pytest.raises(HomeAssistantError, match="Write rejected"):
+                await request
+            assert attempts == ["own"]
+            stale_client.set_ice_delay.assert_awaited_once_with("appliance", 7200, 0, False)
+            cloud_appliance.client.set_ice_delay.assert_not_awaited()
+        else:
+            await request
+            assert attempts == ["own", "other"]
+            stale_client.set_ice_delay.assert_not_awaited()
+            cloud_appliance.client.set_ice_delay.assert_awaited_once_with(
+                "appliance", 7200, 0, False
+            )
+        stale_client.state.assert_awaited()
+    finally:
+        await hass.config_entries.async_unload(other.entry_id)
 
 
 async def test_schedule_service_rejects_an_unknown_device(hass, cloud_appliance):

@@ -33,7 +33,13 @@ from .const import (
     WASH_CYCLES,
     WASH_STATUSES,
 )
-from .controls import appliance_datetime, broil_level, is_finite_number, is_ice_maker
+from .controls import (
+    appliance_datetime,
+    broil_level,
+    is_finite_number,
+    is_ice_maker,
+    uptime_seconds,
+)
 from .coordinator import SubZeroCoordinator, SubZeroFaultsCoordinator
 from .entity import SubZeroEntity, async_setup_entities
 
@@ -49,6 +55,13 @@ ENUM_VALUES = {
 }
 # Entities write state in this order within one update, and automations can observe it.
 DESCRIPTIONS = (
+    SensorEntityDescription(
+        key="state_confirmed_at",
+        name="State confirmed",
+        device_class=SensorDeviceClass.TIMESTAMP,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+    ),
     *(
         SensorEntityDescription(
             key=key,
@@ -267,27 +280,6 @@ DESCRIPTIONS = (
 )
 
 
-def uptime_seconds(value: str) -> int | None:
-    """Read hours:minutes:seconds uptime.
-
-    Appliances cut uptime to eight characters, so from 100 hours they drop its last
-    digits, such as 387:52:1 for 387:52:1x. The missing digits count as zeros.
-    """
-    hours, separator, rest = value.partition(":")
-    if not separator:
-        return None
-    if len(value) == 8 and len(hours) > 2:
-        rest += "00:00"[len(rest) :]
-    try:
-        minutes, seconds = map(int, rest.split(":"))
-        total_hours = int(hours)
-    except ValueError:
-        return None
-    if total_hours < 0 or not 0 <= minutes < 60 or not 0 <= seconds < 60:
-        return None
-    return total_hours * 3600 + minutes * 60 + seconds
-
-
 async def async_setup_entry(
     hass: HomeAssistant, entry: SubZeroConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
@@ -297,7 +289,10 @@ async def async_setup_entry(
         DESCRIPTIONS,
         SubZeroSensor,
         lambda coordinator, description: (
-            (description.key == "live_reporting_mode" or description.key in coordinator.data)
+            (
+                description.key in {"live_reporting_mode", "state_confirmed_at"}
+                or description.key in coordinator.data
+            )
             and (
                 description.device_class != SensorDeviceClass.TEMPERATURE
                 or coordinator.device.get("temperature_unit") in ("F", "C")
@@ -347,11 +342,23 @@ async def async_setup_entry(
 class SubZeroSensor(SubZeroEntity, SensorEntity):
     @property
     def available(self) -> bool:
-        return self.entity_description.key == "live_reporting_mode" or super().available
+        return (
+            self.entity_description.key in {"live_reporting_mode", "state_confirmed_at"}
+            or super().available
+        )
+
+    @property
+    def extra_state_attributes(self) -> dict[str, list[str]] | None:
+        if self.entity_description.key != "state_confirmed_at":
+            return None
+        # The state keys the confirming observation lacked of those its source reports.
+        return {"missing_keys": list(self.coordinator.confirmed_missing_keys)}
 
     @property
     def native_value(self) -> int | float | str | datetime | None:
         key = self.entity_description.key
+        if key == "state_confirmed_at":
+            return self.coordinator.confirmed_at
         if key == "live_reporting_mode":
             return (
                 "Cloud push"

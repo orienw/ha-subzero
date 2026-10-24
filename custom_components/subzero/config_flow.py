@@ -9,6 +9,7 @@ from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_create_clientsession, async_get_clientsession
 from homeassistant.helpers.selector import (
+    BooleanSelector,
     SelectSelector,
     SelectSelectorConfig,
     SelectSelectorMode,
@@ -29,8 +30,8 @@ from .auth import (
     MfaCallTimeout,
     SubZeroLogin,
 )
-from .const import DOMAIN
-from .coordinator import selected_devices
+from .const import CONF_FIREBASE_ALERTS, DOMAIN, STATUS_POLL_INTERVALS
+from .coordinator import firebase_alerts_enabled, selected_devices, status_poll_interval
 
 
 def device_schema(devices: dict, selected: list[str]) -> vol.Schema:
@@ -125,7 +126,8 @@ class SubZeroConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             user_id = client.tokens["user_id"].lower()
             if self.source == config_entries.SOURCE_REAUTH:
                 original = self._get_reauth_entry()
-                if user_id != original.data["tokens"]["user_id"].lower():
+                original_id = original.data["tokens"].get("user_id") or original.unique_id
+                if original_id is None or user_id != original_id.lower():
                     return self.async_abort(reason="wrong_account")
                 return self.async_update_reload_and_abort(
                     original,
@@ -136,7 +138,7 @@ class SubZeroConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 )
             await self.async_set_unique_id(user_id)
             if any(
-                entry.data["tokens"]["user_id"].lower() == user_id
+                (entry.data["tokens"].get("user_id") or entry.unique_id or "").lower() == user_id
                 for entry in self._async_current_entries()
             ):
                 return self.async_abort(reason="already_configured")
@@ -427,7 +429,7 @@ class SubZeroConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return await self.async_step_user()
 
 
-class SubZeroOptionsFlow(config_entries.OptionsFlowWithReload):
+class SubZeroOptionsFlow(config_entries.OptionsFlow):
     _devices: dict[str, dict] | None = None
 
     async def async_step_init(self, user_input=None):
@@ -441,18 +443,18 @@ class SubZeroOptionsFlow(config_entries.OptionsFlowWithReload):
                     entry, data={**entry.data, "tokens": tokens}
                 )
 
-            runtime = getattr(entry, "runtime_data", None)
-            client = (
-                runtime.client
-                if runtime is not None
-                else SubZeroClient(
-                    async_get_clientsession(self.hass),
-                    SUBSCRIPTION_KEY,
-                    entry.data["tokens"],
-                    save_tokens,
-                )
-            )
             try:
+                runtime = getattr(entry, "runtime_data", None)
+                client = (
+                    runtime.client
+                    if runtime is not None
+                    else SubZeroClient(
+                        async_get_clientsession(self.hass),
+                        SUBSCRIPTION_KEY,
+                        entry.data["tokens"],
+                        save_tokens,
+                    )
+                )
                 appliances = await client.appliances()
                 configured = configured_devices(self.hass, entry.entry_id)
                 self._devices = {
@@ -474,9 +476,17 @@ class SubZeroOptionsFlow(config_entries.OptionsFlowWithReload):
             except ApiError:
                 errors["base"] = "cannot_connect"
             if errors:
-                return self.async_show_form(
-                    step_id="init", data_schema=vol.Schema({}), errors=errors
-                )
+                configured = configured_devices(self.hass, entry.entry_id)
+                saved = {
+                    device_id: device
+                    for device_id, device in current.items()
+                    if device_id not in configured
+                }
+                if not saved:
+                    return self.async_show_form(
+                        step_id="init", data_schema=vol.Schema({}), errors=errors
+                    )
+                self._devices = saved
         if user_input is not None and "device_ids" in user_input:
             selected = user_input["device_ids"]
             if not set(selected).issubset(self._devices):
@@ -484,13 +494,39 @@ class SubZeroOptionsFlow(config_entries.OptionsFlowWithReload):
             elif set(selected).intersection(configured_devices(self.hass, entry.entry_id)):
                 return self.async_abort(reason="all_configured")
             else:
-                return self.async_create_entry(
-                    data={"devices": {key: self._devices[key] for key in selected}}
-                )
+                options = {
+                    "devices": {key: self._devices[key] for key in selected},
+                    "status_poll_interval": int(
+                        user_input.get("status_poll_interval", status_poll_interval(entry))
+                    ),
+                }
+                if user_input.get(CONF_FIREBASE_ALERTS, firebase_alerts_enabled(entry)) is True:
+                    options[CONF_FIREBASE_ALERTS] = True
+                if (
+                    entry.state is not config_entries.ConfigEntryState.LOADED
+                    and self.hass.config_entries.async_update_entry(entry, options=options)
+                ):
+                    self.hass.config_entries.async_schedule_reload(entry.entry_id)
+                return self.async_create_entry(data=options)
         return self.async_show_form(
             step_id="init",
             data_schema=device_schema(
                 self._devices, [key for key in current if key in self._devices]
+            ).extend(
+                {
+                    vol.Optional(
+                        CONF_FIREBASE_ALERTS, default=firebase_alerts_enabled(entry)
+                    ): BooleanSelector(),
+                    vol.Required(
+                        "status_poll_interval", default=str(status_poll_interval(entry))
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[str(seconds) for seconds in STATUS_POLL_INTERVALS],
+                            mode=SelectSelectorMode.DROPDOWN,
+                            translation_key="status_poll_interval",
+                        )
+                    ),
+                }
             ),
             errors=errors,
         )

@@ -213,14 +213,13 @@ async def test_reload_baselines_previously_received_events(hass, cloud_appliance
     assert not event_changes(events)
 
 
-async def test_first_history_is_a_baseline_even_from_a_fast_clock(hass, cloud_appliance):
-    del cloud_appliance.state["notifs"]
+async def test_startup_history_is_a_baseline_even_from_a_fast_clock(hass, cloud_appliance):
+    ahead = dt_util.utcnow() + timedelta(minutes=5)
+    cloud_appliance.state["notifs"] = [record(1, 201, ahead)]
     await hass.config_entries.async_reload(cloud_appliance.entry.entry_id)
     await hass.async_block_till_done()
     events = async_capture_events(hass, "state_changed")
     coordinator = cloud_appliance.entry.runtime_data.coordinators["appliance"]
-    ahead = dt_util.utcnow() + timedelta(minutes=5)
-    cloud_appliance.state["notifs"] = [record(1, 201, ahead)]
     await coordinator.async_refresh()
     await hass.async_block_till_done()
     assert not event_changes(events)
@@ -280,3 +279,39 @@ async def test_events_in_a_repeated_hour_are_identified_by_instant(hass, cloud_a
     )
     [event] = event_changes(events)
     assert event.attributes["appliance_timestamp"] == "2037-11-01T01:10:00-07:00"
+
+
+@pytest.mark.parametrize("model_changed", [False, True])
+async def test_read_history_survives_a_concurrent_notification_push(
+    hass, cloud_appliance, model_changed
+):
+    import asyncio
+
+    coordinator = cloud_appliance.coordinator
+    first = record(1, 201)
+    second = record(2, 202, dt_util.utcnow() + timedelta(seconds=1))
+    observed = []
+    coordinator.async_add_event_listener(observed.append)
+    cloud_appliance.state["notifs"] = [first, second]
+    reading, release = asyncio.Event(), asyncio.Event()
+
+    async def read(_device_id):
+        snapshot = dict(cloud_appliance.state)
+        reading.set()
+        await release.wait()
+        return snapshot
+
+    cloud_appliance.client.state.side_effect = read
+    pending = asyncio.create_task(coordinator.async_read_status())
+    await reading.wait()
+    await cloud_appliance.update(
+        {
+            **cloud_appliance.state,
+            "notifs": [first],
+            "appliance_model": "NEW-MODEL" if model_changed else "TEST-OVEN",
+        },
+        full=model_changed,
+    )
+    release.set()
+    await pending
+    assert [event["code"] for event in observed] == ([201] if model_changed else [201, 202])

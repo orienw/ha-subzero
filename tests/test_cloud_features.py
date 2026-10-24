@@ -8,13 +8,18 @@ from unittest.mock import AsyncMock, call, patch
 
 import pytest
 from homeassistant.components.climate import ClimateEntityFeature
+from homeassistant.config_entries import RELOAD_AFTER_UPDATE_DELAY
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_system import METRIC_SYSTEM, US_CUSTOMARY_SYSTEM
-from pytest_homeassistant_custom_component.common import MockConfigEntry, async_capture_events
+from pytest_homeassistant_custom_component.common import (
+    MockConfigEntry,
+    async_capture_events,
+    async_fire_time_changed,
+)
 
 from custom_components.subzero.api import (
     ApiError,
@@ -33,6 +38,7 @@ from custom_components.subzero.diagnostics import (
 )
 from custom_components.subzero.sensor import DESCRIPTIONS as SENSOR_DESCRIPTIONS
 from custom_components.subzero.sensor import SubZeroSensor, uptime_seconds
+from tests.test_integration import loaded as loaded
 
 pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
 
@@ -1258,6 +1264,47 @@ async def test_dishwasher_cancel_needs_confirmation_but_not_remote_ready(hass, a
     ] * (1 if accept else 3)
 
 
+@pytest.mark.parametrize("confirmation", ["push", "read", "never"])
+async def test_delayed_wash_cancel_requires_the_delay_to_end(hass, appliances, confirmation):
+    await appliances.update(
+        "dishwasher",
+        {"wash_cycle_on": False, "wash_status": 7, "delay_start_timer_active": True},
+    )
+
+    delay_ends = confirmation != "never"
+    reads = appliances.client.state.await_count
+
+    async def cancel(device_id, key, value):
+        properties = {
+            "wash_cycle_on": False,
+            "wash_status": 4 if delay_ends else 7,
+            "delay_start_timer_active": not delay_ends,
+        }
+        appliances.states[device_id].update(properties)
+        if confirmation == "read":
+            properties = {"wash_cycle_on": False}
+        await appliances.updates.put((device_id, StateUpdate(properties, full=False)))
+
+    appliances.client.set_property.side_effect = cancel
+    entity_id = "button.dishwasher_cancel_wash_cycle"
+    if delay_ends:
+        await hass.services.async_call("button", "press", {"entity_id": entity_id}, blocking=True)
+    else:
+        with pytest.raises(HomeAssistantError, match="did not confirm"):
+            await hass.services.async_call(
+                "button", "press", {"entity_id": entity_id}, blocking=True
+            )
+    assert appliances.client.set_property.await_args_list == [
+        call("dishwasher", "wash_cycle_on", False)
+    ] * (1 if delay_ends else 3)
+    await hass.async_block_till_done()
+    assert appliances.entry.runtime_data.coordinators["dishwasher"].data[
+        "delay_start_timer_active"
+    ] == (not delay_ends)
+    if confirmation == "read":
+        assert appliances.client.state.await_count == reads + 1
+
+
 async def test_dishwasher_cancel_follows_wash_status(hass, appliances):
     entity_id = "button.dishwasher_cancel_wash_cycle"
     for status in (0, 6):
@@ -1866,6 +1913,43 @@ async def test_optional_entities_report_native_values(appliances):
     assert reporting.native_value == "Cloud push"
     appliances.client.push_connected = False
     assert reporting.native_value == "Disconnected"
+
+
+async def test_live_reporting_mode_updates_during_transport_grace(
+    hass, loaded, freezer, monkeypatch
+):
+    entry, client, updates, _, _ = loaded
+    monkeypatch.setattr("custom_components.subzero.coordinator.random.uniform", lambda *_: 0)
+    entity_id = "sensor.kitchen_live_reporting_mode"
+    er.async_get(hass).async_update_entity(entity_id, disabled_by=None)
+    await hass.async_block_till_done()
+    freezer.tick(RELOAD_AFTER_UPDATE_DELAY + 1)
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+    assert hass.states.get(entity_id).state == "Cloud push"
+
+    await updates.put(ApiError("Stream disconnected"))
+    await hass.async_block_till_done()
+    assert not client.push_connected
+    assert entry.runtime_data.coordinators["test-fridge"].last_update_success
+    assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "38"
+    assert hass.states.get(entity_id).state == "Disconnected"
+
+    client.state.side_effect = ApiError("Status unavailable")
+    freezer.tick(31)
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+    assert client.push_connected
+    await updates.put(StateUpdate({"ref_set_temp": 39}, full=False))
+    await hass.async_block_till_done()
+    assert hass.states.get(entity_id).state == "Cloud push"
+
+    await updates.put(ApiError("Stream disconnected again"))
+    await hass.async_block_till_done()
+    assert not client.push_connected
+    assert entry.runtime_data.coordinators["test-fridge"].last_update_success
+    assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "39"
+    assert hass.states.get(entity_id).state == "Disconnected"
 
 
 @pytest.mark.parametrize(

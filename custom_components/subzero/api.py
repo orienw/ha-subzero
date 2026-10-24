@@ -9,7 +9,7 @@ import random
 import time
 import uuid
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection
 from contextlib import aclosing
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -34,6 +34,7 @@ API_BASE = "https://prod.iot.subzero.com"
 SIGNALR_ORIGIN = "https://sznacasigprod.service.signalr.net"
 SEPARATOR = "\x1e"
 PING_INTERVAL = 15
+CHANNEL_REOPEN_INTERVAL = 30 * 60
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -138,6 +139,12 @@ def token_state(tokens: dict, previous: dict | None = None) -> dict:
         "expires_at": expires_at,
         "user_id": user_id.lower(),
         "api_user_id": user_id,
+        # Every form of the account id the token carries; a pushed frame may name either.
+        "account_ids": sorted(
+            value.lower()
+            for value in {claims.get("mergedId"), claims.get("sub")}
+            if isinstance(value, str) and value
+        ),
     }
     if identity is not None:
         state["id_token"] = identity
@@ -259,16 +266,23 @@ def notification_records(properties: dict) -> list[dict]:
 
 
 def parse_notification(
-    event: dict, user_id: str, device_ids: list[str]
+    event: dict, account_ids: str | Collection[str], device_ids: list[str]
 ) -> tuple[str, StateUpdate | None] | None:
-    """Read state from response, property-change, or root payloads."""
+    """Read state from response, property-change, or root payloads.
+
+    A legacy two-argument frame names the account it is for, in whichever form of
+    the account id the service chose.
+    """
     if event.get("type") != 1 or event.get("target") != "ConnectedApplianceMessage":
         return None
     arguments = event.get("arguments", [])
     if not isinstance(arguments, list):
         raise ApiError("Sub-Zero sent invalid notification arguments.")
     if len(arguments) == 2:
-        if not isinstance(arguments[0], str) or arguments[0].lower() != user_id.lower():
+        accepted = {account_ids} if isinstance(account_ids, str) else set(account_ids)
+        if not isinstance(arguments[0], str) or arguments[0].lower() not in {
+            account_id.lower() for account_id in accepted
+        }:
             _LOGGER.debug("Ignoring a notification addressed to another account")
             return None
         envelope = _object(arguments[1])
@@ -291,11 +305,29 @@ def parse_notification(
         return None
     properties = _object(message.get("pload"))
     message_type = message.get("type")
+    timestamp = properties.get("timestamp")
+    timestamp_type = type(timestamp).__name__
+    if isinstance(timestamp, str):
+        try:
+            timestamp = datetime.fromisoformat(timestamp).isoformat()
+        except ValueError:
+            timestamp = None
+    elif type(timestamp) not in (int, float) or (
+        type(timestamp) is float and not math.isfinite(timestamp)
+    ):
+        timestamp = None
+    sequence = properties.get("seq")
     _LOGGER.debug(
-        "Appliance %d notification: type=%s, payload keys=%s",
+        "Appliance %d notification: type=%s, payload keys=%s, "
+        "timestamp=%s (%s), seq=%s (%s), arguments=%d",
         device_ids.index(device_id) + 1,
         message_type if isinstance(message_type, int) else "unknown",
         sorted(properties),
+        timestamp,
+        timestamp_type,
+        sequence if type(sequence) is int else None,
+        type(sequence).__name__,
+        len(arguments),
     )
     wrapper = "root"
     for key in ("resp", "props"):
@@ -324,6 +356,25 @@ def parse_notification(
     return device_id, StateUpdate(properties, full=full)
 
 
+def _log_notification_frame(
+    websocket: aiohttp.ClientWebSocketResponse, message: aiohttp.WSMessage, phase: str
+) -> None:
+    error = message.data if message.type == aiohttp.WSMsgType.ERROR else websocket.exception()
+    reason = (
+        message.extra[:256]
+        if message.type == aiohttp.WSMsgType.CLOSE and isinstance(message.extra, str)
+        else None
+    )
+    _LOGGER.debug(
+        "Notification %s: frame_type=%s close_code=%s reason=%r exception=%s",
+        phase,
+        message.type.name,
+        websocket.close_code,
+        reason,
+        type(error).__name__ if error is not None else None,
+    )
+
+
 class SubZeroClient:
     """One account's API token and connection; passwords are not needed."""
 
@@ -349,6 +400,11 @@ class SubZeroClient:
             "ignored": 0,
             "invalid": 0,
             "last_received": None,
+            # When the current connection completed its handshake, and when it last
+            # received any frame, heartbeats included. A quiet channel on a connection
+            # that still receives heartbeats is not a dead connection.
+            "connected_at": None,
+            "last_frame_received": None,
         }
         # Any message from a selected appliance, including ones without state, shows
         # that its update channel is still delivering.
@@ -366,6 +422,7 @@ class SubZeroClient:
         token_request=False,
         appliance_command=False,
         list_response=False,
+        any_response=False,
         headers: dict[str, str] | None = None,
         **kwargs,
     ) -> dict | list:
@@ -387,7 +444,7 @@ class SubZeroClient:
                 if response.status in (401, 403) or (token_request and response.status == 400):
                     raise InvalidAuth("Sub-Zero requires a new sign-in.")
                 if appliance_command and (200 <= response.status < 300 or response.status == 500):
-                    body = (await response.text()).strip()
+                    body = (await response.text(errors="replace")).strip()
                     if response.status < 300 and body in ("", "OK", '"OK"'):
                         return {}
                     try:
@@ -406,6 +463,13 @@ class SubZeroClient:
                     raise ApiError(
                         f"Sub-Zero returned HTTP {response.status}.", status=response.status
                     )
+                if any_response:
+                    # Alert endpoints return an ID, a boolean, a list, or no body.
+                    body = (await response.text(errors="replace")).strip()
+                    try:
+                        return json.loads(body) if body else None
+                    except ValueError:
+                        raise ApiError("Sub-Zero returned an invalid API response.") from None
                 try:
                     payload = await response.json(content_type=None)
                     if list_response:
@@ -446,6 +510,7 @@ class SubZeroClient:
         path: str,
         *,
         user_id: str | None = None,
+        extra_headers: dict[str, str] | None = None,
         list_response=False,
         **kwargs,
     ) -> dict | list:
@@ -456,6 +521,7 @@ class SubZeroClient:
             "Ocp-Apim-Subscription-Key": self.subscription_key,
             "Userid": user_id or self.tokens["api_user_id"],
             "Accept": "application/json",
+            **(extra_headers or {}),
         }
         try:
             return await self._json(
@@ -604,6 +670,103 @@ class SubZeroClient:
             metadata["resolution_steps"] = "\n".join(steps)
         return metadata or None
 
+    async def _alerts_request(self, method: str, path: str, psid: str | None = None, **kwargs):
+        """Send a phone alert request the way the app does, with its device ID as `uuid`."""
+        result = await self._request(
+            method,
+            "/consumerapp/api/notification" + path,
+            extra_headers={"uuid": psid} if psid else None,
+            any_response=True,
+            **kwargs,
+        )
+        if method != "GET" and result is False:
+            raise ApiError("Sub-Zero declined the alert subscription change.")
+        return result
+
+    async def alert_registration(self, psid: str, device_id: str) -> dict | None:
+        """Return the alert registration of a phone ID for an appliance, if there is one.
+
+        Like the app, read the response as a list and take the appliance's record.
+        """
+        try:
+            data = await self._alerts_request(
+                "GET",
+                f"/registrations/devices/{quote(psid, safe='')}/appliances/"
+                + quote(device_id, safe=""),
+                psid,
+            )
+        except ApiError as error:
+            if error.status == 404:
+                return None
+            raise
+        return next(
+            (
+                record
+                for record in (data if isinstance(data, list) else [data])
+                if isinstance(record, dict)
+                and isinstance(record.get("id"), str)
+                and record.get("deviceId", device_id) == device_id
+                and record.get("psid", psid) == psid
+            ),
+            None,
+        )
+
+    async def register_for_alerts(self, registration: dict, *, update: bool) -> None:
+        """Create or update an appliance's alert registration, as the app does."""
+        await self._alerts_request("PUT" if update else "POST", "/registrations", json=registration)
+
+    async def alert_types(self, psid: str, device_id: str) -> set[int]:
+        """Return the alert codes a phone ID receives for an appliance."""
+        data = await self._alerts_request(
+            "GET",
+            f"/devices/{quote(psid, safe='')}/appliances/{quote(device_id, safe='')}/events",
+            psid,
+        )
+        if not isinstance(data, list):
+            raise ApiError("Sub-Zero returned invalid alert subscriptions.")
+        codes = set()
+        for item in data:
+            value = item.get("valueType") if isinstance(item, dict) else None
+            if not isinstance(value, int | str) or not str(value).isdecimal():
+                raise ApiError("Sub-Zero returned invalid alert subscriptions.")
+            codes.add(int(value))
+        return codes
+
+    async def subscribe_alerts(self, psid: str, device_id: str, keys: dict[int, str]) -> None:
+        """Receive the given alert codes, each with the app's localization key."""
+        await self._alerts_request(
+            "POST",
+            f"/devices/{quote(psid, safe='')}/events",
+            psid,
+            json=[
+                {
+                    "deviceId": device_id,
+                    "mutable_content": False,
+                    "valueType": code,
+                    "body_loc_key": key,
+                    "sound": None,
+                    "clickAction": None,
+                }
+                for code, key in sorted(keys.items())
+            ],
+        )
+
+    async def unsubscribe_alerts(self, psid: str, device_id: str, codes: set[int]) -> None:
+        await self._alerts_request(
+            "DELETE",
+            f"/devices/{quote(psid, safe='')}/events/type",
+            psid,
+            json={"valueTypes": [str(code) for code in sorted(codes)], "deviceId": device_id},
+        )
+
+    async def unsubscribe_all_alerts(self, psid: str, device_id: str) -> None:
+        """Stop every alert to a phone ID for an appliance.
+
+        No request removes the registration itself, so this is all the cleanup there is.
+        """
+        if codes := await self.alert_types(psid, device_id):
+            await self.unsubscribe_alerts(psid, device_id, codes)
+
     async def watch(
         self, device_ids: list[str]
     ) -> AsyncIterator[tuple[str, StateUpdate | ApiError | ChannelOpened]]:
@@ -655,11 +818,26 @@ class SubZeroClient:
                 await websocket.send_str('{"protocol":"json","version":1}' + SEPARATOR)
                 first = await websocket.receive(timeout=20)
                 if first.type != aiohttp.WSMsgType.TEXT or SEPARATOR not in first.data:
+                    _log_notification_frame(websocket, first, "handshake incomplete")
                     raise ApiError("Sub-Zero did not complete the notification handshake.")
                 handshake, pending = first.data.split(SEPARATOR, 1)
-                if _object(handshake) != {}:
+                try:
+                    handshake = _object(handshake)
+                except ApiError:
+                    _log_notification_frame(websocket, first, "handshake invalid")
+                    raise
+                if handshake != {}:
+                    _log_notification_frame(websocket, first, "handshake rejected")
+                    error = handshake.get("error")
+                    _LOGGER.debug(
+                        "SignalR notification handshake rejected: error=%r",
+                        error[:256] if isinstance(error, str) else None,
+                    )
                     raise ApiError("Sub-Zero rejected the notification handshake.")
                 self.push_connected = True
+                connected_at = datetime.now(UTC).isoformat()
+                self.notification_stats["connected_at"] = connected_at
+                self.notification_stats["last_frame_received"] = connected_at
                 channel_events: deque[tuple[str, ApiError | ChannelOpened]] = deque()
                 pending_channels = set(device_ids)
 
@@ -685,9 +863,36 @@ class SubZeroClient:
                             await asyncio.sleep(backoff + random.uniform(0, 5))
                             backoff = min(backoff * 2, MAX_RECONNECT_DELAY)
 
+                async def reopen_channels() -> None:
+                    delay = CHANNEL_REOPEN_INTERVAL
+                    while True:
+                        await asyncio.sleep(delay)
+                        delay = CHANNEL_REOPEN_INTERVAL
+                        for index, device_id in enumerate(device_ids, 1):
+                            if device_id in pending_channels:
+                                continue
+                            _LOGGER.debug("Reopening update channel for appliance %d", index)
+                            try:
+                                await self.open_channel(device_id)
+                            except RateLimited as error:
+                                delay = max(delay, error.retry_after)
+                                _LOGGER.debug("Update channel reopen deferred: %s", error)
+                                break
+                            except ApiError as error:
+                                _LOGGER.debug(
+                                    "Could not reopen update channel for appliance %d: %s",
+                                    index,
+                                    error,
+                                )
+                            else:
+                                _LOGGER.debug(
+                                    "Update channel reopen accepted for appliance %d", index
+                                )
+
                 opening = asyncio.create_task(open_channels())
+                reopening = asyncio.create_task(reopen_channels())
                 receiving = asyncio.create_task(websocket.receive())
-                tasks = {opening, receiving}
+                tasks = {opening, reopening, receiving}
                 try:
                     next_ping = time.monotonic() + PING_INTERVAL
                     last_received = time.monotonic()
@@ -705,6 +910,14 @@ class SubZeroClient:
                                 _LOGGER.debug("Skipping invalid notification frame: %s", error)
                                 continue
                             if event.get("type") == 7:
+                                error = event.get("error")
+                                reconnect = event.get("allowReconnect")
+                                _LOGGER.debug(
+                                    "SignalR closed notification connection: "
+                                    "error=%r allowReconnect=%s",
+                                    error[:256] if isinstance(error, str) else None,
+                                    reconnect if isinstance(reconnect, bool) else None,
+                                )
                                 raise ApiError("Sub-Zero closed the notification connection.")
                             if (
                                 event.get("type") != 1
@@ -715,7 +928,7 @@ class SubZeroClient:
                             self.notification_stats["last_received"] = datetime.now(UTC).isoformat()
                             try:
                                 parsed = parse_notification(
-                                    event, self.tokens["user_id"], device_ids
+                                    event, self.tokens["account_ids"], device_ids
                                 )
                             except ApiError as error:
                                 self.notification_stats["invalid"] += 1
@@ -746,21 +959,33 @@ class SubZeroClient:
                         if opening.done():
                             opening.result()
                             tasks.discard(opening)
+                        if reopening.done():
+                            reopening.result()
                         if not receiving.done():
                             continue
                         message = receiving.result()
                         if message.type != aiohttp.WSMsgType.TEXT:
+                            _log_notification_frame(websocket, message, "disconnected")
                             raise ApiError("Sub-Zero's notification connection disconnected.")
                         tasks.remove(receiving)
                         receiving = asyncio.create_task(websocket.receive())
                         tasks.add(receiving)
                         last_received = time.monotonic()
+                        self.notification_stats["last_frame_received"] = datetime.now(
+                            UTC
+                        ).isoformat()
                         pending += message.data
                         if len(pending) > 262144:
                             raise ApiError("Sub-Zero sent an oversized notification.")
                 finally:
                     opening.cancel()
+                    reopening.cancel()
                     receiving.cancel()
-                    await asyncio.gather(opening, receiving, return_exceptions=True)
-        except aiohttp.ClientError, TimeoutError:
+                    await asyncio.gather(opening, reopening, receiving, return_exceptions=True)
+        except (aiohttp.ClientError, TimeoutError) as error:
+            _LOGGER.debug(
+                "Notification transport failed: exception=%s status=%s",
+                type(error).__name__,
+                error.status if isinstance(error, aiohttp.WSServerHandshakeError) else None,
+            )
             raise ApiError("Could not maintain Sub-Zero's notification connection.") from None

@@ -4,11 +4,13 @@ import asyncio
 import base64
 import json
 import logging
+import time
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
+import jwt
 import pytest
 from aiohttp import web
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -52,6 +54,28 @@ def test_notifications_keep_falsy_values(legacy):
         "test-fridge",
         api.StateUpdate(properties, full=False),
     )
+
+
+def test_legacy_frames_accept_either_account_id_form():
+    tokens = {
+        "access_token": jwt.encode(
+            {"mergedId": "Merged-Id", "sub": "Sub-Id", "exp": int(time.time()) + 3600},
+            "synthetic-key-for-tests-only-32-bytes",
+            algorithm="HS256",
+        ),
+        "refresh_token": "test-refresh",
+    }
+    state = api.token_state(tokens)
+    assert state["user_id"] == "merged-id"
+    assert state["account_ids"] == ["merged-id", "sub-id"]
+    for user in ("MERGED-ID", "sub-id"):
+        event = notification({"ref_door_ajar": True}, user=user)
+        assert api.parse_notification(event, state["account_ids"], ["test-fridge"]) == (
+            "test-fridge",
+            api.StateUpdate({"ref_door_ajar": True}, full=False),
+        )
+    event = notification({"ref_door_ajar": True}, user="other")
+    assert api.parse_notification(event, state["account_ids"], ["test-fridge"]) is None
 
 
 def test_notifications_from_other_accounts_are_ignored(caplog):
@@ -173,6 +197,45 @@ def test_notification_logs_show_structure_without_private_payload_values(caplog)
         "test-fridge",
     ]:
         assert value not in caplog.text
+
+
+@pytest.mark.parametrize("timestamp", ["2026-10-22T10:54:17.000-07:00", 1792691657, 1792691657.312])
+def test_notification_logs_keep_source_order_metadata(caplog, timestamp):
+    caplog.set_level(logging.DEBUG, logger="custom_components.subzero.api")
+    properties = {"ref_door_ajar": False}
+    event = notification({}, pload={"props": properties, "timestamp": timestamp, "seq": 42})
+    assert api.parse_notification(event, "owner", ["test-fridge"]) == (
+        "test-fridge",
+        api.StateUpdate(properties, full=False),
+    )
+    logged_timestamp = (
+        datetime.fromisoformat(timestamp).isoformat() if isinstance(timestamp, str) else timestamp
+    )
+    assert f"timestamp={logged_timestamp} ({type(timestamp).__name__})" in caplog.text
+    assert "seq=42 (int), arguments=1" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("timestamp", "sequence"),
+    [
+        ("private-timestamp", "private-sequence"),
+        ({"secret": "private-timestamp"}, ["private-sequence"]),
+        (True, False),
+        (float("nan"), None),
+    ],
+)
+def test_notification_logs_redact_invalid_order_metadata(caplog, timestamp, sequence):
+    caplog.set_level(logging.DEBUG, logger="custom_components.subzero.api")
+    properties = {"ref_door_ajar": False}
+    event = notification({}, pload={"props": properties, "timestamp": timestamp, "seq": sequence})
+    assert api.parse_notification(event, "owner", ["test-fridge"]) == (
+        "test-fridge",
+        api.StateUpdate(properties, full=False),
+    )
+    assert "timestamp=None" in caplog.text
+    assert "seq=None" in caplog.text
+    assert "private-timestamp" not in caplog.text
+    assert "private-sequence" not in caplog.text
 
 
 def test_property_changes_are_read_from_alert_payloads():
@@ -632,6 +695,8 @@ async def control_server(aiohttp_server, monkeypatch, socket_enabled, tokens):
         )
         if isinstance(response, str):
             return web.Response(text=response, status=status)
+        if isinstance(response, bytes):
+            return web.Response(body=response, status=status, content_type="application/json")
         return web.json_response(response, status=status, headers={"Retry-After": "300"})
 
     app = web.Application()
@@ -664,6 +729,15 @@ async def test_accepted_channel_opening_returns_quietly(hass, control_server, to
     control_server["response"] = response
     client = api.SubZeroClient(async_get_clientsession(hass), "test-key", tokens)
     await client.open_channel("test-fridge")
+
+
+@pytest.mark.parametrize("status", [200, 500])
+async def test_invalid_command_encoding_is_an_api_error(hass, control_server, tokens, status):
+    control_server.update(status=status, response=b"\xff\xfe")
+    client = api.SubZeroClient(async_get_clientsession(hass), "test-key", tokens)
+    with pytest.raises(api.ApiError):
+        await client.open_channel("test-fridge")
+    assert len(control_server["requests"]) == 1
 
 
 async def test_control_writes_use_the_authenticated_app_envelope(hass, control_server, tokens):
@@ -871,7 +945,7 @@ def test_notification_expiry_is_independent_of_account_token(monkeypatch):
 
 @pytest.mark.parametrize("user_id", ["test-owner", "TEST-OWNER"])
 async def test_live_signalr_socket_is_renewed_before_token_expiry(
-    hass, aiohttp_server, monkeypatch, socket_enabled, user_id
+    hass, aiohttp_server, monkeypatch, socket_enabled, user_id, channel_reopen_waits
 ):
     sockets = []
     commands = []
@@ -933,9 +1007,33 @@ async def test_live_signalr_socket_is_renewed_before_token_expiry(
         assert len(sockets) == 2 and sockets[0].closed
         assert commands == ["open_cloud_async", "open_cloud_async"]
         assert pings
+        first_delay, first_reopen = await channel_reopen_waits.get()
+        second_delay, second_reopen = await channel_reopen_waits.get()
+        assert first_delay == second_delay == 1800
+        assert first_reopen.cancelled()
+        assert not second_reopen.done()
     finally:
         await stream.aclose()
     assert not client.push_connected
+    assert second_reopen.cancelled()
+
+
+@pytest.fixture
+def channel_reopen_waits(monkeypatch):
+    waits = asyncio.Queue()
+    original_sleep = asyncio.sleep
+
+    async def sleep(delay):
+        if delay < api.CHANNEL_REOPEN_INTERVAL:
+            await original_sleep(delay)
+            return
+        resume = asyncio.get_running_loop().create_future()
+        waits.put_nowait((delay, resume))
+        await resume
+
+    monkeypatch.setattr(api.asyncio, "sleep", sleep)
+    monkeypatch.setattr(api, "PING_INTERVAL", 0.01)
+    return waits
 
 
 @pytest.fixture
@@ -982,6 +1080,148 @@ async def notification_stream(hass, aiohttp_server, monkeypatch, socket_enabled,
     finally:
         await stream.aclose()
         await watch.aclose()
+
+
+async def test_appliance_channels_reopen_without_reconnecting(
+    notification_stream, channel_reopen_waits
+):
+    client, _, _, sockets = notification_stream
+    stream = client.watch(["test-fridge", "test-oven"])
+    try:
+        async with asyncio.timeout(5):
+            assert await anext(stream) == ("test-fridge", api.ChannelOpened())
+            assert await anext(stream) == ("test-oven", api.ChannelOpened())
+            delay, resume = await channel_reopen_waits.get()
+            assert delay == 1800
+
+            # Appliance traffic and heartbeats do not postpone the scheduled reopen.
+            await sockets[0].send_str(
+                '{"type":6}'
+                + api.SEPARATOR
+                + json.dumps(notification({"ref_door_ajar": True}))
+                + api.SEPARATOR
+            )
+            assert await anext(stream) == (
+                "test-fridge",
+                api.StateUpdate({"ref_door_ajar": True}, full=False),
+            )
+            assert client.open_channel.await_count == 2
+            assert not resume.done()
+
+            async def reopen(device_id):
+                await sockets[0].send_str(
+                    json.dumps(notification({"unit_on": True}, device=device_id)) + api.SEPARATOR
+                )
+
+            client.open_channel.side_effect = reopen
+            for cycle in range(2):
+                resume.set_result(None)
+                for device_id in ("test-fridge", "test-oven"):
+                    assert await anext(stream) == (
+                        device_id,
+                        api.StateUpdate({"unit_on": True}, full=False),
+                    )
+                assert client.open_channel.await_count == 4 + cycle * 2
+                delay, resume = await channel_reopen_waits.get()
+                assert delay == 1800
+            assert len(sockets) == 1
+            assert client.push_connected
+            client._request.assert_awaited_once()
+            client._json.assert_awaited_once()
+    finally:
+        await stream.aclose()
+    assert resume.cancelled()
+
+
+async def test_channel_reopen_skips_pending_initial_channels(
+    notification_stream, channel_reopen_waits
+):
+    client, _, _, sockets = notification_stream
+
+    async def open_channel(device_id):
+        if device_id == "test-oven":
+            raise api.ApiError("Offline")
+
+    client.open_channel.side_effect = open_channel
+    stream = client.watch(["test-fridge", "test-oven"])
+    try:
+        async with asyncio.timeout(5):
+            assert await anext(stream) == ("test-fridge", api.ChannelOpened())
+            device_id, error = await anext(stream)
+            assert device_id == "test-oven"
+            assert isinstance(error, api.ApiError)
+            _, resume = await channel_reopen_waits.get()
+            resume.set_result(None)
+            _, deferred = await channel_reopen_waits.get()
+            assert [call.args[0] for call in client.open_channel.await_args_list] == [
+                "test-fridge",
+                "test-oven",
+                "test-fridge",
+            ]
+            await sockets[0].send_str(
+                json.dumps(notification({"ref_door_ajar": False})) + api.SEPARATOR
+            )
+            assert await anext(stream) == (
+                "test-fridge",
+                api.StateUpdate({"ref_door_ajar": False}, full=False),
+            )
+            assert len(sockets) == 1
+    finally:
+        await stream.aclose()
+    assert deferred.cancelled()
+
+
+@pytest.mark.parametrize("rate_limited", [False, True])
+async def test_channel_reopen_failures_preserve_delivery(
+    notification_stream, channel_reopen_waits, rate_limited
+):
+    client, _, _, sockets = notification_stream
+    stream = client.watch(["test-fridge", "test-oven"])
+    try:
+        async with asyncio.timeout(5):
+            assert await anext(stream) == ("test-fridge", api.ChannelOpened())
+            assert await anext(stream) == ("test-oven", api.ChannelOpened())
+            _, resume = await channel_reopen_waits.get()
+            error = api.RateLimited(3600) if rate_limited else api.ApiError("Rejected")
+            client.open_channel.side_effect = [error, None]
+            resume.set_result(None)
+            delay, deferred = await channel_reopen_waits.get()
+            assert delay == (3600 if rate_limited else 1800)
+            assert client.open_channel.await_count == (3 if rate_limited else 4)
+
+            await sockets[0].send_str(
+                json.dumps(notification({"ref_door_ajar": False})) + api.SEPARATOR
+            )
+            # Maintenance failures do not emit channel errors or stop push delivery.
+            assert await anext(stream) == (
+                "test-fridge",
+                api.StateUpdate({"ref_door_ajar": False}, full=False),
+            )
+            assert len(sockets) == 1
+            assert client.push_connected
+            assert not deferred.done()
+    finally:
+        await stream.aclose()
+    assert deferred.cancelled()
+
+
+async def test_channel_reopen_auth_failure_reaches_the_listener(
+    notification_stream, channel_reopen_waits
+):
+    client, _, _, sockets = notification_stream
+    stream = client.watch(["test-fridge"])
+    try:
+        async with asyncio.timeout(5):
+            assert await anext(stream) == ("test-fridge", api.ChannelOpened())
+            _, resume = await channel_reopen_waits.get()
+            client.open_channel.side_effect = InvalidAuth("Expired")
+            resume.set_result(None)
+            with pytest.raises(InvalidAuth, match="Expired"):
+                await anext(stream)
+            assert len(sockets) == 1
+            assert not client.push_connected
+    finally:
+        await stream.aclose()
 
 
 @pytest.mark.parametrize("rejected", [False, True])
@@ -1189,6 +1429,41 @@ async def test_notification_counts_include_dropped_messages_but_not_heartbeats(n
     assert set(client.last_messages) == {"test-fridge"}
 
 
+async def test_connection_diagnostics_record_handshake_and_heartbeats(notification_stream):
+    client, stream, frames, _ = notification_stream
+    assert client.notification_stats["connected_at"] is None
+    frames.append('{"type":6}' + api.SEPARATOR)
+    frames.append(json.dumps(notification({"ref_door_ajar": True})) + api.SEPARATOR)
+    async with asyncio.timeout(5):
+        assert (await anext(stream))[1].properties == {"ref_door_ajar": True}
+    stats = client.notification_stats
+    assert stats["connected_at"] is not None
+    # A frame is recorded as it arrives and parsed afterwards.
+    assert stats["connected_at"] <= stats["last_frame_received"] <= stats["last_received"]
+    assert client.push_connected
+
+
+@pytest.mark.parametrize("previous_frame", [None, "2000-01-01T00:00:00+00:00"])
+async def test_handshake_payload_refreshes_connection_frame_timestamp(
+    notification_stream, monkeypatch, previous_frame
+):
+    client, stream, _, _ = notification_stream
+    original_send = web.WebSocketResponse.send_str
+
+    async def send(socket, data, **kwargs):
+        if data == "{}" + api.SEPARATOR:
+            data += json.dumps(notification({"ref_door_ajar": False})) + api.SEPARATOR
+        await original_send(socket, data, **kwargs)
+
+    monkeypatch.setattr(web.WebSocketResponse, "send_str", send)
+    client.notification_stats["last_frame_received"] = previous_frame
+    async with asyncio.timeout(5):
+        assert (await anext(stream))[1].properties == {"ref_door_ajar": False}
+    stats = client.notification_stats
+    assert stats["last_received"] is not None
+    assert stats["last_frame_received"] == stats["connected_at"]
+
+
 async def test_messages_without_state_still_show_channel_activity(notification_stream):
     client, stream, frames, _ = notification_stream
     frames.append(
@@ -1221,6 +1496,178 @@ async def test_notification_protocol_failures_still_disconnect(
         with pytest.raises(api.ApiError, match=message):
             await anext(stream)
     assert not client.push_connected
+
+
+@pytest.mark.parametrize("handshake", [False, True])
+async def test_notification_websocket_close_logs_code_and_reason(
+    notification_stream, monkeypatch, caplog, handshake
+):
+    _, stream, _, _ = notification_stream
+    original_send = web.WebSocketResponse.send_str
+
+    async def send(socket, data, **kwargs):
+        if not handshake:
+            await original_send(socket, data, **kwargs)
+        if data == "{}" + api.SEPARATOR:
+            await socket.close(code=1012, message=b"Service restarting")
+
+    monkeypatch.setattr(web.WebSocketResponse, "send_str", send)
+    with caplog.at_level(logging.DEBUG, logger=api.__name__):
+        with pytest.raises(api.ApiError, match="handshake" if handshake else "disconnected"):
+            await anext(stream)
+    assert "frame_type=CLOSE" in caplog.text
+    assert "close_code=1012" in caplog.text
+    assert "Service restarting" in caplog.text
+
+
+@pytest.fixture
+def notification_socket(tokens):
+    socket = MagicMock(spec=aiohttp.ClientWebSocketResponse)
+    socket.close_code = None
+    socket.exception.return_value = None
+    session = MagicMock()
+    session.ws_connect.return_value.__aenter__.return_value = socket
+    client = api.SubZeroClient(session, "test-key", tokens)
+    client._request = AsyncMock(
+        return_value={"url": api.SIGNALR_ORIGIN + "/client/", "accessToken": "test-signalr"}
+    )
+    client._json = AsyncMock(return_value={"connectionToken": "test-connection"})
+    client.open_channel = AsyncMock()
+    return client, socket, session
+
+
+@pytest.mark.parametrize("handshake", [False, True])
+async def test_notification_error_frame_logs_exception_type_without_details(
+    notification_socket, caplog, handshake
+):
+    client, socket, session = notification_socket
+    socket.close_code = 1006
+    error = ConnectionResetError("private-error https://example.test/?token=private-token")
+    frames = (
+        [] if handshake else [aiohttp.WSMessage(aiohttp.WSMsgType.TEXT, "{}" + api.SEPARATOR, "")]
+    )
+    frames.append(aiohttp.WSMessage(aiohttp.WSMsgType.ERROR, error, ""))
+    socket.receive.side_effect = frames
+    with caplog.at_level(logging.DEBUG, logger=api.__name__):
+        with pytest.raises(api.ApiError, match="handshake" if handshake else "disconnected"):
+            async for _ in client.watch(["test-fridge"]):
+                pass
+    assert "frame_type=ERROR" in caplog.text
+    assert "close_code=1006" in caplog.text
+    assert "exception=ConnectionResetError" in caplog.text
+    for private in ("private-error", "example.test", "private-token"):
+        assert private not in caplog.text
+    session.ws_connect.return_value.__aexit__.assert_awaited_once()
+
+
+async def test_notification_binary_frame_logs_type_without_payload(notification_stream, caplog):
+    _, stream, frames, _ = notification_stream
+    frames.append(b"private-binary-payload")
+    with caplog.at_level(logging.DEBUG, logger=api.__name__):
+        with pytest.raises(api.ApiError, match="disconnected"):
+            await anext(stream)
+    assert "frame_type=BINARY" in caplog.text
+    assert "private-binary-payload" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("error", "reconnect", "logged_error", "logged_reconnect"),
+    [
+        ("Server connection closed", True, "Server connection closed", "True"),
+        ({"private-reason": "private-value"}, "private-hint", None, "None"),
+        ("Service restart" + "x" * 256 + "private-tail", False, "Service restart", "False"),
+    ],
+)
+async def test_signalr_close_logs_reason_and_reconnect_hint(
+    notification_stream, caplog, error, reconnect, logged_error, logged_reconnect
+):
+    _, stream, frames, _ = notification_stream
+    frames.append(
+        json.dumps(
+            {
+                "type": 7,
+                "error": error,
+                "allowReconnect": reconnect,
+                "extra": "private-frame-payload",
+            }
+        )
+        + api.SEPARATOR
+    )
+    with caplog.at_level(logging.DEBUG, logger=api.__name__):
+        with pytest.raises(api.ApiError, match="closed"):
+            await anext(stream)
+    assert (f"error='{logged_error}" if logged_error else "error=None") in caplog.text
+    assert f"allowReconnect={logged_reconnect}" in caplog.text
+    for private in (
+        "private-frame-payload",
+        "private-reason",
+        "private-value",
+        "private-hint",
+        "private-tail",
+    ):
+        assert private not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("response", "failure"),
+    [
+        ("private-incomplete-payload", "did not complete"),
+        ("private-invalid-json" + api.SEPARATOR, "invalid notification"),
+        (
+            json.dumps({"error": "Unsupported protocol", "extra": "private-handshake-payload"})
+            + api.SEPARATOR,
+            "rejected",
+        ),
+    ],
+)
+async def test_signalr_handshake_failure_logs_frame_type_without_raw_payload(
+    notification_socket, caplog, response, failure
+):
+    client, socket, _ = notification_socket
+    socket.receive.return_value = aiohttp.WSMessage(aiohttp.WSMsgType.TEXT, response, "")
+    with caplog.at_level(logging.DEBUG, logger=api.__name__):
+        with pytest.raises(api.ApiError, match=failure):
+            async for _ in client.watch(["test-fridge"]):
+                pass
+    assert "frame_type=TEXT" in caplog.text
+    if failure == "rejected":
+        assert "Unsupported protocol" in caplog.text
+    for private in (
+        "private-incomplete-payload",
+        "private-invalid-json",
+        "private-handshake-payload",
+    ):
+        assert private not in caplog.text
+
+
+@pytest.mark.parametrize("handshake", [False, True])
+async def test_notification_transport_logs_type_and_status_without_request_details(
+    notification_socket, caplog, handshake
+):
+    client, _, session = notification_socket
+    error = (
+        aiohttp.WSServerHandshakeError(
+            MagicMock(real_url="https://example.test/?token=private-token"),
+            (),
+            status=403,
+            message="private-error",
+            headers={"Authorization": "Bearer private-header"},
+        )
+        if handshake
+        else aiohttp.ClientConnectionError(
+            "private-error https://example.test/?token=private-token"
+        )
+    )
+    session.ws_connect.return_value.__aenter__.side_effect = error
+    with caplog.at_level(logging.DEBUG, logger=api.__name__):
+        with pytest.raises(api.ApiError, match="Could not maintain"):
+            async for _ in client.watch(["test-fridge"]):
+                pass
+    assert f"exception={type(error).__name__}" in caplog.text
+    if handshake:
+        assert "status=403" in caplog.text
+    for private in ("private-error", "example.test", "private-token", "private-header"):
+        assert private not in caplog.text
 
 
 @pytest.fixture
@@ -1451,3 +1898,149 @@ async def test_invalid_ice_delay_never_sends(
     with pytest.raises(ValueError):
         await client.set_ice_delay("test-fridge", duration, offset, repeat)
     assert not control_server["requests"]
+
+
+async def test_phone_alert_endpoints_accept_primitive_responses(
+    aiohttp_server, monkeypatch, socket_enabled, tokens
+):
+    requests = []
+
+    async def alerts(request):
+        body = await request.json() if request.method in {"POST", "PUT", "DELETE"} else None
+        requests.append((request.method, request.path, request.headers.get("uuid"), body))
+        if request.method == "GET" and "/registrations/" in request.path:
+            return web.json_response({"id": "registration-id"})
+        if request.method == "GET":
+            return web.json_response([{"valueType": "101"}, {"valueType": "102"}])
+        if request.method == "DELETE":
+            return web.json_response(True)
+        return web.json_response("registration-id")
+
+    app = web.Application()
+    app.router.add_route("*", "/consumerapp/api/notification/{path:.*}", alerts)
+    server = await aiohttp_server(app)
+    monkeypatch.setattr(api, "API_BASE", str(server.make_url("/")).rstrip("/"))
+    async with aiohttp.ClientSession() as session:
+        client = api.SubZeroClient(session, "test-key", tokens)
+        assert await client.alert_registration("test-psid", "test-device") == {
+            "id": "registration-id"
+        }
+        await client.register_for_alerts(
+            {
+                "id": "registration-id",
+                "fcmToken": "test-token",
+                "deviceId": "test-device",
+                "psid": "test-psid",
+            },
+            update=False,
+        )
+        assert await client.alert_types("test-psid", "test-device") == {101, 102}
+        await client.subscribe_alerts("test-psid", "test-device", {101: "door_open"})
+        await client.unsubscribe_alerts("test-psid", "test-device", {101})
+
+    assert requests[0][:3] == (
+        "GET",
+        "/consumerapp/api/notification/registrations/devices/test-psid/appliances/test-device",
+        "test-psid",
+    )
+    assert requests[2][2] == requests[3][2] == requests[4][2] == "test-psid"
+    assert requests[3][3] == [
+        {
+            "deviceId": "test-device",
+            "mutable_content": False,
+            "valueType": 101,
+            "body_loc_key": "door_open",
+            "sound": None,
+            "clickAction": None,
+        }
+    ]
+    assert requests[4][3] == {"valueTypes": ["101"], "deviceId": "test-device"}
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        # Like the app, the lookup is a list holding the appliance's record.
+        (
+            [
+                {"id": "other", "deviceId": "other-device"},
+                {"id": "ours", "deviceId": "test-device"},
+            ],
+            {"id": "ours", "deviceId": "test-device"},
+        ),
+        ([], None),
+        ([{"deviceId": "test-device"}], None),
+        ({"id": "registration-id"}, {"id": "registration-id"}),
+    ],
+)
+async def test_alert_registration_reads_the_appliance_record(
+    aiohttp_server, monkeypatch, socket_enabled, tokens, body, expected
+):
+    async def lookup(request):
+        return web.json_response(body)
+
+    app = web.Application()
+    app.router.add_route("GET", "/consumerapp/api/notification/{path:.*}", lookup)
+    server = await aiohttp_server(app)
+    monkeypatch.setattr(api, "API_BASE", str(server.make_url("/")).rstrip("/"))
+    async with aiohttp.ClientSession() as session:
+        client = api.SubZeroClient(session, "test-key", tokens)
+        assert await client.alert_registration("test-psid", "test-device") == expected
+
+
+@pytest.mark.parametrize(("subscribed", "deletes"), [([{"valueType": "101"}], 1), ([], 0)])
+async def test_unsubscribing_all_alerts_removes_only_current_ones(
+    aiohttp_server, monkeypatch, socket_enabled, tokens, subscribed, deletes
+):
+    requests = []
+
+    async def alerts(request):
+        body = await request.json() if request.method == "DELETE" else None
+        requests.append((request.method, body))
+        return web.json_response(subscribed if request.method == "GET" else True)
+
+    app = web.Application()
+    app.router.add_route("*", "/consumerapp/api/notification/{path:.*}", alerts)
+    server = await aiohttp_server(app)
+    monkeypatch.setattr(api, "API_BASE", str(server.make_url("/")).rstrip("/"))
+    async with aiohttp.ClientSession() as session:
+        await api.SubZeroClient(session, "test-key", tokens).unsubscribe_all_alerts(
+            "test-psid", "test-device"
+        )
+    assert [method for method, _ in requests] == ["GET"] + ["DELETE"] * deletes
+    if deletes:
+        assert requests[1][1] == {"valueTypes": ["101"], "deviceId": "test-device"}
+
+
+@pytest.mark.parametrize("body", [None, {}, True, [{"valueType": "invalid"}]])
+async def test_invalid_alert_subscriptions_do_not_look_like_successful_cleanup(
+    aiohttp_server, monkeypatch, socket_enabled, tokens, body
+):
+    async def alerts(request):
+        assert request.method == "GET"
+        return web.json_response(body)
+
+    app = web.Application()
+    app.router.add_route("*", "/consumerapp/api/notification/{path:.*}", alerts)
+    server = await aiohttp_server(app)
+    monkeypatch.setattr(api, "API_BASE", str(server.make_url("/")).rstrip("/"))
+    async with aiohttp.ClientSession() as session:
+        client = api.SubZeroClient(session, "test-key", tokens)
+        with pytest.raises(api.ApiError, match="invalid alert subscriptions"):
+            await client.unsubscribe_all_alerts("own-psid", "test-device")
+
+
+async def test_a_declined_alert_change_is_an_error(
+    aiohttp_server, monkeypatch, socket_enabled, tokens
+):
+    async def alerts(request):
+        return web.json_response(False)
+
+    app = web.Application()
+    app.router.add_route("*", "/consumerapp/api/notification/{path:.*}", alerts)
+    server = await aiohttp_server(app)
+    monkeypatch.setattr(api, "API_BASE", str(server.make_url("/")).rstrip("/"))
+    async with aiohttp.ClientSession() as session:
+        client = api.SubZeroClient(session, "test-key", tokens)
+        with pytest.raises(api.ApiError, match="declined"):
+            await client.unsubscribe_alerts("own-psid", "test-device", {101})

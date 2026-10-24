@@ -1,3 +1,10 @@
+read_status:
+  fields:
+    device_id:
+      required: true
+      selector:
+        device:
+          integration: subzero
 schedule_ice_delay:
   fields:
     device_id:

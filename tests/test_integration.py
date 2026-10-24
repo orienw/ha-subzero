@@ -5,16 +5,22 @@ import json
 import logging
 from datetime import timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, patch
 
 import pytest
+from homeassistant.components.sensor import DATA_COMPONENT as SENSOR_COMPONENT
 from homeassistant.config_entries import ConfigEntryState
+from homeassistant.const import EVENT_STATE_CHANGED, STATE_UNAVAILABLE
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_system import US_CUSTOMARY_SYSTEM
-from pytest_homeassistant_custom_component.common import MockConfigEntry, async_fire_time_changed
+from pytest_homeassistant_custom_component.common import (
+    MockConfigEntry,
+    async_capture_events,
+    async_fire_time_changed,
+)
 
 from custom_components.subzero.api import (
     ApiError,
@@ -44,6 +50,8 @@ async def loaded(hass, tokens, request):
             "temperature_unit": getattr(request, "param", "F"),
             "tokens": token_state(tokens),
         },
+        # Timing tests use five-minute checks explicitly.
+        options={"status_poll_interval": 300},
     )
     entry.add_to_hass(hass)
     updates = asyncio.Queue()
@@ -53,6 +61,7 @@ async def loaded(hass, tokens, request):
     async def watch(device_ids):
         assert isinstance(device_ids, list)
         client.watched.append(device_ids)
+        client.push_connected = True
         connected.set()
         try:
             while True:
@@ -61,6 +70,7 @@ async def loaded(hass, tokens, request):
                     raise event
                 yield event if isinstance(event, tuple) else ("test-fridge", event)
         finally:
+            client.push_connected = False
             disconnected.set()
 
     with patch("custom_components.subzero.SubZeroClient") as factory:
@@ -111,10 +121,16 @@ async def test_reported_properties_drive_entity_discovery(hass, loaded):
         "test-fridge_ref_set_temp",
         "test-fridge_ref_door_ajar",
         "test-fridge_live_reporting_mode",
+        "test-fridge_state_confirmed_at",
         "test-fridge_active_faults",
     }
     assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "38"
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
+    assert (
+        registry.async_get("sensor.kitchen_state_confirmed").disabled_by
+        is er.RegistryEntryDisabler.INTEGRATION
+    )
+    assert hass.states.get("sensor.kitchen_state_confirmed") is None
     coordinator = entry.runtime_data.coordinators["test-fridge"]
     assert "ap_ssid" not in coordinator.data
     device = dr.async_get(hass).async_get_device_by_identifier(
@@ -128,14 +144,237 @@ async def test_reported_properties_drive_entity_discovery(hass, loaded):
     client.state.assert_awaited_once()
 
 
-async def test_idle_push_connection_does_not_request_periodic_status(hass, loaded):
-    _, client, _, _, _ = loaded
+@pytest.mark.parametrize("saved_interval", [None, 600])
+async def test_state_checks_default_off_and_preserve_saved_interval(hass, loaded, saved_interval):
+    entry, client, updates, _, _ = loaded
+    options = {} if saved_interval is None else {"status_poll_interval": saved_interval}
+    hass.config_entries.async_update_entry(entry, options=options)
+    await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    client.state.reset_mock()
+    client.open_channel.reset_mock()
+    connections = list(client.watched)
+    started = dt_util.utcnow()
+    async_fire_time_changed(hass, started + timedelta(seconds=301))
+    await hass.async_block_till_done()
+    client.state.assert_not_awaited()
+    async_fire_time_changed(hass, started + timedelta(seconds=601))
+    await hass.async_block_till_done()
+    if saved_interval is None:
+        async_fire_time_changed(hass, started + timedelta(hours=24))
+        await hass.async_block_till_done()
+        client.state.assert_not_awaited()
+    else:
+        client.state.assert_awaited_once_with("test-fridge")
+    await updates.put(StateUpdate({"ref_set_temp": 39}, full=False))
+    await hass.async_block_till_done()
+    assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "39"
+    client.open_channel.assert_not_awaited()
+    assert client.watched == connections
+
+
+@pytest.mark.parametrize("system_option", [False, True])
+async def test_disabled_state_checks_do_not_request_periodic_status(hass, loaded, system_option):
+    entry, client, _, _, _ = loaded
+    if system_option:
+        hass.config_entries.async_update_entry(entry, pref_disable_polling=True)
+    else:
+        hass.config_entries.async_update_entry(entry, options={"status_poll_interval": 0})
+        await hass.config_entries.async_reload(entry.entry_id)
+        await hass.async_block_till_done()
+    client.state.reset_mock()
     for hours in (1, 12, 24):
         async_fire_time_changed(hass, dt_util.utcnow() + timedelta(hours=hours))
         await hass.async_block_till_done()
-    client.state.assert_awaited_once()
+    client.state.assert_not_awaited()
     client.open_channel.assert_not_awaited()
     assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "38"
+
+
+@pytest.mark.parametrize("full", [False, True])
+async def test_state_checks_repair_a_missed_close_despite_recent_pushes(hass, loaded, full):
+    entry, client, updates, disconnected, _ = loaded
+    started = dt_util.utcnow()
+    await updates.put(StateUpdate({"ref_door_ajar": True}, full=False))
+    await hass.async_block_till_done()
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
+    client.state.reset_mock()
+    async_fire_time_changed(hass, started + timedelta(seconds=240))
+    await hass.async_block_till_done()
+    properties = {"ref_set_temp": 39}
+    if full:
+        properties = {**client.state.return_value, **properties, "ref_door_ajar": True}
+    await updates.put(StateUpdate(properties, full=full))
+    await hass.async_block_till_done()
+    client.state.assert_not_awaited()
+    async_fire_time_changed(hass, started + timedelta(seconds=301))
+    await hass.async_block_till_done()
+    await entry.runtime_data._verifications["test-fridge"]
+    client.state.assert_awaited_once_with("test-fridge")
+    client.open_channel.assert_not_awaited()
+    assert client.watched == [["test-fridge"]]
+    assert not disconnected.is_set()
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
+    stats = entry.runtime_data.coordinators["test-fridge"].verification_stats
+    assert stats["checks"] == 1
+    assert stats["status_reads"] == 1
+    assert stats["last_success"] is not None
+
+
+async def test_verification_does_not_overlap_and_stops_on_unload(hass, loaded):
+    entry, client, _, disconnected, _ = loaded
+    started = dt_util.utcnow()
+    reading = asyncio.Event()
+
+    async def blocked_request(device_id):
+        reading.set()
+        await asyncio.Event().wait()
+
+    client.state.reset_mock()
+    client.state.side_effect = blocked_request
+    async_fire_time_changed(hass, started + timedelta(seconds=301))
+    await hass.async_block_till_done()
+    await asyncio.wait_for(reading.wait(), 1)
+    async_fire_time_changed(hass, started + timedelta(seconds=602))
+    await hass.async_block_till_done()
+    client.state.assert_awaited_once_with("test-fridge")
+    account = entry.runtime_data
+    task = account._verifications["test-fridge"]
+    await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert disconnected.is_set()
+    assert task.cancelled()
+    assert account.coordinators["test-fridge"]._read_updates is None
+    async_fire_time_changed(hass, started + timedelta(seconds=903))
+    await hass.async_block_till_done()
+    client.state.assert_awaited_once_with("test-fridge")
+    client.open_channel.assert_not_awaited()
+    assert client.watched == [["test-fridge"]]
+
+
+async def test_verification_failure_preserves_available_push_state(hass, loaded):
+    entry, client, updates, _, _ = loaded
+    client.push_connected = True
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    await updates.put(StateUpdate({"ref_door_ajar": True}, full=False))
+    await hass.async_block_till_done()
+    state = hass.states.get("binary_sensor.kitchen_refrigerator_door")
+    confirmed = coordinator.confirmed_at
+    completed = coordinator._completed_read
+    client.state.side_effect = ApiError("Status unavailable")
+    started = dt_util.utcnow()
+    async_fire_time_changed(hass, started + timedelta(seconds=301))
+    await hass.async_block_till_done()
+    await entry.runtime_data._verifications["test-fridge"]
+    await hass.async_block_till_done()
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door") is state
+    assert state.state == "on"
+    assert coordinator.last_update_success
+    assert coordinator.confirmed_at == confirmed
+    assert coordinator._completed_read is completed
+    assert coordinator.verification_stats["last_success"] is None
+    assert not entry.runtime_data._recoveries
+    assert client.state.await_count == 2
+    client.state.side_effect = None
+    async_fire_time_changed(hass, started + timedelta(seconds=602))
+    await hass.async_block_till_done()
+    await entry.runtime_data._verifications["test-fridge"]
+    assert client.state.await_count == 3
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
+    assert coordinator.verification_stats["last_success"] is not None
+    client.open_channel.assert_not_awaited()
+
+
+async def test_verification_failure_without_push_marks_state_unavailable(hass, loaded):
+    entry, client, _, _, _ = loaded
+    client.push_connected = False
+    client.state.side_effect = ApiError("Status unavailable")
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=301))
+    await hass.async_block_till_done()
+    await entry.runtime_data._verifications["test-fridge"]
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "unavailable"
+    assert not entry.runtime_data.coordinators["test-fridge"].last_update_success
+    assert not entry.runtime_data._recoveries
+    assert client.state.await_count == 2
+    client.open_channel.assert_not_awaited()
+
+
+async def test_rate_limited_verification_read_preserves_available_state(hass, loaded):
+    entry, client, _, _, _ = loaded
+    client.state.side_effect = RateLimited(900)
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=301))
+    await hass.async_block_till_done()
+    await entry.runtime_data._verifications["test-fridge"]
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
+    assert entry.runtime_data.coordinators["test-fridge"].verification_stats["last_success"] is None
+    assert client.state.await_count == 2
+    client.open_channel.assert_not_awaited()
+
+
+async def test_verification_handles_a_stream_failure_during_its_status_read(hass, loaded):
+    entry, client, updates, disconnected, _ = loaded
+    client.push_connected = True
+    reading = asyncio.Event()
+    release = asyncio.Event()
+
+    async def state(device_id):
+        reading.set()
+        await release.wait()
+        return dict(client.state.return_value)
+
+    client.state.side_effect = state
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=301))
+    await hass.async_block_till_done()
+    await asyncio.wait_for(reading.wait(), 1)
+    client.push_connected = False
+    await updates.put(RuntimeError("Unexpected stream failure"))
+    await disconnected.wait()
+    await hass.async_block_till_done()
+    release.set()
+    task = entry.runtime_data._verifications["test-fridge"]
+    await task
+    assert task.exception() is None
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
+
+
+async def test_staggered_state_checks_keep_other_appliances_reporting(hass, oven_loaded):
+    entry, client, _ = oven_loaded
+    started = dt_util.utcnow()
+
+    async def state(device_id):
+        if device_id == "test-fridge":
+            await asyncio.Event().wait()
+        return dict(entry.runtime_data.coordinators[device_id].data)
+
+    client.state.reset_mock()
+    client.state.side_effect = state
+    for seconds in (151, 302, 453, 604):
+        async_fire_time_changed(hass, started + timedelta(seconds=seconds))
+        await hass.async_block_till_done()
+        if seconds in (302, 604):
+            await entry.runtime_data._verifications["test-oven"]
+    assert [args.args[0] for args in client.state.await_args_list] == [
+        "test-fridge",
+        "test-oven",
+        "test-oven",
+    ]
+    assert entry.runtime_data.coordinators["test-oven"].verification_stats["checks"] == 2
+    client.open_channel.assert_not_awaited()
+
+
+async def test_verification_auth_failure_starts_reauthentication(hass, loaded):
+    entry, client, _, _, _ = loaded
+    client.state.side_effect = InvalidAuth("Expired")
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=301))
+    await hass.async_block_till_done()
+    await entry.runtime_data._verifications["test-fridge"]
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "unavailable"
+    assert (
+        hass.config_entries.flow.async_progress_by_handler(DOMAIN)[0]["context"]["source"]
+        == "reauth"
+    )
+    assert client.state.await_count == 2
+    client.open_channel.assert_not_awaited()
 
 
 async def test_initial_push_can_load_without_a_status_read(hass, loaded, monkeypatch):
@@ -259,7 +498,84 @@ async def test_startup_push_survives_a_pending_status_read_failure(hass, loaded)
     assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "38"
 
 
-async def test_startup_status_does_not_hide_a_rejected_channel(hass, loaded):
+async def test_setup_recovers_a_reconnected_appliance_while_another_initial_read_is_pending(
+    hass, freezer, loaded, monkeypatch
+):
+    entry, client, _, _, _ = loaded
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    hass.config_entries.async_update_entry(
+        entry,
+        options={
+            "devices": {
+                **entry.data["devices"],
+                "test-oven": {"name": "Wall oven", "temperature_unit": "F"},
+            },
+            "status_poll_interval": 0,
+        },
+    )
+    monkeypatch.setattr("custom_components.subzero.coordinator.random.uniform", lambda *_: 0)
+    updates = asyncio.Queue()
+    reading, release, reconnected = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    connections = 0
+    fridge = dict(client.state.return_value)
+
+    async def watch(device_ids):
+        nonlocal connections
+        connections += 1
+        client.push_connected = True
+        try:
+            if connections == 1:
+                yield "test-fridge", StateUpdate({**fridge, "ref_door_ajar": True}, full=True)
+            else:
+                yield "test-fridge", ChannelOpened()
+                yield (
+                    "test-fridge",
+                    StateUpdate(
+                        {"appliance_model": fridge["appliance_model"], "ref_set_temp": 38},
+                        full=True,
+                    ),
+                )
+                reconnected.set()
+            while True:
+                event = await updates.get()
+                if isinstance(event, Exception):
+                    raise event
+                yield event
+        finally:
+            client.push_connected = False
+
+    async def state(device_id):
+        if device_id == "test-oven":
+            reading.set()
+            await release.wait()
+            return {"appliance_model": "SO3050PMSP", "cav_light_on": False}
+        return fridge
+
+    client.watch = watch
+    client.state.reset_mock()
+    client.state.side_effect = state
+    setup = asyncio.create_task(hass.config_entries.async_setup(entry.entry_id))
+    try:
+        await asyncio.wait_for(reading.wait(), 1)
+        await updates.put(ApiError("Stream disconnected during setup"))
+        await hass.async_block_till_done()
+        freezer.tick(31)
+        async_fire_time_changed(hass, dt_util.utcnow())
+        await asyncio.wait_for(reconnected.wait(), 1)
+        # The reconnect snapshot lacked the door, so a read filled it in at once.
+        assert [call.args[0] for call in client.state.await_args_list] == [
+            "test-oven",
+            "test-fridge",
+        ]
+    finally:
+        release.set()
+        assert await setup
+    await hass.async_block_till_done()
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
+    assert [call.args[0] for call in client.state.await_args_list].count("test-fridge") == 1
+
+
+async def test_startup_status_can_restore_state_despite_a_rejected_channel(hass, loaded):
     entry, client, _, _, _ = loaded
     updates = asyncio.Queue()
     delivered = asyncio.Event()
@@ -282,9 +598,9 @@ async def test_startup_status_does_not_hide_a_rejected_channel(hass, loaded):
     client.state.side_effect = state
     await hass.config_entries.async_reload(entry.entry_id)
     await hass.async_block_till_done()
-    assert entry.state is ConfigEntryState.SETUP_RETRY
-    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "unavailable"
-    assert closed.is_set()
+    assert entry.state is ConfigEntryState.LOADED
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
+    assert not closed.is_set()
 
 
 async def test_startup_stream_auth_failure_stops_before_status_reads(hass, loaded):
@@ -314,6 +630,25 @@ async def test_partial_push_merges_new_properties(hass, loaded):
     await hass.async_block_till_done()
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
     client.state.assert_awaited_once()
+
+
+async def test_normal_door_cycles_do_not_request_status_or_reopen_channels(hass, freezer, loaded):
+    entry, client, updates, disconnected, _ = loaded
+    client.state.reset_mock()
+    for opened in (True, False, True, False):
+        await updates.put(StateUpdate({"ref_door_ajar": opened}, full=False))
+        await hass.async_block_till_done()
+        assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == (
+            "on" if opened else "off"
+        )
+        freezer.tick(61)
+        async_fire_time_changed(hass, dt_util.utcnow())
+        await hass.async_block_till_done()
+        client.state.assert_not_awaited()
+    assert entry.runtime_data.coordinators["test-fridge"]._followup_task is None
+    client.open_channel.assert_not_awaited()
+    assert client.watched == [["test-fridge"]]
+    assert not disconnected.is_set()
 
 
 async def test_debug_log_reports_push_updates_without_network_identifiers(hass, loaded, caplog):
@@ -592,10 +927,19 @@ async def test_metadata_failure_uses_setup_retry_or_reauth(hass, loaded, error):
         assert entry.state is ConfigEntryState.SETUP_RETRY
 
 
-@pytest.mark.parametrize("error", [ApiError("offline"), RateLimited(300)])
-async def test_stream_failure_marks_entities_unavailable(hass, loaded, error):
+@pytest.mark.parametrize("error", [ApiError("Disconnected"), RateLimited(300)])
+async def test_stream_failure_preserves_state_until_the_grace_expires(hass, freezer, loaded, error):
     entry, client, updates, _, _ = loaded
     await updates.put(error)
+    await hass.async_block_till_done()
+    assert entry.runtime_data.coordinators["test-fridge"].last_update_success
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
+    freezer.tick(119)
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
+    freezer.tick(2)
+    async_fire_time_changed(hass, dt_util.utcnow())
     await hass.async_block_till_done()
     assert not entry.runtime_data.coordinators["test-fridge"].last_update_success
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "unavailable"
@@ -610,8 +954,9 @@ async def test_stream_failure_marks_entities_unavailable(hass, loaded, error):
 async def test_reconnect_waits_then_recovers_from_push_without_polling(
     hass, loaded, monkeypatch, error, delay
 ):
-    _, client, updates, _, _ = loaded
+    entry, client, updates, _, _ = loaded
     monkeypatch.setattr("custom_components.subzero.coordinator.random.uniform", lambda *_: 0)
+    hass.config_entries.async_update_entry(entry, pref_disable_polling=True)
     await updates.put(error)
     await hass.async_block_till_done()
     async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=delay - 1))
@@ -620,9 +965,7 @@ async def test_reconnect_waits_then_recovers_from_push_without_polling(
     async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=delay + 1))
     await hass.async_block_till_done()
     assert client.watched == [["test-fridge"], ["test-fridge"]]
-    await updates.put(
-        StateUpdate({"appliance_model": "ANOTHER-MODEL", "ref_set_temp": 39}, full=True)
-    )
+    await updates.put(StateUpdate({**client.state.return_value, "ref_set_temp": 39}, full=True))
     await hass.async_block_till_done()
     assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "39"
     client.state.assert_awaited_once()
@@ -640,8 +983,11 @@ async def test_reopened_channel_refreshes_unavailable_state(
     if stream_error:
         async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=31))
         await hass.async_block_till_done()
-    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "unavailable"
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == (
+        "off" if stream_error else "unavailable"
+    )
     client.state.return_value = {
+        **client.state.return_value,
         "appliance_model": "ANOTHER-MODEL",
         "ref_door_ajar": True,
         "ref_set_temp": 39,
@@ -658,9 +1004,220 @@ async def test_reopened_channel_refreshes_unavailable_state(
     assert client.state.await_count == 2
     await updates.put(StateUpdate({"ref_door_ajar": False}, full=False))
     await updates.put(ChannelOpened())
-    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(hours=1))
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=31))
     await hass.async_block_till_done()
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
+    assert client.state.await_count == 2
+
+
+async def test_stream_loss_does_not_restore_an_offline_appliance(hass, oven_loaded):
+    entry, client, updates = oven_loaded
+    await updates.put(("test-oven", ApiError("Appliance offline")))
+    await hass.async_block_till_done()
+    await updates.put(ApiError("Stream disconnected"))
+    await hass.async_block_till_done()
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
+    assert hass.states.get("switch.wall_oven_oven_light").state == "unavailable"
+    assert entry.runtime_data.coordinators["test-fridge"].last_update_success
+    assert not entry.runtime_data.coordinators["test-oven"].last_update_success
+
+
+@pytest.mark.parametrize("system_option", [False, True])
+@pytest.mark.parametrize("recovery", ["read", "snapshot"])
+async def test_reconnect_confirms_state_when_periodic_checks_are_disabled(
+    hass, freezer, loaded, monkeypatch, system_option, recovery
+):
+    entry, client, updates, _, _ = loaded
+    monkeypatch.setattr("custom_components.subzero.coordinator.random.uniform", lambda *_: 0)
+    if system_option:
+        hass.config_entries.async_update_entry(entry, pref_disable_polling=True)
+    else:
+        hass.config_entries.async_update_entry(entry, options={"status_poll_interval": 0})
+    await hass.async_block_till_done()
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    confirmed = coordinator.confirmed_at
+    reads = client.state.await_count
+    await updates.put(ApiError("Stream disconnected"))
+    await hass.async_block_till_done()
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
+    freezer.tick(31)
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+    assert client.watched == [["test-fridge"], ["test-fridge"]]
+    fresh = {**client.state.return_value, "ref_door_ajar": True}
+    if recovery == "read":
+        client.state.return_value = fresh
+        await updates.put(ChannelOpened())
+    else:
+        await updates.put(StateUpdate(fresh, full=True))
+    await hass.async_block_till_done()
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
+    assert coordinator.confirmed_at > confirmed
+    assert client.state.await_count == reads + (recovery == "read")
+    freezer.tick(91)
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
+
+
+async def test_reconnects_and_partial_pushes_do_not_extend_the_grace(
+    hass, freezer, loaded, monkeypatch
+):
+    entry, client, updates, _, _ = loaded
+    monkeypatch.setattr("custom_components.subzero.coordinator.random.uniform", lambda *_: 0)
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    confirmed = coordinator.confirmed_at
+    complete = dict(client.state.return_value)
+    client.state.side_effect = ApiError("Status unavailable")
+    await updates.put(ApiError("Stream disconnected"))
+    await hass.async_block_till_done()
+    freezer.tick(31)
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+    await updates.put(StateUpdate({"ref_set_temp": 39}, full=False))
+    await hass.async_block_till_done()
+    assert coordinator.confirmed_at == confirmed
+    recovery = entry.runtime_data._recoveries["test-fridge"]
+    freezer.tick(30)
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+    await updates.put(ApiError("Stream disconnected again"))
+    await hass.async_block_till_done()
+    await asyncio.gather(recovery, return_exceptions=True)
+    await hass.async_block_till_done()
+    freezer.tick(58)
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+    assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "39"
+    freezer.tick(2)
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+    assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "unavailable"
+    freezer.tick(2)
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+    assert client.push_connected
+    await updates.put(StateUpdate(complete, full=True))
+    await hass.async_block_till_done()
+    assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "38"
+
+
+async def test_incomplete_snapshot_ends_a_reconnect_wait_and_a_read_fills_what_it_lacked(
+    hass, freezer, loaded, monkeypatch
+):
+    entry, client, updates, _, _ = loaded
+    monkeypatch.setattr("custom_components.subzero.coordinator.random.uniform", lambda *_: 0)
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    confirmed = coordinator.confirmed_at
+    reading, release = asyncio.Event(), asyncio.Event()
+
+    async def read(_device_id):
+        reading.set()
+        await release.wait()
+        return {**client.state.return_value, "ref_door_ajar": True}
+
+    client.state.side_effect = read
+    await updates.put(ApiError("Stream disconnected"))
+    await hass.async_block_till_done()
+    freezer.tick(31)
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+    assert client.push_connected
+    await updates.put(
+        StateUpdate({"appliance_model": "ANOTHER-MODEL", "ref_set_temp": 40}, full=True)
+    )
+    await hass.async_block_till_done()
+    # The snapshot confirms state and ends the wait with what it carries.
+    assert coordinator.confirmed_at > confirmed
+    assert coordinator._transport_error is None
+    assert coordinator.last_update_success
+    assert "ref_door_ajar" in coordinator.missing_state_keys["snapshot"]
+    assert coordinator.confirmed_missing_keys == coordinator.missing_state_keys["snapshot"]
+    assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "40"
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "unavailable"
+    # A read fills in the keys the snapshot lacked.
+    await asyncio.wait_for(reading.wait(), 1)
+    release.set()
+    await coordinator._read_task
+    await hass.async_block_till_done()
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
+    assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "38"
+
+
+async def test_snapshot_ending_a_reconnect_drops_values_only_pushed_as_partials(
+    hass, freezer, loaded, monkeypatch
+):
+    entry, client, updates, _, _ = loaded
+    monkeypatch.setattr("custom_components.subzero.coordinator.random.uniform", lambda *_: 0)
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    await updates.put(StateUpdate({"frz_door_ajar": True}, full=False))
+    await hass.async_block_till_done()
+    assert hass.states.get("binary_sensor.kitchen_freezer_door").state == "on"
+    await updates.put(ApiError("Stream disconnected"))
+    await hass.async_block_till_done()
+    freezer.tick(31)
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+    reads = client.state.await_count
+    await updates.put(StateUpdate(dict(client.state.return_value), full=True))
+    await hass.async_block_till_done()
+    # The snapshot ends the interruption without a read, but a value only a partial
+    # update reported may have changed meanwhile, so it does not survive.
+    assert client.state.await_count == reads
+    assert coordinator.confirmed_at == dt_util.utcnow()
+    assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "38"
+    assert hass.states.get("binary_sensor.kitchen_freezer_door").state == "unavailable"
+    await updates.put(StateUpdate({"frz_door_ajar": False}, full=False))
+    await hass.async_block_till_done()
+    assert hass.states.get("binary_sensor.kitchen_freezer_door").state == "off"
+
+
+async def test_reconnected_read_restores_state_without_a_key_it_lacks(
+    hass, freezer, loaded, monkeypatch
+):
+    entry, client, updates, _, _ = loaded
+    monkeypatch.setattr("custom_components.subzero.coordinator.random.uniform", lambda *_: 0)
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    confirmed = coordinator.confirmed_at
+    await updates.put(StateUpdate({"frz_door_ajar": False}, full=False))
+    await updates.put(ApiError("Stream disconnected"))
+    await hass.async_block_till_done()
+    freezer.tick(31)
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+    reads = client.state.await_count
+    await updates.put(ChannelOpened())
+    await hass.async_block_till_done()
+    freezer.tick(91)
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+    assert client.state.await_count > reads
+    # A key only ever pushed as a partial update is not required of a read.
+    assert coordinator.missing_state_keys["read"] == []
+    assert coordinator.confirmed_at > confirmed
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
+
+
+async def test_manual_status_during_a_stream_outage_has_bounded_freshness(hass, freezer, loaded):
+    entry, client, updates, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    await updates.put(RateLimited(300))
+    await hass.async_block_till_done()
+    freezer.tick(91)
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+    assert not client.push_connected
+    client.state.return_value["ref_set_temp"] = 39
+    await coordinator.async_read_status()
+    assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "39"
+    freezer.tick(119)
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+    assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "39"
+    freezer.tick(2)
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+    assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "unavailable"
     assert client.state.await_count == 2
 
 
@@ -703,6 +1260,26 @@ async def test_failed_status_read_leaves_recovery_to_the_connection(hass, loaded
     assert client.state.await_count == 2
 
 
+async def test_offline_channel_waits_for_reopen_before_status_checks(hass, loaded):
+    entry, client, updates, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    await updates.put(("test-fridge", ApiError("Appliance offline")))
+    await hass.async_block_till_done()
+    client.state.reset_mock()
+    started = dt_util.utcnow()
+    for seconds in (301, 602):
+        async_fire_time_changed(hass, started + timedelta(seconds=seconds))
+        await hass.async_block_till_done()
+    client.state.assert_not_awaited()
+    client.open_channel.assert_not_awaited()
+    assert not coordinator.last_update_success
+    assert not entry.runtime_data._recoveries
+    await updates.put(ChannelOpened())
+    await hass.async_block_till_done()
+    client.state.assert_awaited_once_with("test-fridge")
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
+
+
 async def test_failed_setup_read_leaves_recovery_to_setup_retry(hass, loaded):
     entry, client, _, _, _ = loaded
     client.state.side_effect = ApiError("Status timed out")
@@ -743,36 +1320,34 @@ async def test_recovery_preserves_incoming_updates_and_other_appliances(hass, ov
     assert entry.runtime_data.coordinators["test-oven"].push_stats["snapshots"] == 0
 
 
-async def test_canceling_one_recovery_does_not_block_other_appliance_updates(hass, oven_loaded):
+async def test_stream_errors_do_not_cancel_shared_reads_or_block_other_appliances(
+    hass, oven_loaded
+):
     _, client, updates = oven_loaded
-    reading = asyncio.Event()
-    canceling = asyncio.Event()
-    cleanup = asyncio.Event()
+    reading, release, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
     async def state(device_id):
         assert device_id == "test-oven"
         reading.set()
         try:
-            await asyncio.Event().wait()
+            await release.wait()
+            return {"appliance_model": "SO3050PMSP", "cav_light_on": True}
         except asyncio.CancelledError:
-            canceling.set()
-            await cleanup.wait()
+            cancelled.set()
             raise
 
     client.state.side_effect = state
     await updates.put(("test-oven", ApiError("Disconnected")))
     await updates.put(("test-oven", ChannelOpened()))
     await reading.wait()
-    try:
-        await updates.put(("test-oven", ApiError("Channel lost")))
-        await canceling.wait()
-        await updates.put(StateUpdate({"ref_door_ajar": True}, full=False))
-        await hass.async_block_till_done()
-        assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
-        assert hass.states.get("switch.wall_oven_oven_light").state == "unavailable"
-    finally:
-        cleanup.set()
-        await hass.async_block_till_done()
+    await updates.put(("test-oven", ApiError("Channel lost")))
+    await updates.put(StateUpdate({"ref_door_ajar": True}, full=False))
+    await hass.async_block_till_done()
+    assert not cancelled.is_set()
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
+    release.set()
+    await hass.async_block_till_done()
+    assert hass.states.get("switch.wall_oven_oven_light").state == "on"
 
 
 @pytest.mark.parametrize(
@@ -803,40 +1378,48 @@ async def test_failed_recovery_retries_with_backoff(hass, loaded, monkeypatch, e
 
 
 @pytest.mark.parametrize("finish", ["snapshot", "disconnect", "channel_error", "unload"])
-async def test_recovery_cannot_overwrite_newer_state_or_outlive_connection(hass, loaded, finish):
+async def test_shared_recovery_read_survives_stream_changes_and_stops_on_unload(
+    hass, loaded, finish
+):
     entry, client, updates, _, _ = loaded
-    reading = asyncio.Event()
-    cancelled = asyncio.Event()
+    reading, release, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
     async def state(device_id):
         reading.set()
         try:
-            await asyncio.Event().wait()
-        finally:
+            await release.wait()
+            return dict(client.state.return_value)
+        except asyncio.CancelledError:
             cancelled.set()
+            raise
 
     client.state.side_effect = state
     await updates.put(("test-fridge", ApiError("Disconnected")))
     await updates.put(ChannelOpened())
     await hass.async_block_till_done()
     assert reading.is_set()
+    recovery = entry.runtime_data._recoveries["test-fridge"]
     if finish == "unload":
         await hass.config_entries.async_unload(entry.entry_id)
-    elif finish == "snapshot":
+        assert recovery.cancelled()
+        assert cancelled.is_set()
+        return
+    if finish == "snapshot":
         await updates.put(
             StateUpdate({"appliance_model": "ANOTHER-MODEL", "ref_door_ajar": True}, full=True)
         )
     else:
         error = ApiError("Disconnected again")
         await updates.put(error if finish == "disconnect" else ("test-fridge", error))
-    async with asyncio.timeout(1):
-        await cancelled.wait()
     await hass.async_block_till_done()
-    assert cancelled.is_set()
-    if finish != "unload":
-        assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == (
-            "on" if finish == "snapshot" else "unavailable"
-        )
+    await asyncio.gather(recovery, return_exceptions=True)
+    assert recovery.cancelled()
+    assert not cancelled.is_set()
+    release.set()
+    await hass.async_block_till_done()
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == (
+        "on" if finish == "snapshot" else "unavailable" if finish == "disconnect" else "off"
+    )
 
 
 async def test_recovery_auth_failure_starts_reauthentication(hass, loaded):
@@ -914,6 +1497,7 @@ async def test_expired_login_starts_reauthentication(hass, loaded):
     assert len(flows) == 1
     assert flows[0]["context"]["source"] == "reauth"
     assert flows[0]["context"]["entry_id"] == entry.entry_id
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "unavailable"
 
 
 async def test_invalid_stored_tokens_start_reauthentication(hass):
@@ -962,6 +1546,274 @@ async def test_configure_adds_appliances_with_the_saved_login(hass, loaded):
     await hass.async_block_till_done()
     assert hass.states.get("binary_sensor.wall_oven_service_required").state == "on"
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
+
+
+async def test_configure_changes_state_checks_without_reloading(hass, freezer, loaded):
+    entry, client, _, disconnected, factory = loaded
+    account = entry.runtime_data
+    coordinator = account.coordinators["test-fridge"]
+    entity_id = "sensor.kitchen_refrigerator_setpoint"
+    entity = hass.data[SENSOR_COMPONENT].get_entity(entity_id)
+    changes = async_capture_events(hass, EVENT_STATE_CHANGED)
+    coordinator.async_receive_event(dt_util.utcnow(), 0, 101)
+    followup = coordinator._followup_task
+    assert followup is not None
+    client.state.reset_mock()
+
+    async def configure(interval):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {"device_ids": ["test-fridge"], "status_poll_interval": str(interval)},
+        )
+        assert result["type"] is FlowResultType.CREATE_ENTRY
+        await hass.async_block_till_done()
+        assert entry.runtime_data is account
+        assert account.coordinators["test-fridge"] is coordinator
+        assert hass.data[SENSOR_COMPONENT].get_entity(entity_id) is entity
+
+    async def advance(seconds):
+        freezer.tick(seconds)
+        async_fire_time_changed(hass, dt_util.utcnow())
+        await hass.async_block_till_done()
+
+    await configure(0)
+    assert coordinator._followup_task is followup
+    assert not followup.cancelling()
+    await advance(3)
+    client.state.assert_awaited_once_with("test-fridge")
+    assert coordinator._followup_task is None
+    client.state.reset_mock()
+    await advance(601)
+    client.state.assert_not_awaited()
+
+    await configure(60)
+    await advance(61)
+    client.state.assert_awaited_once_with("test-fridge")
+
+    await configure(120)
+    await advance(61)
+    assert client.state.await_count == 1
+    await advance(60)
+    assert client.state.await_count == 2
+
+    await configure(0)
+    await advance(121)
+    assert client.state.await_count == 2
+    assert factory.call_count == 1
+    assert client.watched == [["test-fridge"]]
+    assert not disconnected.is_set()
+    assert all(
+        event.data["new_state"] is not None and event.data["new_state"].state != STATE_UNAVAILABLE
+        for event in changes
+        if event.data["entity_id"] == entity_id
+    )
+    await configure(60)
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    await advance(61)
+    assert client.state.await_count == 2
+    assert disconnected.is_set()
+
+
+async def test_configure_resumes_staggered_checks_without_duplicate_timers(
+    hass, freezer, oven_loaded
+):
+    entry, client, _ = oven_loaded
+    account = entry.runtime_data
+    coordinators = dict(account.coordinators)
+    connections = list(client.watched)
+    client.state.reset_mock()
+
+    async def configure(interval):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {
+                "device_ids": ["test-fridge", "test-oven"],
+                "status_poll_interval": str(interval),
+            },
+        )
+        await hass.async_block_till_done()
+        assert entry.runtime_data is account
+        assert account.coordinators == coordinators
+
+    async def advance(seconds):
+        freezer.tick(seconds)
+        async_fire_time_changed(hass, dt_util.utcnow())
+        await hass.async_block_till_done()
+
+    await configure(0)
+    await advance(301)
+    client.state.assert_not_awaited()
+    await configure(120)
+    await advance(59)
+    client.state.assert_not_awaited()
+    await advance(2)
+    client.state.assert_awaited_once_with("test-fridge")
+    await advance(61)
+    assert client.state.await_args_list == [call("test-fridge"), call("test-oven")]
+
+    await configure(300)
+    await advance(61)
+    assert client.state.await_count == 2
+    await advance(90)
+    assert client.state.await_count == 3
+    await advance(151)
+    assert client.state.await_count == 4
+    assert {args.args[0] for args in client.state.await_args_list[2:]} == {
+        "test-fridge",
+        "test-oven",
+    }
+    assert client.watched == connections
+
+
+async def test_configure_changed_selected_units_still_reload(hass, loaded):
+    entry, client, _, disconnected, _ = loaded
+    account = entry.runtime_data
+    client.appliances.return_value = [Appliance("test-fridge", "Kitchen", "C")]
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    await hass.config_entries.options.async_configure(
+        result["flow_id"], {"device_ids": ["test-fridge"], "status_poll_interval": "300"}
+    )
+    await hass.async_block_till_done()
+    assert entry.runtime_data is not account
+    assert entry.runtime_data.coordinators["test-fridge"].device["temperature_unit"] == "C"
+    assert entry.options["devices"]["test-fridge"]["temperature_unit"] == "C"
+    assert client.watched == [["test-fridge"], ["test-fridge"]]
+    assert disconnected.is_set()
+
+
+async def test_configure_selection_during_setup_applies_after_setup(hass, loaded):
+    entry, client, _, _, _ = loaded
+    reading, release = asyncio.Event(), asyncio.Event()
+    state = dict(client.state.return_value)
+    client.state.reset_mock()
+
+    async def read(device_id):
+        if client.state.await_count == 1:
+            reading.set()
+            await release.wait()
+        return dict(state)
+
+    client.state.side_effect = read
+    pending = asyncio.create_task(hass.config_entries.async_reload(entry.entry_id))
+    try:
+        await asyncio.wait_for(reading.wait(), 1)
+        assert entry.state is ConfigEntryState.SETUP_IN_PROGRESS
+        with patch("custom_components.subzero.config_flow.SubZeroClient", return_value=client):
+            result = await hass.config_entries.options.async_init(entry.entry_id)
+            result = await hass.config_entries.options.async_configure(
+                result["flow_id"],
+                {"device_ids": ["test-oven"], "status_poll_interval": "300"},
+            )
+        assert result["type"] is FlowResultType.CREATE_ENTRY
+        assert set(entry.options["devices"]) == {"test-oven"}
+    finally:
+        release.set()
+        await pending
+    await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.LOADED
+    assert set(entry.options["devices"]) == {"test-oven"}
+    assert set(entry.runtime_data.coordinators) == {"test-oven"}
+    assert client.watched == [["test-fridge"], ["test-fridge"], ["test-oven"]]
+    assert client.state.await_count == 2
+
+
+@pytest.mark.parametrize(
+    ("selected", "unit"),
+    [(["test-oven"], "F"), ([], "F"), (["test-fridge"], "C")],
+    ids=["swap-appliance", "clear-selection", "change-unit"],
+)
+async def test_startup_metadata_preserves_newer_configure_options(hass, loaded, selected, unit):
+    entry, client, _, _, _ = loaded
+    reading, release = asyncio.Event(), asyncio.Event()
+    initial = list(client.appliances.return_value)
+    refreshed = [Appliance("test-fridge", "Kitchen", unit), initial[1]]
+    client.appliances.reset_mock()
+    saved = []
+
+    async def capture_options(_hass, updated):
+        saved.append(
+            {device_id: dict(device) for device_id, device in updated.options["devices"].items()}
+        )
+
+    async def appliances():
+        if client.appliances.await_count == 1:
+            reading.set()
+            await release.wait()
+            return initial
+        return refreshed
+
+    client.appliances.side_effect = appliances
+    remove_listener = entry.add_update_listener(capture_options)
+    with patch("custom_components.subzero.FcmAlerts") as alerts:
+        alerts.return_value.stop = AsyncMock()
+        pending = asyncio.create_task(hass.config_entries.async_reload(entry.entry_id))
+        try:
+            await asyncio.wait_for(reading.wait(), 1)
+            assert entry.state is ConfigEntryState.SETUP_IN_PROGRESS
+            with patch("custom_components.subzero.config_flow.SubZeroClient", return_value=client):
+                result = await hass.config_entries.options.async_init(entry.entry_id)
+                result = await hass.config_entries.options.async_configure(
+                    result["flow_id"],
+                    {
+                        "device_ids": selected,
+                        "status_poll_interval": "60",
+                        "firebase_alerts": True,
+                    },
+                )
+            expected = dict(entry.options["devices"])
+            assert set(expected) == set(selected)
+        finally:
+            release.set()
+            await pending
+        await hass.async_block_till_done()
+        remove_listener()
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.state is ConfigEntryState.LOADED
+    assert entry.options == {
+        "devices": expected,
+        "status_poll_interval": 60,
+        "firebase_alerts": True,
+    }
+    assert saved and all(devices == expected for devices in saved)
+    assert {
+        device_id: coordinator.device
+        for device_id, coordinator in entry.runtime_data.coordinators.items()
+    } == expected
+
+
+async def test_configure_retries_failed_setup_with_the_new_selection(hass, loaded):
+    entry, client, _, _, _ = loaded
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    client.state.side_effect = ApiError("Appliance unavailable")
+    assert not await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.SETUP_RETRY
+    client.state.side_effect = None
+    ready = asyncio.Event()
+
+    def mark_ready():
+        if entry.state is ConfigEntryState.LOADED:
+            ready.set()
+
+    remove_listener = entry.async_on_state_change(mark_ready)
+    try:
+        with patch("custom_components.subzero.config_flow.SubZeroClient", return_value=client):
+            result = await hass.config_entries.options.async_init(entry.entry_id)
+            result = await hass.config_entries.options.async_configure(
+                result["flow_id"], {"device_ids": ["test-oven"], "status_poll_interval": "300"}
+            )
+        await asyncio.wait_for(ready.wait(), 1)
+    finally:
+        remove_listener()
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.LOADED
+    assert set(entry.options["devices"]) == {"test-oven"}
+    assert set(entry.runtime_data.coordinators) == {"test-oven"}
+    assert client.watched == [["test-fridge"], ["test-fridge"], ["test-oven"]]
 
 
 async def test_deselecting_removes_only_that_appliance(hass, loaded):
@@ -1156,9 +2008,10 @@ async def test_oven_entities_follow_the_reported_snapshot(hass, oven_loaded):
     entities = er.async_entries_for_device(
         er.async_get(hass), device.id, include_disabled_entities=True
     )
-    assert len(entities) == 26
+    assert len(entities) == 27
     assert {entity.unique_id for entity in entities if entity.disabled_by is not None} == {
         "test-oven_live_reporting_mode",
+        "test-oven_state_confirmed_at",
     }
     assert hass.states.get("switch.wall_oven_oven_light").state == "off"
     assert hass.states.get("binary_sensor.wall_oven_cooking").state == "off"

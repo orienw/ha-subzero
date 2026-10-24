@@ -49,6 +49,13 @@
     }
   },
   "services": {
+    "read_status": {
+      "name": "Read appliance status",
+      "description": "Read and confirm current appliance state before continuing. Fails if complete state cannot be confirmed.",
+      "fields": {
+        "device_id": {"name": "Appliance", "description": "The appliance to read."}
+      }
+    },
     "schedule_ice_delay": {
       "name": "Schedule ice delay",
       "description": "Pause a dedicated ice maker for 1 to 12 hours, now or later today.",
@@ -63,19 +70,30 @@
   "options": {
     "step": {
       "init": {
-        "title": "Choose appliances",
-        "description": "The list is refreshed from your Sub-Zero account. Deselecting an appliance removes its Home Assistant device and entities.",
-        "data": {"device_ids": "Appliances"}
+        "title": "Appliances and updates",
+        "description": "The list is refreshed from your Sub-Zero account. Deselecting an appliance removes its Home Assistant device and entities. Periodic state checks help recover missed updates. Optional Firebase alerts use a separate notification channel; sensor values still require appliance status.",
+        "data": {"device_ids": "Appliances", "status_poll_interval": "State check interval", "firebase_alerts": "Firebase appliance alerts"}
       }
     },
     "error": {
-      "cannot_connect": "Could not refresh the appliance list. Try again later.",
-      "rate_limited": "Sub-Zero asked us to slow down. Wait before trying again.",
+      "cannot_connect": "Could not refresh the appliance list. You can configure any saved appliances listed below, or try again later.",
+      "rate_limited": "Sub-Zero asked us to slow down. You can configure any saved appliances listed below. Wait before refreshing the list.",
       "invalid_device": "Select appliances from this account."
     },
     "abort": {
       "reauth_required": "Sign in again using Home Assistant's Sub-Zero sign-in prompt, then reopen Configure.",
       "all_configured": "These appliances are already managed by another Sub-Zero entry. Reopen Configure to refresh the list."
+    }
+  },
+  "selector": {
+    "status_poll_interval": {
+      "options": {
+        "0": "No periodic checks",
+        "60": "1 minute",
+        "120": "2 minutes",
+        "300": "5 minutes",
+        "600": "10 minutes"
+      }
     }
   },
   "entity": {
