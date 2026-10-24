@@ -737,6 +737,47 @@ async def test_control_reads_first_while_the_state_lacks_a_key_reads_have_report
     assert controls.client.state.await_count == 2
 
 
+async def test_control_waits_for_a_read_that_stands_when_a_reduced_snapshot_supersedes_its_reply(
+    hass, controls
+):
+    coordinator = controls.entry.runtime_data.coordinators["test-fridge"]
+    controls.states["test-fridge"]["max_ice_on"] = True
+    reading, release = asyncio.Event(), asyncio.Event()
+
+    async def read(device_id):
+        reading.set()
+        await release.wait()
+        # Every reply carries the interlock.
+        return dict(controls.states[device_id])
+
+    controls.client.state.reset_mock()
+    controls.client.state.side_effect = read
+    coordinator.async_transport_error(ApiError("Stream disconnected"))
+    command = asyncio.create_task(coordinator.async_set_properties({"frz_set_temp": 1}))
+    await asyncio.wait_for(reading.wait(), 1)
+    # Another interruption during the control's read, then a snapshot lacking Max Ice
+    # replaces state. It supersedes the complete reply, so the control reads again
+    # rather than writing against state without the interlock.
+    coordinator.async_transport_error(ApiError("Stream disconnected again"))
+    coordinator.apply_update(
+        StateUpdate(
+            {
+                key: value
+                for key, value in controls.states["test-fridge"].items()
+                if key != "max_ice_on"
+            },
+            full=True,
+        )
+    )
+    assert "max_ice_on" not in coordinator.data
+    release.set()
+    with pytest.raises(ServiceValidationError, match="Max Ice"):
+        await command
+    controls.client.set_property.assert_not_awaited()
+    assert coordinator.data["max_ice_on"] is True
+    assert controls.client.state.await_count >= 2
+
+
 async def test_disconnect_between_ordered_writes_rechecks_the_next_setting(hass, controls):
     coordinator = controls.entry.runtime_data.coordinators["test-fridge"]
     original = controls.client.set_property.side_effect

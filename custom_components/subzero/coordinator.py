@@ -89,6 +89,8 @@ class StateRead:
     conflicted: bool = False
     # State keys status reads have reported that the published state lacks.
     missing_keys: tuple[str, ...] = ()
+    # The reply was discarded for a snapshot that replaced state after a reconnect.
+    superseded: bool = False
 
 
 def status_poll_interval(entry: ConfigEntry) -> int:
@@ -514,9 +516,15 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         first. The write then proceeds on what the read returned: a reply that still
         lacks the key does not block it, since the appliance enforces its own
         interlocks and refusing would refuse every control for as long as replies
-        lack that key.
+        lack that key. A reply discarded for a snapshot that replaced state is
+        another matter: the snapshot may lack what the reply carried, so the write
+        waits for a read that stands.
         """
-        await self.async_read_status()
+        result = await self.async_read_status()
+        for _ in range(2):
+            if not (result.superseded and result.missing_keys):
+                break
+            result = await self.async_read_status()
 
     async def _async_confirm_command_generation(self) -> None:
         if self._command_generation != self._transport_generation:
@@ -828,6 +836,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             published=self._published,
             conflicted=conflicted,
             missing_keys=tuple(missing),
+            superseded=superseded,
         )
         if superseded and missing:
             # The snapshot that replaced state superseded the reply, and lacks keys
