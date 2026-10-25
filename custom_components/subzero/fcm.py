@@ -223,6 +223,9 @@ class FcmAlerts:
                             http_client_session=async_get_clientsession(self.hass),
                         )
                         token = await self.push.checkin_or_register()
+                        if self._stop.is_set():
+                            # Stopped during check-in; the socket would only be torn down.
+                            return
                         await self.push.start()
                         self.last_error = None
                         next_sync = 0.0

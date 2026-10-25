@@ -430,7 +430,8 @@ async def test_disabling_firebase_during_checkin_does_not_start_subscription_syn
     assert account.alerts is None
     assert len(push_clients) == 1
     assert not push_clients[0].do_listen
-    assert all(task.done() for task in push_clients[0].tasks)
+    # Stopped during check-in, so the listener never started.
+    assert push_clients[0].tasks == []
 
 
 @fridge
