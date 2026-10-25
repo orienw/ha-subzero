@@ -1,7 +1,9 @@
 """Account setup, appliance selection and reauthentication through HA."""
 
 import asyncio
+import json
 from contextlib import suppress
+from pathlib import Path
 from unittest.mock import patch
 
 import aiohttp
@@ -966,3 +968,10 @@ async def test_options_toggle_firebase_alerts(hass, tokens, enabled):
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert entry.options.get("firebase_alerts", False) is enabled
     assert entry.options["status_poll_interval"] == 0
+
+
+def test_translations_match_strings():
+    component = Path(__file__).parents[1] / "custom_components" / "subzero"
+    strings = json.loads((component / "strings.json").read_text())
+    english = json.loads((component / "translations" / "en.json").read_text())
+    assert english == strings

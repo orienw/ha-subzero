@@ -51,7 +51,7 @@
   "services": {
     "read_status": {
       "name": "Read appliance status",
-      "description": "Read and confirm current appliance state before continuing. Fails if complete state cannot be confirmed.",
+      "description": "Read and confirm current appliance state before continuing. Fails if the state cannot be read or changes during the read.",
       "fields": {
         "device_id": {"name": "Appliance", "description": "The appliance to read."}
       }
