@@ -1,6 +1,8 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# A test that waits on the integration must fail, not hang the run.
+timeout = 60
 
 [tool.ruff]
 target-version = "py314"

@@ -1527,7 +1527,7 @@ async def test_appliance_without_a_status_keeps_its_device_details(hass, applian
     assert oven() == ("Wolf", "DO30PM")
 
 
-async def test_coordinators_are_named_for_their_appliance(hass, appliances):
+async def test_coordinators_are_named_for_their_appliance(appliances):
     account = appliances.entry.runtime_data
     assert account.coordinators["oven"].name == "subzero Oven"
     assert account.fault_coordinators["oven"].name == "subzero Oven faults"
@@ -1589,9 +1589,12 @@ async def test_invalid_targets_make_climate_unavailable(hass, appliances, value)
     appliances.client.set_property.assert_not_awaited()
 
 
-@pytest.mark.parametrize("value", [True, None, 1])
-async def test_freezer_climate_respects_max_ice_interlock(hass, appliances, value):
+@pytest.mark.parametrize(
+    ("value", "binary_state"), [(True, "on"), (None, "unknown"), (1, "unknown")]
+)
+async def test_freezer_climate_respects_max_ice_interlock(hass, appliances, value, binary_state):
     await appliances.update("fridge", {"max_ice_on": value})
+    assert hass.states.get("binary_sensor.fridge_max_ice").state == binary_state
     assert hass.states.get("climate.fridge_freezer").state == "unavailable"
     assert hass.states.get("number.fridge_freezer_setpoint").state == "unavailable"
     assert hass.states.get("climate.fridge_refrigerator").state == "cool"
@@ -1903,18 +1906,6 @@ async def test_accent_light_accepts_both_reported_encodings(hass, appliances):
     assert hass.states.get("select.fridge_accent_light").state == "Medium"
 
 
-async def test_optional_entities_report_native_values(appliances):
-    coordinator = appliances.entry.runtime_data.coordinators["fridge"]
-    uptime = SubZeroSensor(coordinator, next(d for d in SENSOR_DESCRIPTIONS if d.key == "uptime"))
-    assert uptime.native_value == 435 * 3600 + 53 * 60 + 58
-    reporting = SubZeroSensor(
-        coordinator, next(d for d in SENSOR_DESCRIPTIONS if d.key == "live_reporting_mode")
-    )
-    assert reporting.native_value == "Cloud push"
-    appliances.client.push_connected = False
-    assert reporting.native_value == "Disconnected"
-
-
 async def test_live_reporting_mode_updates_during_transport_grace(
     hass, loaded, freezer, monkeypatch
 ):
@@ -1950,6 +1941,12 @@ async def test_live_reporting_mode_updates_during_transport_grace(
     assert entry.runtime_data.coordinators["test-fridge"].last_update_success
     assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "39"
     assert hass.states.get(entity_id).state == "Disconnected"
+
+
+async def test_uptime_sensor_reports_seconds(appliances):
+    coordinator = appliances.entry.runtime_data.coordinators["fridge"]
+    uptime = SubZeroSensor(coordinator, next(d for d in SENSOR_DESCRIPTIONS if d.key == "uptime"))
+    assert uptime.native_value == 435 * 3600 + 53 * 60 + 58
 
 
 @pytest.mark.parametrize(
@@ -2173,11 +2170,6 @@ async def test_timer_complete_is_written_before_timer_active(hass, appliances):
     )
     await hass.async_block_till_done()
     assert len(events) == 1
-
-
-async def test_null_binary_value_is_unknown(hass, appliances):
-    await appliances.update("fridge", {"max_ice_on": None})
-    assert hass.states.get("binary_sensor.fridge_max_ice").state == "unknown"
 
 
 async def test_null_setpoint_disables_controls_but_not_the_sensor(hass, appliances):

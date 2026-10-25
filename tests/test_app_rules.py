@@ -60,34 +60,23 @@ def friendly_name(hass, entity_id):
     return hass.states.get(entity_id).attributes["friendly_name"]
 
 
-@pytest.mark.parametrize("cloud_appliance", [RANGE], indirect=True)
-async def test_a_range_names_its_cavities_right_and_left(hass, cloud_appliance):
+@pytest.mark.parametrize(
+    ("cloud_appliance", "first", "second"),
+    [(RANGE, "right", "left"), (DOUBLE_WALL_OVEN, "upper", "lower")],
+    indirect=["cloud_appliance"],
+    ids=["range", "wall-oven"],
+)
+async def test_oven_cavity_names_follow_the_appliance(hass, cloud_appliance, first, second):
     for entity_id, name in (
-        ("climate.kitchen_right_oven", "Right oven"),
-        ("climate.kitchen_left_oven", "Left oven"),
-        ("sensor.kitchen_right_oven_temperature", "Right oven temperature"),
-        ("sensor.kitchen_left_oven_temperature", "Left oven temperature"),
-        ("select.kitchen_right_oven_cooking_mode", "Right oven cooking mode"),
-        ("switch.kitchen_left_oven_light", "Left oven light"),
-        ("button.kitchen_start_right_oven", "Start right oven"),
-        ("binary_sensor.kitchen_right_oven_door", "Right oven door"),
-        ("sensor.kitchen_left_oven_broil_level", "Left oven broil level"),
-    ):
-        assert friendly_name(hass, entity_id) == f"Kitchen {name}"
-
-
-@pytest.mark.parametrize("cloud_appliance", [DOUBLE_WALL_OVEN], indirect=True)
-async def test_a_double_wall_oven_names_its_cavities_upper_and_lower(hass, cloud_appliance):
-    for entity_id, name in (
-        ("climate.kitchen_upper_oven", "Upper oven"),
-        ("climate.kitchen_lower_oven", "Lower oven"),
-        ("sensor.kitchen_upper_oven_temperature", "Upper oven temperature"),
-        ("sensor.kitchen_lower_oven_temperature", "Lower oven temperature"),
-        ("select.kitchen_upper_oven_cooking_mode", "Upper oven cooking mode"),
-        ("switch.kitchen_lower_oven_light", "Lower oven light"),
-        ("button.kitchen_start_upper_oven", "Start upper oven"),
-        ("binary_sensor.kitchen_upper_oven_door", "Upper oven door"),
-        ("sensor.kitchen_lower_oven_broil_level", "Lower oven broil level"),
+        (f"climate.kitchen_{first}_oven", f"{first.title()} oven"),
+        (f"climate.kitchen_{second}_oven", f"{second.title()} oven"),
+        (f"sensor.kitchen_{first}_oven_temperature", f"{first.title()} oven temperature"),
+        (f"sensor.kitchen_{second}_oven_temperature", f"{second.title()} oven temperature"),
+        (f"select.kitchen_{first}_oven_cooking_mode", f"{first.title()} oven cooking mode"),
+        (f"switch.kitchen_{second}_oven_light", f"{second.title()} oven light"),
+        (f"button.kitchen_start_{first}_oven", f"Start {first} oven"),
+        (f"binary_sensor.kitchen_{first}_oven_door", f"{first.title()} oven door"),
+        (f"sensor.kitchen_{second}_oven_broil_level", f"{second.title()} oven broil level"),
     ):
         assert friendly_name(hass, entity_id) == f"Kitchen {name}"
 
@@ -195,12 +184,8 @@ async def test_two_wine_zones_are_upper_and_lower(hass, cloud_appliance):
 
 
 @pytest.mark.parametrize("cloud_appliance", [SINGLE_ZONE_WINE], indirect=True)
-async def test_a_single_wine_zone_keeps_its_name(hass, cloud_appliance):
-    assert friendly_name(hass, "climate.kitchen_wine") == "Kitchen Wine"
-
-
-@pytest.mark.parametrize("cloud_appliance", [SINGLE_ZONE_WINE], indirect=True)
 async def test_a_second_wine_zone_reported_later_renames_the_first(hass, cloud_appliance):
+    assert friendly_name(hass, "climate.kitchen_wine") == "Kitchen Wine"
     await cloud_appliance.update({"wine2_set_temp": 45})
     assert friendly_name(hass, "climate.kitchen_wine") == "Kitchen Upper wine"
     assert friendly_name(hass, "number.kitchen_wine_setpoint") == "Kitchen Upper wine setpoint"

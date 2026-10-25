@@ -409,6 +409,8 @@ async def test_overlapping_call_requests_each_start_a_poll(hass):
             result = await waiting
         assert result["type"] is FlowResultType.SHOW_PROGRESS
         assert requests == 2
+        await asyncio.sleep(0)
+        assert polls == 2
 
         hass.config_entries.flow.async_abort(flow_id)
         await hass.async_block_till_done()

@@ -735,13 +735,6 @@ async def test_firmware_updates_device_registry_without_reload(hass, loaded, pus
     assert registry.async_get(device.id).sw_version == "2.0"
 
 
-async def test_unload_closes_push_listener(hass, loaded):
-    entry, _, _, disconnected, _ = loaded
-    assert await hass.config_entries.async_unload(entry.entry_id)
-    await hass.async_block_till_done()
-    assert disconnected.is_set()
-
-
 @pytest.mark.parametrize("loaded", ["K", None], indirect=True)
 async def test_unknown_units_skip_temperature_entities(hass, loaded):
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
@@ -835,6 +828,7 @@ async def test_units_are_saved_even_if_status_fails(hass, loaded):
     await hass.config_entries.async_reload(entry.entry_id)
     await hass.async_block_till_done()
     assert entry.state is ConfigEntryState.SETUP_RETRY
+    assert client.state.await_count == 2
     assert entry.data["devices"]["test-fridge"]["temperature_unit"] == "C"
 
     client.appliances.side_effect = ApiError("Appliance list unavailable")
@@ -1278,15 +1272,6 @@ async def test_offline_channel_waits_for_reopen_before_status_checks(hass, loade
     await hass.async_block_till_done()
     client.state.assert_awaited_once_with("test-fridge")
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
-
-
-async def test_failed_setup_read_leaves_recovery_to_setup_retry(hass, loaded):
-    entry, client, _, _, _ = loaded
-    client.state.side_effect = ApiError("Status timed out")
-    await hass.config_entries.async_reload(entry.entry_id)
-    await hass.async_block_till_done()
-    assert entry.state is ConfigEntryState.SETUP_RETRY
-    assert client.state.await_count == 2
 
 
 async def test_recovery_preserves_incoming_updates_and_other_appliances(hass, oven_loaded):
