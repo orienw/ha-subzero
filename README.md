@@ -46,8 +46,6 @@ Controls and sensors depend on what each appliance reports. Additional entities 
 
 Temperatures use your preferred Home Assistant unit. Celsius setpoints may be rounded to the appliance's whole-degree Fahrenheit precision. Shared features include Wi-Fi signal strength and **Active faults**. The fault list refreshes every 30 minutes while Home Assistant polling is enabled.
 
-**Sub-Zero CL4850UFDID is the primary tested appliance.** Wolf SO3050PMSP status and push updates have also been tested. Other appliance types, controls, Firebase alerts, and recovery from intermittent failures have automated test coverage, but physical testing is limited.
-
 ### Using the controls
 
 - **Refrigerators:** temperature setpoints are configured targets; measured temperatures appear only when the appliance reports them. Turn off Max ice before changing the freezer setpoint. Choose Manual crisper mode to adjust the crisper setpoint.
