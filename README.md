@@ -5,7 +5,6 @@
 Monitor and control connected Sub-Zero, Wolf, and Cove appliances from Home Assistant. The integration uses Sub-Zero's cloud service over your appliances' existing Wi-Fi connections.
 
 [![Latest stable release](https://img.shields.io/github/v/release/orienw/ha-subzero?sort=date&style=for-the-badge&label=stable&color=blue)](https://github.com/orienw/ha-subzero/releases/latest)
-[![Latest beta release](https://img.shields.io/github/v/release/orienw/ha-subzero?include_prereleases&filter=*b*&sort=date&style=for-the-badge&label=beta&color=orange)](https://github.com/orienw/ha-subzero/releases)
 
 ## Installation
 
