@@ -966,7 +966,9 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                     **{key: value for key, value in data.items() if key in STATE_KEYS},
                     **updates,
                 }
-                if history is not None:
+                if history is not None and received:
+                    # A rescued or superseded read starts from cached state, which
+                    # already holds the records pushed during the read.
                     data["notifs"] = [*history, *updates.get("notifs", [])]
                 data = self._discard_excluded(data)
                 # What the published state lacks of the keys reads report, for the

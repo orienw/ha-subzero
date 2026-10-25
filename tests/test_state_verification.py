@@ -1797,6 +1797,24 @@ async def test_an_unexpected_event_listener_failure_does_not_wedge_future_reads(
     assert len(observed) == 1
 
 
+async def test_rescued_read_keeps_pushed_history_once(hass, loaded):
+    entry, client, _, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    record = {"notif_seq": 7, "notif_type": 101, "timestamp": dt_util.utcnow().isoformat()}
+
+    async def failed_read(_device_id):
+        coordinator.apply_update(
+            StateUpdate({**client.state.return_value, "notifs": [record]}, full=True)
+        )
+        raise ApiError("Status request failed")
+
+    client.state.side_effect = failed_read
+    await coordinator.async_verify_state()
+    # The snapshot already put its records into cached state; the rescue must not
+    # append them again.
+    assert coordinator.data["notifs"] == [record]
+
+
 async def test_discarded_property_pushed_during_read_does_not_conflict(hass, loaded):
     entry, client, _, _, _ = loaded
     coordinator = entry.runtime_data.coordinators["test-fridge"]
