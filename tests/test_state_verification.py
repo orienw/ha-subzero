@@ -1832,3 +1832,49 @@ async def test_discarded_property_pushed_during_read_does_not_conflict(hass, loa
     result = await coordinator.async_read_status()
     assert not result.conflicted
     assert "accent_light_level" not in coordinator.data
+
+
+async def test_discarded_property_conflict_follows_the_published_type(hass, loaded):
+    """The exclusions of the reference's type do not hide a disagreement on a
+    property the pushed type keeps."""
+    entry, client, _, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    reply = {**client.state.return_value, "appliance_type": "17.1.1.0"}
+    reply.pop("accent_light_level", None)
+    client.state.return_value = reply
+    await coordinator.async_read_status()
+
+    async def read_during_type_change(_device_id):
+        coordinator.apply_update(
+            StateUpdate({"appliance_type": "17.1.1.1", "accent_light_level": 2}, full=False)
+        )
+        return dict(reply)
+
+    client.state.side_effect = read_during_type_change
+    result = await coordinator._async_read_result()
+    assert result.conflicted
+    assert coordinator.data["accent_light_level"] == 2
+
+
+async def test_discarded_property_conflict_does_not_borrow_another_models_type(hass, loaded):
+    entry, client, _, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    reply = {**client.state.return_value, "appliance_type": "17.1.1.0"}
+    reply.pop("accent_light_level", None)
+    client.state.return_value = reply
+    await coordinator.async_read_status()
+    other = {
+        key: value
+        for key, value in reply.items()
+        if key not in {"appliance_type", "accent_light_level"}
+    }
+    other["appliance_model"] = "OTHER-FRIDGE"
+    other["accent_light_level"] = 1
+
+    async def read_other_model(_device_id):
+        coordinator.apply_update(StateUpdate({"accent_light_level": 2}, full=False))
+        return other
+
+    client.state.side_effect = read_other_model
+    result = await coordinator._async_read_result()
+    assert result.conflicted

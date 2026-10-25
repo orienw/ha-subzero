@@ -933,10 +933,15 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 reference = data if received else self._read_snapshot
                 observed_keys = partial_keys if received else updates.keys() | partial_keys
                 observed = {**dropped, **updates} if received else updates
+                model = updates.get("appliance_model")
+                other_model = (
+                    isinstance(model, str) and model and model != data.get("appliance_model")
+                )
                 # Clock and signal readings differ between any two observations, an
                 # observation without a usable type keeps the known one, and a
-                # property the app discards for the type never reaches state.
-                typed = reference if appliance_type(reference or {}) is not None else self.data
+                # property the app discards for the type the published state will
+                # carry never reaches it.
+                published = self._with_known_type({**({} if other_model else data), **updates})
                 conflicted = reference is not None and any(
                     key not in reference
                     or key not in observed
@@ -944,9 +949,8 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                     or type(observed[key]) is not type(reference[key])
                     for key in observed_keys
                     - {"notifs", "time", "uptime", "ap_rssi", "appliance_type"}
-                    - excluded_properties(typed)
+                    - excluded_properties(published)
                 )
-                model = updates.get("appliance_model")
                 if received and (not model or model == data.get("appliance_model")):
                     # A reply published after a conflict or a reconnect still shows
                     # what reads report, so it is recorded without certifying state.
@@ -958,8 +962,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 self.unrecognized_keys.update(data.keys() - STATE_KEYS)
                 if "notifs" in data:
                     data = {**data, "notifs": notification_records(data)}
-                model = updates.get("appliance_model")
-                if isinstance(model, str) and model and model != data.get("appliance_model"):
+                if other_model:
                     data = {}
                 history = data.get("notifs")
                 data = {
@@ -1048,18 +1051,20 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             reference = {**reference, **update.properties}
         return properties, partial_keys, dropped, restarted
 
-    def _discard_excluded(self, data: dict) -> dict:
-        """Drop the properties the app discards for the appliance type.
-
-        Like the app, a response without a usable type keeps the type already
-        known for the same appliance model.
-        """
+    def _with_known_type(self, data: dict) -> dict:
+        """Like the app, an observation without a usable type keeps the type already
+        known for the same appliance model."""
         if (
             appliance_type(data) is None
             and appliance_type(self.data) is not None
             and data.get("appliance_model") == self.data.get("appliance_model")
         ):
-            data = {**data, "appliance_type": self.data["appliance_type"]}
+            return {**data, "appliance_type": self.data["appliance_type"]}
+        return data
+
+    def _discard_excluded(self, data: dict) -> dict:
+        """Drop the properties the app discards for the appliance type."""
+        data = self._with_known_type(data)
         excluded = excluded_properties(data)
         return {key: value for key, value in data.items() if key not in excluded}
 
