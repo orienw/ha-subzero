@@ -1795,3 +1795,22 @@ async def test_an_unexpected_event_listener_failure_does_not_wedge_future_reads(
     await coordinator.async_read_status()
     assert client.state.await_count == 2
     assert len(observed) == 1
+
+
+async def test_discarded_property_pushed_during_read_does_not_conflict(hass, loaded):
+    entry, client, _, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    # Series 1 category 1 version 0 discards the accent light level.
+    reply = {**client.state.return_value, "appliance_type": "17.1.1.0"}
+    reply.pop("accent_light_level", None)
+    client.state.return_value = reply
+    await coordinator.async_read_status()
+
+    async def read_during_push(_device_id):
+        coordinator.apply_update(StateUpdate({"accent_light_level": 2}, full=False))
+        return dict(reply)
+
+    client.state.side_effect = read_during_push
+    result = await coordinator.async_read_status()
+    assert not result.conflicted
+    assert "accent_light_level" not in coordinator.data
