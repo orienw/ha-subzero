@@ -1,6 +1,7 @@
 {
   "domain": "subzero",
   "name": "Sub-Zero",
+  "categories": ["appliances_cleaning"],
   "codeowners": ["@orienw"],
   "config_flow": true,
   "documentation": "https://github.com/orienw/ha-subzero",
