@@ -463,16 +463,18 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         version = self.data.get("version")
         serial = self.data.get("appliance_serial")
         info.update(
-            manufacturer=(
-                "Cove"
-                if is_dishwasher(self.data)
-                else "Wolf"
-                if is_oven(self.data) or is_hood(self.data)
-                else "Sub-Zero"
-            ),
-            model=self.data["appliance_model"],
-            serial_number=serial if isinstance(serial, str) else None,
-            sw_version=version.get("fw") if isinstance(version, dict) else None,
+            {
+                "manufacturer": (
+                    "Cove"
+                    if is_dishwasher(self.data)
+                    else "Wolf"
+                    if is_oven(self.data) or is_hood(self.data)
+                    else "Sub-Zero"
+                ),
+                "model": self.data["appliance_model"],
+                "serial_number": serial if isinstance(serial, str) else None,
+                "sw_version": version.get("fw") if isinstance(version, dict) else None,
+            }
         )
         return info
 
