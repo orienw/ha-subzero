@@ -10,18 +10,17 @@ Monitor and control connected Sub-Zero, Wolf, and Cove appliances from Home Assi
 
 You need Home Assistant **2026.8.0 or newer** and an appliance already connected to your Sub-Zero Group Owner account. The Owner's App is available in [Canada, Mexico, and the United States](https://www.subzero-wolf.com/assistance/answers/multi-brand/sub-zero-group-owner-s-app-location-availability).
 
-[![Open this repository in HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=orienw&repository=ha-subzero&category=integration)
+[![Open this repository in the Marketplace or HACS](https://my.home-assistant.io/badges/marketplace_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=orienw&repository=ha-subzero&category=integration)
 
-1. Open **HACS**, search for **Sub-Zero**, and download it.
-2. Restart Home Assistant.
-3. Go to **Settings → Devices & services → Add integration → Sub-Zero**.
-4. Sign in with your Sub-Zero account email and password, then select your appliances.
+1. On Home Assistant 2026.11 or newer, open **Settings → Marketplace**. On earlier versions, open **HACS**. Search for **Sub-Zero** and download it.
+2. Go to **Settings → Devices & services → Add integration → Sub-Zero**.
+3. Sign in with your Sub-Zero account email and password, then select your appliances.
 
 If your account uses multi-factor authentication, setup supports text-message codes and phone calls. It may also ask you to enter characters from an image. External-provider sign-in and other verification methods are not supported.
 
 Use **Configure** on the integration to change your appliance selection, state check interval, or Firebase alerts. Deselecting an appliance removes its Home Assistant device and entities.
 
-For manual installation, copy `custom_components/subzero` into your Home Assistant configuration's `custom_components` directory, restart, and continue from step 3.
+For manual installation, copy `custom_components/subzero` into your Home Assistant configuration's `custom_components` directory, restart, and continue from step 2.
 
 ## Features
 
