@@ -1978,6 +1978,8 @@ async def test_diagnostics_count_push_updates(hass, appliances):
     initial = {
         "snapshots": 0,
         "updates": 0,
+        "snapshot_flips": 0,
+        "last_snapshot_flip_age_seconds": None,
         "last_received": None,
         "last_channel_message": None,
     }

@@ -150,6 +150,10 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self.push_stats: dict[str, int | str | None] = {
             "snapshots": 0,
             "updates": 0,
+            # Snapshots that changed an on/off value no update had reported, and the
+            # latest one's age on arrival by the appliance clock.
+            "snapshot_flips": 0,
+            "last_snapshot_flip_age_seconds": None,
             "last_received": None,
         }
         self._command_lock = asyncio.Lock()
@@ -1102,6 +1106,30 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             await asyncio.sleep(max(backoff, retry_after) + random.uniform(0, 5))
             backoff = min(backoff * 2, MAX_RECONNECT_DELAY)
 
+    def _count_snapshot_flips(self, update: StateUpdate, properties: dict, published: dict) -> None:
+        # Either an update went missing, and the snapshot is seconds old, or the
+        # snapshot arrived late, minutes old, and may restore a stale value. The age
+        # is by the appliance clock, so a wrong clock or time zone skews it.
+        flipped = sorted(
+            key
+            for key in properties.keys() & published.keys()
+            if type(published[key]) is bool
+            and type(self.data.get(key)) is bool
+            and published[key] is not self.data[key]
+        )
+        if not flipped:
+            return
+        observed = appliance_datetime(update.properties.get("time"), self.clock_zone)
+        age = round((dt_util.utcnow() - observed).total_seconds()) if observed else None
+        self.push_stats["snapshot_flips"] += 1
+        self.push_stats["last_snapshot_flip_age_seconds"] = age
+        _LOGGER.debug(
+            "%s snapshot changed %s without an update, snapshot age %s s",
+            self.device["name"],
+            ", ".join(flipped),
+            age,
+        )
+
     @callback
     def apply_update(self, update: StateUpdate) -> bool:
         self.push_stats["snapshots" if update.full else "updates"] += 1
@@ -1157,6 +1185,8 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         )
         if self.last_update_success or update.full:
             updated = self._discard_excluded(properties if replace else {**self.data, **properties})
+            if update.full and not replace:
+                self._count_snapshot_flips(update, properties, updated)
             if (
                 update.full
                 or updated != self.data

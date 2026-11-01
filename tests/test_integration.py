@@ -673,6 +673,46 @@ async def test_debug_log_reports_push_updates_without_network_identifiers(hass, 
         assert private not in caplog.text
 
 
+async def test_snapshots_count_on_off_changes_no_update_reported(hass, freezer, loaded, caplog):
+    entry, client, updates, _, _ = loaded
+    caplog.set_level(logging.DEBUG, logger="custom_components.subzero.coordinator")
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    snapshot = client.state.return_value
+    await updates.put(StateUpdate({"ref_door_ajar": True, "ice_maker_on": False}, full=False))
+    await updates.put(
+        StateUpdate({**snapshot, "ref_door_ajar": True, "ref_set_temp": 39}, full=True)
+    )
+    # The type this snapshot reports discards the ice maker key, so nothing changes.
+    await updates.put(
+        StateUpdate(
+            {**snapshot, "ref_door_ajar": True, "appliance_type": "1.2.6.1", "ice_maker_on": True},
+            full=True,
+        )
+    )
+    await hass.async_block_till_done()
+    assert coordinator.push_stats["snapshot_flips"] == 0
+    assert coordinator.push_stats["last_snapshot_flip_age_seconds"] is None
+    # A snapshot taken 20 minutes ago, before the door opened, closes it again.
+    taken = (dt_util.utcnow() - timedelta(minutes=20)).isoformat()
+    await updates.put(StateUpdate({**snapshot, "time": taken}, full=True))
+    await hass.async_block_till_done()
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
+    assert coordinator.push_stats["snapshot_flips"] == 1
+    assert coordinator.push_stats["last_snapshot_flip_age_seconds"] == 1200
+    assert "Kitchen snapshot changed ref_door_ajar without an update, snapshot age 1200 s" in (
+        caplog.text
+    )
+    # A snapshot that replaces state, here after a model change, is not compared.
+    await updates.put(
+        StateUpdate(
+            {**snapshot, "appliance_model": "REPLACED-MODEL", "ref_door_ajar": True}, full=True
+        )
+    )
+    await hass.async_block_till_done()
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
+    assert coordinator.push_stats["snapshot_flips"] == 1
+
+
 @pytest.mark.parametrize(
     "pload",
     [
