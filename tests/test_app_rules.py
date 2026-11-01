@@ -120,8 +120,8 @@ async def test_an_upgrade_keeps_first_cavity_entity_ids(hass, cloud_appliance, f
     assert friendly_name(hass, "climate.kitchen_oven") == f"Kitchen {first.title()} oven"
     assert friendly_name(hass, "button.kitchen_start_oven") == f"Kitchen Start {first} oven"
     assert hass.states.get(f"climate.kitchen_{first}_oven") is None
-    # A user's own name is kept.
-    assert friendly_name(hass, "switch.kitchen_oven_light") == "Lamp"
+    # A user's own name is kept. Home Assistant 2026.11 shows it after the device name.
+    assert er.async_get(hass).async_get("switch.kitchen_oven_light").name == "Lamp"
 
 
 @pytest.mark.parametrize("cloud_appliance", [RANGE], indirect=True)
