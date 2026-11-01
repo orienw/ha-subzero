@@ -45,7 +45,7 @@ async def async_setup_entry(
 
 
 class SubZeroClimate(SubZeroEntity, ClimateEntity):
-    _attr_temperature_unit = UnitOfTemperature.FAHRENHEIT
+    _attr_native_temperature_unit = UnitOfTemperature.FAHRENHEIT
     _attr_target_temperature_step = 1
 
     def __init__(self, coordinator, description):
@@ -85,7 +85,7 @@ class SubZeroClimate(SubZeroEntity, ClimateEntity):
         return HVACMode.HEAT if value is True else HVACMode.OFF if value is False else None
 
     @property
-    def current_temperature(self) -> int | float | None:
+    def native_current_temperature(self) -> int | float | None:
         key = f"{self._prefix}_{'temp' if self._oven else 'display_temp'}"
         value = self.coordinator.data.get(key)
         if not is_finite_number(value):
@@ -96,11 +96,17 @@ class SubZeroClimate(SubZeroEntity, ClimateEntity):
         return None if self._oven and value == 0 else value
 
     @property
-    def target_temperature(self) -> int | float | None:
+    def native_target_temperature(self) -> int | float | None:
         value = self.coordinator.data.get(self.entity_description.key)
         if not is_finite_number(value):
             return None
         return None if self._oven and value == 0 else value
+
+    if not hasattr(ClimateEntity, "native_current_temperature"):
+        # Home Assistant before 2026.11 reads the old names.
+        _attr_temperature_unit = _attr_native_temperature_unit
+        current_temperature = native_current_temperature
+        target_temperature = native_target_temperature
 
     @property
     def min_temp(self) -> float:
