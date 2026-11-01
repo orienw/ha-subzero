@@ -42,6 +42,8 @@ Controls and sensors depend on what each appliance reports. Additional entities 
 | [Wolf hoods](docs/reference.md#hoods) | Four fan speeds, task-light brightness and color temperature, halo lighting, automatic fan sensitivity, delayed shutoff, and control lock |
 | [Cove dishwashers](docs/reference.md#dishwashers) | Cycle selection, remote start and cancel, delayed start, wash options, cycle progress, door status, rinse aid, and softener salt |
 
+Some appliances [can't connect to Sub-Zero's cloud](https://www.subzero-wolf.com/assistance/answers/multi-brand/sub-zero-group-owners-app-cannot-find-appliance), including Wolf convection steam ovens, speed ovens, microwaves, and cooktops. The Owner's App can list them for guides and recipes, but they don't appear in Home Assistant.
+
 Temperatures use your preferred Home Assistant unit. Celsius setpoints may be rounded to the appliance's whole-degree Fahrenheit precision. Shared features include Wi-Fi signal strength and **Active faults**. The fault list refreshes every 30 minutes while Home Assistant polling is enabled.
 
 ### Using the controls
