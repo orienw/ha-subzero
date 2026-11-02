@@ -2086,7 +2086,7 @@ async def test_oven_push_updates_leave_the_fridge_alone(hass, oven_loaded):
     assert hass.states.get("binary_sensor.wall_oven_cooking").state == "on"
     assert hass.states.get("switch.wall_oven_oven_light").state == "on"
     assert hass.states.get("binary_sensor.wall_oven_oven_door").state == "on"
-    assert hass.states.get("binary_sensor.wall_oven_kitchen_timer_active").state == "on"
+    assert hass.states.get("binary_sensor.wall_oven_kitchen_timer_1_active").state == "on"
     assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "38"
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
     await updates.put(
@@ -2144,7 +2144,7 @@ async def test_push_discovers_all_platforms_for_each_appliance(hass, oven_loaded
         "sensor.wall_oven_lower_oven_temperature": "unknown",
         "switch.wall_oven_lower_oven_light": "off",
         "select.wall_oven_lower_oven_cooking_mode": "Bake",
-        "number.wall_oven_kitchen_timer_duration": "0",
+        "number.wall_oven_kitchen_timer_1_duration": "0",
         "button.wall_oven_start_lower_oven": "unavailable",
     }
     assert all(hass.states.get(entity_id) is None for entity_id in expected)

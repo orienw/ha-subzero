@@ -4,6 +4,8 @@ import pytest
 from homeassistant.helpers import entity_registry as er
 from homeassistant.util.unit_system import US_CUSTOMARY_SYSTEM
 
+from custom_components.subzero.entity import zone_name
+
 CAVITY = {
     "temp": 75,
     "set_temp": 350,
@@ -193,3 +195,16 @@ async def test_a_second_wine_zone_reported_later_renames_the_first(hass, cloud_a
     # A snapshot from a different model replaces the state, dropping the second zone.
     await cloud_appliance.update({**SINGLE_ZONE_WINE, "appliance_model": "DEU2450R"}, full=True)
     assert friendly_name(hass, "climate.kitchen_wine") == "Kitchen Wine"
+
+
+def test_first_kitchen_timer_is_numbered_only_beside_a_second():
+    names = {
+        "kitchen_timer_duration": "Kitchen timer duration",
+        "dismiss_kitchen_timer": "Dismiss kitchen timer",
+    }
+    two = {"appliance_type": "17.15.1.3", "kitchen_timer2_active": False}
+    assert zone_name(two, "kitchen_timer_duration", names) == "Kitchen timer 1 duration"
+    assert zone_name(two, "dismiss_kitchen_timer", names) == "Dismiss kitchen timer 1"
+    # The app discards the second timer on some series 3 ovens.
+    for one in ({"appliance_type": "17.15.1.3"}, {**two, "appliance_type": "17.3.1.1"}):
+        assert zone_name(one, "kitchen_timer_duration", names) is None
