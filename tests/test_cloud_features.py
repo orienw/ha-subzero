@@ -994,6 +994,27 @@ async def test_countdown_follows_elapsed_time_across_daylight_saving(
     assert track.call_args.args[2] == datetime.fromisoformat(next_tick)
 
 
+@pytest.mark.parametrize(("prefix", "suffix"), [("kitchen_timer", "_1"), ("kitchen_timer2", "_2")])
+async def test_dismiss_button_stops_a_running_timer(hass, appliances, prefix, suffix):
+    await hass.services.async_call(
+        "number",
+        "set_value",
+        {"entity_id": f"number.oven_kitchen_timer{suffix}_duration", "value": 5},
+        blocking=True,
+    )
+    await hass.services.async_call(
+        "button",
+        "press",
+        {"entity_id": f"button.oven_dismiss_kitchen_timer{suffix}"},
+        blocking=True,
+    )
+    assert appliances.client.set_property.await_args_list[-1] == call(
+        "oven", f"{prefix}_duration", 0
+    )
+    assert hass.states.get(f"binary_sensor.oven_kitchen_timer{suffix}_active").state == "off"
+    assert hass.states.get(f"button.oven_dismiss_kitchen_timer{suffix}").state == "unavailable"
+
+
 async def test_queued_timer_dismiss_spares_a_restarted_timer(hass, appliances):
     await appliances.update("oven", {"kitchen_timer_active": False, "kitchen_timer_complete": True})
     coordinator = appliances.entry.runtime_data.coordinators["oven"]

@@ -571,13 +571,25 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             # may during a delayed start.
             await self._async_write({"wash_cycle_on": False}, force=True)
 
-    async def async_dismiss_timer(self, key: str) -> None:
+    async def async_dismiss_timer(self, key: str, *, running: bool = False) -> None:
+        """Clear a finished timer, or stop one that was running when asked.
+
+        A timer that was finished when asked is not stopped if it restarts first.
+        """
         async with self._command():
             if not self.last_update_success:
                 raise ServiceValidationError("The appliance is unavailable.")
-            if self.data.get(f"{KITCHEN_TIMERS[key]}_complete") is not True:
-                raise ServiceValidationError("The kitchen timer has not finished.")
-            # Like the app's "Tap to Dismiss", writing 0 clears a finished timer.
+            prefix = KITCHEN_TIMERS[key]
+            if self.data.get(f"{prefix}_complete") is not True and not (
+                running and self.data.get(f"{prefix}_active") is True
+            ):
+                raise ServiceValidationError(
+                    "The kitchen timer is not running."
+                    if running
+                    else "The kitchen timer has not finished."
+                )
+            # Like the app's Cancel and "Tap to Dismiss", writing 0 stops a running timer
+            # or clears a finished one.
             await self._async_write({key: 0})
 
     async def _async_write(self, properties: dict, *, force: bool = False) -> None:

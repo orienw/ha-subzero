@@ -170,9 +170,15 @@ class SubZeroTimerDismissButton(SubZeroEntity, ButtonEntity):
         return (
             self.coordinator.last_update_success
             and supports_control(self.coordinator.data, f"{prefix}_duration")
-            and self.coordinator.data.get(f"{prefix}_complete") is True
+            and (
+                self.coordinator.data.get(f"{prefix}_active") is True
+                or self.coordinator.data.get(f"{prefix}_complete") is True
+            )
         )
 
     async def async_press(self) -> None:
         prefix = self.entity_description.key.removeprefix("dismiss_")
-        await self.coordinator.async_dismiss_timer(f"{prefix}_duration")
+        await self.coordinator.async_dismiss_timer(
+            f"{prefix}_duration",
+            running=self.coordinator.data.get(f"{prefix}_complete") is not True,
+        )
