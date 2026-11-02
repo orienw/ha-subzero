@@ -972,6 +972,28 @@ async def test_dismiss_button_clears_a_finished_timer(hass, appliances, prefix, 
     assert hass.states.get(entity_id).state == "unavailable"
 
 
+@pytest.mark.parametrize(
+    ("now", "end", "minutes", "next_tick"),
+    [
+        # Clocks fall back at 2:00 PDT.
+        ("2026-11-01T07:30:00+00:00", "2026-11-01T02:10:00", "160", "2026-11-01T07:31:00+00:00"),
+        # Clocks spring forward at 2:00 PST.
+        ("2026-03-08T09:30:00+00:00", "2026-03-08T03:10:00", "40", "2026-03-08T09:31:00+00:00"),
+    ],
+)
+async def test_countdown_follows_elapsed_time_across_daylight_saving(
+    hass, freezer, appliances, now, end, minutes, next_tick
+):
+    await hass.config.async_set_time_zone("America/Los_Angeles")
+    freezer.move_to(now)
+    with patch("custom_components.subzero.number.async_track_point_in_utc_time") as track:
+        await appliances.update(
+            "oven", {"kitchen_timer_active": True, "kitchen_timer_end_time": end}
+        )
+    assert hass.states.get("number.oven_kitchen_timer_1_duration").state == minutes
+    assert track.call_args.args[2] == datetime.fromisoformat(next_tick)
+
+
 async def test_queued_timer_dismiss_spares_a_restarted_timer(hass, appliances):
     await appliances.update("oven", {"kitchen_timer_active": False, "kitchen_timer_complete": True})
     coordinator = appliances.entry.runtime_data.coordinators["oven"]
@@ -1094,7 +1116,9 @@ async def test_unanswered_start_resend_stops_the_start(hass, appliances):
     assert appliances.client.set_property.await_args_list == [call("oven", "cav_cook_mode", 1)] * 3
 
 
-@pytest.mark.parametrize("previous_minutes", [16, 45])
+# Without a usable start time, a running timer that ends within about a minute of the
+# requested end looks like the requested one.
+@pytest.mark.parametrize("previous_minutes", [17, 45])
 async def test_timer_ack_without_correct_end_time_is_not_success(
     hass, appliances, previous_minutes
 ):
@@ -1182,6 +1206,39 @@ async def test_timer_times_without_an_offset_follow_the_pushed_clock(hass, appli
     )
     assert hass.states.get(entity_id).state == "20"
     assert appliances.client.set_property.await_count == 4
+
+
+@pytest.mark.parametrize(("prefix", "suffix"), [("kitchen_timer", "_1"), ("kitchen_timer2", "_2")])
+async def test_running_timer_counts_down_from_its_end(hass, freezer, appliances, prefix, suffix):
+    duration = f"number.oven_kitchen_timer{suffix}_duration"
+
+    async def write(device_id, key, value):
+        # Ovens report a start decades early or after the end, and a correct end.
+        end = dt_util.utcnow() + timedelta(minutes=value)
+        await appliances.update(
+            "oven",
+            {
+                f"{prefix}_active": True,
+                f"{prefix}_start_time": "2000-01-01T00:00:00",
+                f"{prefix}_end_time": end.isoformat(),
+            },
+        )
+
+    appliances.client.set_property.side_effect = write
+    await hass.services.async_call(
+        "number", "set_value", {"entity_id": duration, "value": 2}, blocking=True
+    )
+    assert appliances.client.set_property.await_count == 1
+    assert hass.states.get(duration).state == "2"
+    for minutes_left in ("1", "0"):
+        freezer.tick(timedelta(minutes=1))
+        async_fire_time_changed(hass, dt_util.utcnow())
+        await hass.async_block_till_done()
+        assert hass.states.get(duration).state == minutes_left
+    assert (
+        er.async_get(hass).async_get_entity_id("sensor", DOMAIN, f"oven_{prefix}_start_time")
+        is None
+    )
 
 
 def test_clock_zone_prefers_home_time_zone_when_offsets_match(hass):
@@ -1764,6 +1821,23 @@ async def test_nested_json_notifications_update_the_door_entity(hass, appliances
         )
     assert appliances.client.state.await_count == 3
     appliances.client.set_property.assert_not_called()
+
+
+async def test_every_setup_removes_kitchen_timer_start_sensors(hass, appliances):
+    entry = appliances.entry
+    registry = er.async_get(hass)
+    await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    # Earlier versions created them, and so does a downgrade after this one ran.
+    retired = [
+        registry.async_get_or_create("sensor", DOMAIN, f"oven_{key}", config_entry=entry)
+        for key in ("kitchen_timer_start_time", "kitchen_timer2_start_time")
+    ]
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    for entity in retired:
+        assert registry.async_get(entity.entity_id) is None
+    assert entry.minor_version == 3
 
 
 async def test_minor_upgrade_removes_only_retired_entities(hass, appliances):

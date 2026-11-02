@@ -126,7 +126,6 @@ DEPENDENT_ENTITY_KEYS = {
         "kitchen_timer2_duration",
         "kitchen_timer2_complete",
         "kitchen_timer2_within_1min",
-        "kitchen_timer2_start_time",
         "kitchen_timer2_end_time",
         "dismiss_kitchen_timer2",
     ),
@@ -327,6 +326,9 @@ OVEN_TEMPERATURE_RANGES = {
         for series in (4, 8, 15)
     },
 }
+# Ovens report kitchen timer start times that are not when the timer started, and the
+# app never reads them.
+RETIRED_ENTITY_KEYS = ("kitchen_timer_start_time", "kitchen_timer2_start_time")
 KITCHEN_TIMERS = {
     "kitchen_timer_duration": "kitchen_timer",
     "kitchen_timer2_duration": "kitchen_timer2",

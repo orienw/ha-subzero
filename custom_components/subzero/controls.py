@@ -285,10 +285,11 @@ def timer_minutes(data: dict, key: str, zone: tzinfo | None = None) -> float | N
         return 0
     if data.get(f"{prefix}_active") is not True:
         return None
-    start = appliance_datetime(data.get(f"{prefix}_start_time"), zone)
     end = appliance_datetime(data.get(f"{prefix}_end_time"), zone)
-    if start is not None and end is not None and end >= start:
-        return round((end - start).total_seconds() / 60)
+    if end is not None:
+        # Like the app, a running timer shows the time left on it, in whole minutes
+        # that reach 0 only at the end.
+        return max(0, math.ceil((end - dt_util.utcnow()).total_seconds() / 60))
     duration = data.get(key)
     return duration if type(duration) is int and duration >= 0 else None
 
@@ -330,12 +331,10 @@ def control_matches(
     if value == 0:
         return data.get(f"{prefix}_active") is False
     end = appliance_datetime(data.get(f"{prefix}_end_time"), zone)
-    duration = timer_minutes(data, key, zone)
     # The appliance clock has been seen within about 15 seconds of real time.
     return (
         data.get(f"{prefix}_active") is True
         and end is not None
-        and (duration is None or duration == value)
         and abs((end - requested_at).total_seconds() - value * 60) <= 65
     )
 

@@ -87,7 +87,7 @@ Idle oven-temperature fields reporting zero show as unknown. Measured oven tempe
 
 Broil level is calculated from the setpoint while broiling: below 400°F is Low, 400–499°F is Medium, and 500°F or above is High.
 
-Kitchen-timer numbers show the configured duration when reported start and end times permit it. End-time sensors can drive countdown dashboards. A Dismiss kitchen timer button clears a completed timer, following the app's Tap to Dismiss behavior.
+Kitchen-timer numbers show the minutes left on a running timer, as the app does. End-time sensors can drive countdown dashboards. A Dismiss kitchen timer button clears a completed timer, following the app's Tap to Dismiss behavior.
 
 Gourmet program sensors translate reported recipe codes into names. Code zero and a cavity reporting Gourmet mode off show None. Unrecognized codes show as unknown. Select and start Gourmet programs at the oven.
 

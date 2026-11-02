@@ -16,7 +16,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from .api import ApiError, SubZeroClient
 from .app_config import SUBSCRIPTION_KEY
 from .auth import InvalidAuth
-from .const import DISHWASHER_SWITCHES, DOMAIN
+from .const import DISHWASHER_SWITCHES, DOMAIN, RETIRED_ENTITY_KEYS
 from .controls import excluded_entity_keys
 from .coordinator import (
     SubZeroAccount,
@@ -79,11 +79,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: SubZeroConfigEntry) -> b
     for device in dr.async_entries_for_config_entry(registry, entry.entry_id):
         if not device.identifiers.intersection(identifiers):
             registry.async_remove_device(device.id)
-    # Entities left from earlier versions for properties the app discards.
+    # Entities left from earlier versions for properties the app discards, or that no
+    # version creates now. Downgrading creates retired ones again.
     excluded = {
         f"{coordinator.device_id}_{key}"
         for coordinator in account.coordinators.values()
-        for key in excluded_entity_keys(coordinator.data)
+        for key in (*excluded_entity_keys(coordinator.data), *RETIRED_ENTITY_KEYS)
     }
     entities = er.async_get(hass)
     for entity in er.async_entries_for_config_entry(entities, entry.entry_id):

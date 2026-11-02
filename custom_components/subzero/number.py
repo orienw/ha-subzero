@@ -1,5 +1,7 @@
 """Refrigeration and probe setpoints, and oven kitchen timers."""
 
+from datetime import UTC, datetime, timedelta
+
 from homeassistant.components.number import (
     NumberDeviceClass,
     NumberEntity,
@@ -7,13 +9,20 @@ from homeassistant.components.number import (
     NumberMode,
 )
 from homeassistant.const import UnitOfTemperature, UnitOfTime
-from homeassistant.core import HomeAssistant
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.event import async_track_point_in_utc_time
 
 from . import SubZeroConfigEntry
 from .const import KITCHEN_TIMERS
-from .controls import is_finite_number, supports_control, temperature_range, timer_minutes
+from .controls import (
+    appliance_datetime,
+    is_finite_number,
+    supports_control,
+    temperature_range,
+    timer_minutes,
+)
 from .entity import SubZeroEntity, async_setup_entities
 
 DESCRIPTIONS = (
@@ -95,6 +104,49 @@ async def async_setup_entry(
 
 
 class SubZeroNumber(SubZeroEntity, NumberEntity):
+    _cancel_countdown: CALLBACK_TYPE | None = None
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        self.async_on_remove(self._stop_countdown)
+        self._schedule_countdown()
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        self._schedule_countdown()
+        super()._handle_coordinator_update()
+
+    @callback
+    def _stop_countdown(self) -> None:
+        if self._cancel_countdown is not None:
+            self._cancel_countdown()
+            self._cancel_countdown = None
+
+    @callback
+    def _schedule_countdown(self) -> None:
+        """Update a running kitchen timer's minutes left as each one passes."""
+        self._stop_countdown()
+        key = self.entity_description.key
+        if key not in KITCHEN_TIMERS:
+            return
+        data = self.coordinator.data
+        end = appliance_datetime(
+            data.get(f"{KITCHEN_TIMERS[key]}_end_time"), self.coordinator.clock_zone
+        )
+        minutes = timer_minutes(data, key, self.coordinator.clock_zone)
+        if data.get(f"{KITCHEN_TIMERS[key]}_active") is not True or end is None or not minutes:
+            return
+        # In UTC, since a time read in a zone with daylight saving steps by wall clock.
+        self._cancel_countdown = async_track_point_in_utc_time(
+            self.hass, self._count_down, end.astimezone(UTC) - timedelta(minutes=minutes - 1)
+        )
+
+    @callback
+    def _count_down(self, now: datetime) -> None:
+        self._cancel_countdown = None
+        self._schedule_countdown()
+        self.async_write_ha_state()
+
     @property
     def native_value(self) -> int | float | None:
         if self.entity_description.key in KITCHEN_TIMERS:
