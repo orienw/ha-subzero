@@ -9,7 +9,6 @@ from unittest.mock import patch
 import aiohttp
 import pytest
 from homeassistant.data_entry_flow import FlowResultType, InvalidData, UnknownFlow
-from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.subzero.api import ApiError, Appliance, RateLimited, token_state
 from custom_components.subzero.auth import (
@@ -22,6 +21,7 @@ from custom_components.subzero.auth import (
     MfaCallTimeout,
 )
 from custom_components.subzero.const import DOMAIN
+from tests.common import MockConfigEntry
 
 from .conftest import make_tokens
 

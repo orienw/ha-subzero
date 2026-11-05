@@ -8,12 +8,10 @@ from unittest.mock import AsyncMock, patch
 import jwt
 import pytest
 from homeassistant.helpers import device_registry as dr
-from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.subzero.api import Appliance, StateUpdate, token_state
 from custom_components.subzero.const import DOMAIN
-
-pytest_plugins = ["pytest_homeassistant_custom_component"]
+from tests.common import MockConfigEntry
 
 
 def make_tokens(user_id="test-owner", *, expires_in=3600, refresh_token="test-refresh"):

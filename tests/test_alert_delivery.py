@@ -5,9 +5,9 @@ from datetime import timedelta
 
 import pytest
 from homeassistant.util import dt as dt_util
-from pytest_homeassistant_custom_component.common import async_fire_time_changed
 
 from custom_components.subzero.api import StateUpdate
+from tests.common import async_fire_time_changed
 from tests.test_integration import loaded as loaded
 from tests.test_state_verification import _advance_followup
 
@@ -101,9 +101,9 @@ async def test_channel_alert_then_missed_door_close(hass, freezer, loaded, monke
     """
     from homeassistant.helpers import device_registry as dr
     from homeassistant.setup import async_setup_component
-    from pytest_homeassistant_custom_component.common import async_capture_events
 
     from custom_components.subzero.api import ApiError, RateLimited
+    from tests.common import async_capture_events
 
     entry, client, updates, _, _ = loaded
     coordinator = entry.runtime_data.coordinators["test-fridge"]

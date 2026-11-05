@@ -9,10 +9,10 @@ from homeassistant.components.automation import DATA_COMPONENT
 from homeassistant.helpers import device_registry as dr
 from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
-from pytest_homeassistant_custom_component.common import async_fire_time_changed
 
 from custom_components.subzero.api import ApiError, ChannelOpened, RateLimited, StateUpdate
 from custom_components.subzero.fcm import FcmAlerts
+from tests.common import async_fire_time_changed
 from tests.test_fcm import message
 from tests.test_integration import loaded as loaded
 

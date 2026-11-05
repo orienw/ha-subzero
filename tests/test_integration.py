@@ -16,11 +16,6 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_system import US_CUSTOMARY_SYSTEM
-from pytest_homeassistant_custom_component.common import (
-    MockConfigEntry,
-    async_capture_events,
-    async_fire_time_changed,
-)
 
 from custom_components.subzero.api import (
     ApiError,
@@ -34,6 +29,11 @@ from custom_components.subzero.api import (
 from custom_components.subzero.auth import InvalidAuth
 from custom_components.subzero.const import DOMAIN
 from custom_components.subzero.coordinator import SubZeroAccount
+from tests.common import (
+    MockConfigEntry,
+    async_capture_events,
+    async_fire_time_changed,
+)
 
 pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
 

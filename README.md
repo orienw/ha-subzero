@@ -116,7 +116,7 @@ Use Python 3.14:
 
 ```sh
 python -m venv .venv
-.venv/bin/pip install -r requirements-test.txt
+.venv/bin/pip install -r requirements-test.txt pytest-homeassistant
 .venv/bin/pytest
 .venv/bin/ruff check .
 .venv/bin/ruff format --check .

@@ -9,15 +9,15 @@ from firebase_messaging.fcmpushclient import ErrorType
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
-from pytest_homeassistant_custom_component.common import (
-    async_capture_events,
-    async_fire_time_changed,
-)
 
 from custom_components.subzero import async_remove_entry
 from custom_components.subzero.alert_loc_keys import ALERT_LOCATION_KEYS
 from custom_components.subzero.api import ApiError, RateLimited
 from custom_components.subzero.fcm import FcmAlerts, parse_alert
+from tests.common import (
+    async_capture_events,
+    async_fire_time_changed,
+)
 
 oven = pytest.mark.parametrize(
     "cloud_appliance",

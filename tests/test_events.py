@@ -7,10 +7,10 @@ from pathlib import Path
 import pytest
 from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
-from pytest_homeassistant_custom_component.common import async_capture_events
 
 from custom_components.subzero.api import ApiError, parse_notification
 from custom_components.subzero.const import MAX_EVENT_HISTORY
+from tests.common import async_capture_events
 
 pytestmark = pytest.mark.parametrize(
     "cloud_appliance",

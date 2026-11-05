@@ -15,11 +15,6 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_system import METRIC_SYSTEM, US_CUSTOMARY_SYSTEM
-from pytest_homeassistant_custom_component.common import (
-    MockConfigEntry,
-    async_capture_events,
-    async_fire_time_changed,
-)
 
 from custom_components.subzero.api import (
     ApiError,
@@ -38,6 +33,11 @@ from custom_components.subzero.diagnostics import (
 )
 from custom_components.subzero.sensor import DESCRIPTIONS as SENSOR_DESCRIPTIONS
 from custom_components.subzero.sensor import SubZeroSensor, uptime_seconds
+from tests.common import (
+    MockConfigEntry,
+    async_capture_events,
+    async_fire_time_changed,
+)
 from tests.test_integration import loaded as loaded
 
 pytestmark = pytest.mark.usefixtures("enable_custom_integrations")

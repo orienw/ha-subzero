@@ -8,11 +8,11 @@ import pytest
 import voluptuous as vol
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import device_registry as dr
-from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.subzero.api import ApiError, RateLimited, token_state
 from custom_components.subzero.auth import InvalidAuth
 from custom_components.subzero.const import DOMAIN
+from tests.common import MockConfigEntry
 
 ICE_STATE = {
     "appliance_model": "DEC1850CI",
