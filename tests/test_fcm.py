@@ -1,11 +1,18 @@
 """Optional Firebase delivery, replay protection and owned subscriptions."""
 
 import asyncio
+import os
+from base64 import urlsafe_b64encode
 from datetime import timedelta
 from unittest.mock import AsyncMock
 
+import http_ece
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from firebase_messaging import FcmPushClient, FcmRegisterConfig
 from firebase_messaging.fcmpushclient import ErrorType
+from firebase_messaging.proto.mcs_pb2 import DataMessageStanza
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
@@ -13,7 +20,7 @@ from homeassistant.util import dt as dt_util
 from custom_components.subzero import async_remove_entry
 from custom_components.subzero.alert_loc_keys import ALERT_LOCATION_KEYS
 from custom_components.subzero.api import ApiError, RateLimited
-from custom_components.subzero.fcm import FcmAlerts, parse_alert
+from custom_components.subzero.fcm import FcmAlerts, PushClient, header_parameter, parse_alert
 from tests.common import (
     async_capture_events,
     async_fire_time_changed,
@@ -105,8 +112,149 @@ def push_clients(monkeypatch):
         def is_started(self):
             return self.do_listen
 
-    monkeypatch.setattr("custom_components.subzero.fcm.FcmPushClient", Push)
+    monkeypatch.setattr("custom_components.subzero.fcm.PushClient", Push)
     return clients
+
+
+def encrypted_message(crypto_key="dh={key}", encryption="salt={salt}", *, padded=False):
+    """A Firebase data message encrypted for new credentials, as a sender builds it.
+
+    The header formats take the sender's `key` and the `salt`, which senders leave
+    unpadded.
+    """
+    receiver = ec.generate_private_key(ec.SECP256R1())
+    sender = ec.generate_private_key(ec.SECP256R1())
+    point = (serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
+    secret, salt = os.urandom(16), os.urandom(16)
+
+    def text(value):
+        return urlsafe_b64encode(value).decode("ascii")
+
+    credentials = {
+        "gcm": {"app_id": "app"},
+        "keys": {
+            "private": text(
+                receiver.private_bytes(
+                    serialization.Encoding.DER,
+                    serialization.PrivateFormat.PKCS8,
+                    serialization.NoEncryption(),
+                )
+            ),
+            "secret": text(secret),
+        },
+    }
+    message = DataMessageStanza(
+        persistent_id="1",
+        raw_data=http_ece.encrypt(
+            b'{"data": {"deviceId": "appliance"}}',
+            salt=salt,
+            private_key=sender,
+            dh=receiver.public_key().public_bytes(*point),
+            auth_secret=secret,
+            version="aesgcm",
+        ),
+    )
+    values = {"key": text(sender.public_key().public_bytes(*point)), "salt": text(salt)}
+    if not padded:
+        values = {name: value.rstrip("=") for name, value in values.items()}
+    for name, value in {
+        "crypto-key": crypto_key.format(**values),
+        "encryption": encryption.format(**values),
+        "subtype": "app",
+    }.items():
+        message.app_data.add(key=name, value=value)
+    return credentials, message
+
+
+def push_client(client_type, credentials, received):
+    return client_type(
+        lambda message, _id, _context: received.append(message),
+        FcmRegisterConfig("project", "app", "key", "sender"),
+        credentials,
+    )
+
+
+@pytest.mark.parametrize(
+    ("header", "name", "value"),
+    [
+        ("dh=AAAA", "dh", "AAAA"),
+        ("salt=BB==", "salt", "BB=="),
+        ("dh=AAA", "dh", "AAA="),
+        ("dh=AAA; p256ecdsa=CCC", "dh", "AAA="),
+        ("p256ecdsa=CCC;dh=AAAAAA", "dh", "AAAAAA=="),
+        ("dh=AAA,p256ecdsa=CCC", "dh", "AAA="),
+        ("DH = AAA", "dh", "AAA="),
+        ('salt="BB"', "salt", "BB=="),
+        ("p256ecdsa=CCCC; rs=4096", "dh", None),
+        ("AAAA", "dh", None),
+    ],
+)
+def test_header_parameter_is_read_by_name_with_padding(header, name, value):
+    assert header_parameter(header, name) == value
+
+
+@pytest.mark.parametrize(
+    ("crypto_key", "encryption"),
+    [
+        ("dh={key}", "salt={salt}"),
+        ("dh={key}; p256ecdsa={key}", "salt={salt}"),
+        ("p256ecdsa={key};dh={key}", "salt={salt}"),
+        ("DH={key}", 'salt="{salt}"'),
+    ],
+)
+async def test_push_client_reads_messages_the_library_cannot(crypto_key, encryption):
+    credentials, message = encrypted_message(crypto_key, encryption)
+    received = []
+    with pytest.raises(ValueError):
+        # Unpadded or signed keys stop firebase-messaging 0.4.5.
+        push_client(FcmPushClient, credentials, received)._handle_data_message(message)
+    push_client(PushClient, credentials, received)._handle_data_message(message)
+    assert received == [{"data": {"deviceId": "appliance"}}]
+
+
+@pytest.mark.parametrize(
+    ("crypto_key", "encryption"),
+    [
+        ("dh={key}", "salt={salt}"),
+        ("DH={key}", "SALT={salt}"),
+        ("dh ={key}", "salt ={salt}"),
+        # No parameter by that name, so the library's own reading stands.
+        ("xx={key}", "abcd={salt}"),
+    ],
+)
+async def test_push_client_reads_every_message_the_library_can(crypto_key, encryption):
+    credentials, message = encrypted_message(crypto_key, encryption, padded=True)
+    for client_type in (FcmPushClient, PushClient):
+        received = []
+        push_client(client_type, credentials, received)._handle_data_message(message)
+        assert received == [{"data": {"deviceId": "appliance"}}]
+
+
+async def test_push_client_keeps_the_library_reading_when_it_works():
+    credentials, message = encrypted_message(padded=True)
+    header = message.app_data[0]
+    # The library's decoder ignores stray characters that reading by name would keep.
+    header.value = sent = f"{header.value[:40]} ;{header.value[40:]}"
+    received = []
+    push_client(PushClient, credentials, received)._handle_data_message(message)
+    assert received == [{"data": {"deviceId": "appliance"}}]
+    assert header.value == sent
+
+
+@pytest.mark.parametrize("damage", ["payload", "key", "header"])
+async def test_push_client_skips_a_message_it_cannot_read(caplog, damage):
+    credentials, message = encrypted_message()
+    if damage == "payload":
+        message.raw_data = message.raw_data[:-1] + bytes([message.raw_data[-1] ^ 1])
+    elif damage == "key":
+        message.app_data[0].value = "dh=AAAA"
+    else:
+        del message.app_data[0]
+    received = []
+    # Returning lets the client acknowledge the message and keep listening.
+    push_client(PushClient, credentials, received)._handle_data_message(message)
+    assert received == []
+    assert "Skipped a Firebase message" in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -403,7 +551,7 @@ async def test_disabling_firebase_during_checkin_does_not_start_subscription_syn
         return push.credentials["fcm"]["registration"]["token"]
 
     monkeypatch.setattr(
-        "custom_components.subzero.fcm.FcmPushClient.checkin_or_register", delayed_checkin
+        "custom_components.subzero.fcm.PushClient.checkin_or_register", delayed_checkin
     )
     hass.config_entries.async_update_entry(
         entry, options={**entry.options, "firebase_alerts": True}

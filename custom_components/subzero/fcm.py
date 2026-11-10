@@ -3,6 +3,7 @@
 import asyncio
 import copy
 import logging
+import re
 import secrets
 import time
 import uuid
@@ -57,6 +58,48 @@ def parse_alert(message: dict) -> tuple[str, datetime, int, int] | None:
     if not 1 < timestamp.year < 9999:
         return None
     return device_id, timestamp, sequence, code
+
+
+def header_parameter(header: str, name: str) -> str | None:
+    """Find one parameter of a Web Push header and restore its base64 padding.
+
+    Crypto-Key and Encryption are lists of parameters in no fixed order. A sender
+    that signs its messages adds p256ecdsa beside dh, and values arrive unpadded.
+    """
+    for part in re.split("[;,]", header):
+        key, separator, value = part.partition("=")
+        if separator and key.strip().lower() == name:
+            value = value.strip().strip('"').rstrip("=")
+            return value + "=" * (-len(value) % 4)
+    return None
+
+
+class PushClient(FcmPushClient):
+    """firebase-messaging 0.4.5 with its unreleased fixes for encrypted messages.
+
+    The library takes the key and salt from their headers by position and decodes
+    them without restoring padding, so a header with a second parameter or an
+    unpadded value raises. That stops the client before the message is
+    acknowledged, and the server sends the message again on every reconnect.
+    """
+
+    def _handle_data_message(self, msg) -> None:
+        try:
+            try:
+                super()._handle_data_message(msg)
+            except Exception:
+                # The library could not read the message as sent, so it reads it
+                # again with the key and salt, found by name, where it expects them.
+                for header in msg.app_data:
+                    name = {"crypto-key": "dh", "encryption": "salt"}.get(header.key)
+                    if name is not None and (value := header_parameter(header.value, name)):
+                        header.value = f"{name}={value}"
+                super()._handle_data_message(msg)
+        except Exception as error:
+            # Returning acknowledges the message, so it is not sent again.
+            _LOGGER.warning(
+                "Skipped a Firebase message that could not be read: %s", type(error).__name__
+            )
 
 
 async def async_remove_alert_subscriptions(
@@ -215,7 +258,7 @@ class FcmAlerts:
                             _LOGGER.warning(
                                 "Firebase login rejected saved credentials; registering again"
                             )
-                        self.push = FcmPushClient(
+                        self.push = PushClient(
                             self._on_alert,
                             FcmRegisterConfig(**FIREBASE_CONFIG),
                             credentials,
