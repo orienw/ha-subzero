@@ -61,7 +61,7 @@ class SubZeroClimate(SubZeroEntity, ClimateEntity):
         features = ClimateEntityFeature(0)
         if self._oven:
             features |= ClimateEntityFeature.TURN_ON | ClimateEntityFeature.TURN_OFF
-        if temperature_range(self.entity_description.key, self.coordinator.data) is not None:
+        if temperature_range(self.entity_description.key, self.coordinator.start_state) is not None:
             features |= ClimateEntityFeature.TARGET_TEMPERATURE
         return features
 
@@ -97,7 +97,7 @@ class SubZeroClimate(SubZeroEntity, ClimateEntity):
 
     @property
     def native_target_temperature(self) -> int | float | None:
-        value = self.coordinator.data.get(self.entity_description.key)
+        value = self.coordinator.start_state.get(self.entity_description.key)
         if not is_finite_number(value):
             return None
         return None if self._oven and value == 0 else value
@@ -110,15 +110,13 @@ class SubZeroClimate(SubZeroEntity, ClimateEntity):
 
     @property
     def min_temp(self) -> float:
-        return (temperature_range(self.entity_description.key, self.coordinator.data) or (85, 550))[
-            0
-        ]
+        state = self.coordinator.start_state
+        return (temperature_range(self.entity_description.key, state) or (85, 550))[0]
 
     @property
     def max_temp(self) -> float:
-        return (temperature_range(self.entity_description.key, self.coordinator.data) or (85, 550))[
-            1
-        ]
+        state = self.coordinator.start_state
+        return (temperature_range(self.entity_description.key, state) or (85, 550))[1]
 
     async def async_set_temperature(self, **kwargs) -> None:
         value = kwargs.get(ATTR_TEMPERATURE)

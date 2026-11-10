@@ -57,6 +57,7 @@ from .controls import (
     clock_zone,
     control_matches,
     excluded_properties,
+    held_for_start,
     ice_mode,
     ice_mode_properties,
     is_dishwasher,
@@ -64,6 +65,7 @@ from .controls import (
     is_ice_maker,
     is_oven,
     start_properties,
+    start_temperature,
     supports_air_filter_reset,
     uptime_seconds,
     validate_control_properties,
@@ -156,6 +158,8 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             "last_snapshot_flip_age_seconds": None,
             "last_received": None,
         }
+        # The cooking mode and temperature chosen for a remote start, by property.
+        self.start_settings: dict[str, int] = {}
         self._command_lock = asyncio.Lock()
         self._command_generation = 0
         self._unsettled = False
@@ -218,6 +222,8 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         if first or lost:
             # A failed attempt that delivered nothing cannot have changed state.
             self._transport_generation += 1
+            # Remote Ready may end and return unseen while updates are missed.
+            self.start_settings = {}
         healthy = (
             self.last_update_success
             and bool(self.data.get("appliance_model"))
@@ -263,6 +269,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
     @callback
     def async_set_update_error(self, err: Exception) -> None:
         self._async_cancel_transport_grace()
+        self.start_settings = {}
         super().async_set_update_error(err)
 
     @callback
@@ -315,9 +322,21 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
     def _active_conditions(self) -> set[str]:
         return {key for key in FOLLOWUP_KEYS if self.data.get(key) is True}
 
+    @property
+    def start_state(self) -> dict:
+        """Reported state with the cooking mode and temperature kept for a remote start."""
+        return {**self.data, **self.start_settings}
+
     @callback
     def async_set_updated_data(self, data: dict) -> None:
         self._published += 1
+        # Kept only while the oven is seen to stay idle in Remote Ready, which state
+        # published after a gap cannot show.
+        self.start_settings = {
+            key: value
+            for key, value in self.start_settings.items()
+            if self.last_update_success and held_for_start(data, key)
+        }
         if self._transport_error is not None and self._transport_grace_task is None:
             self.data = data
             self.async_update_listeners()
@@ -559,7 +578,9 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 properties = {} if temperature is None else {f"{prefix}_set_temp": temperature}
                 await self._async_write({**properties, key: True})
             else:
-                await self._async_write(start_properties(self.data, key, temperature), force=True)
+                await self._async_write(
+                    start_properties(self.start_state, key, temperature), force=True, start=True
+                )
 
     async def async_cancel_wash(self) -> None:
         async with self._command():
@@ -592,20 +613,53 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             # or clears a finished one.
             await self._async_write({key: 0})
 
-    async def _async_write(self, properties: dict, *, force: bool = False) -> None:
+    async def _async_write(
+        self, properties: dict, *, force: bool = False, start: bool = False
+    ) -> None:
         if not self.last_update_success:
             raise ServiceValidationError("The appliance is unavailable.")
+        unit = self.device.get("temperature_unit")
+        if properties and not force and all(held_for_start(self.data, key) for key in properties):
+            if (
+                self._transport_error is not None
+                or self._channel_error is not None
+                or not self.client.push_connected
+            ):
+                # Remote Ready could end and return unseen before the start.
+                raise ServiceValidationError(
+                    "Home Assistant is reconnecting to the appliance; try again."
+                )
+            validate_control_properties(self.start_state, unit, properties)
+            held = {**self.start_settings, **properties}
+            for key in properties:
+                if key.endswith("_cook_mode"):
+                    # The climate card offers a temperature only once there is one.
+                    setpoint = key.replace("cook_mode", "set_temp")
+                    held[setpoint] = start_temperature(
+                        {**self.data, key: held[key]}, setpoint, held.get(setpoint)
+                    )
+            self.start_settings = {k: v for k, v in held.items() if v is not None}
+            self.async_update_listeners()
+            return
         now = dt_util.utcnow()
         changes = {
             key: value
             for key, value in properties.items()
             if not (force and control_matches(self.data, key, value, now, self.clock_zone))
         }
+        # A start's cooking mode and temperature that are still to be sent. Its power
+        # write is left out, so every check still reads whether the oven reports ready.
+        pending = {
+            key: value
+            for key, value in properties.items()
+            if start and key.endswith(("_cook_mode", "_set_temp"))
+        }
         if changes or not force:
-            validate_control_properties(self.data, self.device.get("temperature_unit"), changes)
+            validate_control_properties(self.data, unit, changes, pending)
         requested_at = {}
         try:
             for key, value in properties.items():
+                pending.pop(key, None)
                 if not self.last_update_success:
                     raise ServiceValidationError("The appliance is unavailable.")
                 requested_at[key] = dt_util.utcnow()
@@ -621,7 +675,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                     )
                 ):
                     requested_at[key] = await self._async_set_property(
-                        key, value, resend=key not in changes
+                        key, value, resend=key not in changes, pending=pending
                     )
             if not self.last_update_success or any(
                 not control_matches(self.data, key, value, requested_at[key], self.clock_zone)
@@ -668,7 +722,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 raise HomeAssistantError("The appliance did not confirm the requested ice mode.")
 
     async def _async_set_property(
-        self, key: str, value: bool | int, *, resend: bool = False
+        self, key: str, value: bool | int, *, resend: bool = False, pending: dict | None = None
     ) -> datetime:
         last_error = None
         for attempt in range(3):
@@ -681,7 +735,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             matched = control_matches(self.data, key, value, requested_at, self.clock_zone)
             if not resend or not matched:
                 validate_control_properties(
-                    self.data, self.device.get("temperature_unit"), {key: value}
+                    self.data, self.device.get("temperature_unit"), {key: value}, pending
                 )
             confirmed = asyncio.Event()
             acknowledged = False

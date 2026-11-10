@@ -110,7 +110,7 @@ class SubZeroStartButton(SubZeroEntity, ButtonEntity):
         if not self.coordinator.last_update_success or data.get(key) is not False:
             return False
         try:
-            validate_remote_start(data, key)
+            validate_remote_start(self.coordinator.start_state, key)
         except ServiceValidationError:
             return False
         return supports_control(data, key)

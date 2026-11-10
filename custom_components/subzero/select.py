@@ -152,7 +152,7 @@ class SubZeroSelect(SubZeroEntity, SelectEntity):
     def current_option(self) -> str | None:
         if not self.available:
             return None
-        data = self.coordinator.data
+        data = self.coordinator.start_state
         key = self.entity_description.key
         if key in FRIDGE_ENUM_OPTIONS:
             return enum_labels(key)[data[key]]

@@ -291,6 +291,9 @@ RANGE_SERIES = 8
 # E series and M series start with a power write alone; the app sends the
 # cooking mode, power, and setpoint to every other series.
 LEGACY_START_SERIES = {3, 4}
+# The app's start dialog opens these cooking modes at these temperatures, in °F, and
+# the others at 325.
+START_TEMPERATURES = {1: 350, 2: 350, 4: 450, 10: 135, 12: 180}
 # The app checks whether the oven allows a cooking mode change only on these
 # types, which have knobs.
 KNOB_OVEN_TYPES = {
