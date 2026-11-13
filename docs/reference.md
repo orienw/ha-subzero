@@ -120,11 +120,36 @@ The integration sends supported option properties; the appliance determines whic
 
 ## Events and Firebase alerts
 
-The **Appliance event** entity reports occurrences such as preheating, probe targets, timer completion, dishwasher cycles, door alerts, and maintenance notifications. Its attributes include event type, numeric code, sequence, appliance timestamp, `source`, and `received_at`.
+The **Appliance event** entity reports appliance alerts such as door alerts, setpoint changes, ice maker clean cycles, preheating, probe targets, timers, oven self-clean, and dishwasher cycles. Its attributes include event type, numeric code, sequence, appliance timestamp, `source`, and `received_at`.
 
 Automations match event-type IDs such as `refrigerator_door_ajar`; Home Assistant displays readable names. An unrecognized code uses the `unknown` type and retains its numeric code. The event entity keeps its last occurrence when disconnected.
 
 **Firebase appliance alerts** is optional and disabled by default. It receives alerts over the mobile app's separate Google Firebase channel and uses the same event entities. Alert metadata does not supply current sensor values. Occurrence and receipt times allow a late alert to be distinguished from a new occurrence.
+
+### Event types
+
+Not every appliance sends every type. `oven_*` types refer to the only oven, the upper oven of a double wall oven, or the right oven of a range. `lower_oven_*` types refer to the lower oven, or the left oven of a range.
+
+| Appliance | Alert | Event types |
+| --- | --- | --- |
+| Refrigeration, wine, and ice | Door open | `refrigerator_door_ajar`, `freezer_door_ajar`, `wine_door_ajar`, `ice_maker_door_ajar` |
+| | Setpoint changed | `refrigerator_setpoint_changed`, `freezer_setpoint_changed`, `wine_setpoint_changed` |
+| | Wine temperature out of range | `wine_temperature_alert` |
+| | Filter expired | `water_filter_expired`, `air_filter_expired` |
+| | Ice maker clean cycle | `ice_cleaning_required`, `ice_cleaning_due_soon`, `ice_cleaning_add_descaler`, `ice_cleaning_add_sanitizer`, `ice_cleaning_cancelled`, `ice_cleaning_complete` |
+| Ovens | Preheat complete | `oven_preheated`, `lower_oven_preheated` |
+| | Probe in use | `oven_probe_connected`, `lower_oven_probe_connected` |
+| | Probe within 10°F of target | `oven_probe_within_ten_degrees`, `lower_oven_probe_within_ten_degrees` |
+| | Probe temperature reached | `oven_probe_target_reached`, `lower_oven_probe_target_reached` |
+| | Cooking timer one minute left | `oven_cooking_timer_under_one_minute`, `lower_oven_cooking_timer_under_one_minute` |
+| | Cooking timer ended | `oven_cooking_timer_complete`, `lower_oven_cooking_timer_complete` |
+| | Kitchen timer one minute left | `kitchen_timer_under_one_minute`, `kitchen_timer_2_under_one_minute` |
+| | Kitchen timer ended | `kitchen_timer_complete`, `kitchen_timer_2_complete` |
+| | Door open | `oven_door_ajar`, `lower_oven_door_ajar` |
+| | Self-clean complete | `oven_self_clean_complete`, `lower_oven_self_clean_complete` |
+| Dishwashers | Wash cycle | `dishwasher_started`, `dishwasher_paused`, `dishwasher_cancelled`, `dishwasher_complete` |
+| | Supplies low | `softener_salt_low`, `rinse_aid_low` |
+| Any | Unrecognized code | `unknown` |
 
 ### History and duplicate events
 

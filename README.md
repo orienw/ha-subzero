@@ -86,9 +86,9 @@ The action waits for a new status read and for its result to reach Home Assistan
 
 ## Appliance alerts
 
-The **Appliance event** entity reports door-left-open alerts, preheat, timer completion, dishwasher events, and maintenance notifications. For ordinary door open/close changes, use the door binary sensor.
+The **Appliance event** entity reports door-left-open alerts, setpoint changes, wine temperature alerts, filter reminders, ice maker clean cycles, oven preheat, probe, timer, and self-clean alerts, and dishwasher cycles and supply warnings. For ordinary door open/close changes, use the door binary sensor.
 
-Match the event entity's `event_type` attribute, such as `refrigerator_door_ajar`, in automations. Other attributes include `code`, `sequence`, `appliance_timestamp`, `source`, and `received_at`.
+Match the event entity's `event_type` attribute, such as `refrigerator_door_ajar` or `oven_self_clean_complete`, in automations. The reference [lists every event type](docs/reference.md#event-types). Other attributes include `code`, `sequence`, `appliance_timestamp`, `source`, and `received_at`.
 
 **Firebase appliance alerts** is optional and off by default. Enable it in **Configure** to receive alerts through the mobile app's separate Firebase channel. It feeds the same event entity; sensor values still come from appliance status. Details on [event history and duplicate handling](docs/reference.md#events-and-firebase-alerts) are in the reference.
 
