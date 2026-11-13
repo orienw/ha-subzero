@@ -71,7 +71,7 @@ The cooking-mode selector lists the modes offered for the reported oven and cavi
 
 Each cavity also has an interior-light switch.
 
-The Start oven button requires Remote Ready and a supported cooking mode and temperature. E series and M series start with the mode and temperature set at the oven and receive the power command alone. On other series, choose the cooking mode and temperature in Home Assistant while the oven waits in Remote Ready. Choosing a mode fills in the app's default temperature for it. Both are kept until the start, which follows the app's command order of cooking mode, power, then setpoint, and are discarded when Remote Ready ends. To start in one step after choosing a mode, call `climate.set_temperature` with a temperature and `hvac_mode: heat`.
+The Start oven button requires Remote Ready and a supported cooking mode and temperature. Older E series and M series ovens start with the mode and temperature set at the oven and receive the power command alone. On other ovens, including newer E series and M series ovens, choose the cooking mode and temperature in Home Assistant while the oven waits in Remote Ready. Choosing a mode fills in the app's default temperature for it. Both are kept until the start, which follows the app's command order of cooking mode, power, then setpoint, and are cleared when Home Assistant sees Remote Ready end or a connection error. To start in one step after choosing a mode, call `climate.set_temperature` with a temperature and `hvac_mode: heat`.
 
 | Control | Range and restrictions |
 | --- | --- |

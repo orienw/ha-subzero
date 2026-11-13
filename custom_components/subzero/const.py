@@ -288,8 +288,9 @@ BROIL = 3
 BROIL_LEVELS = ((400, "Low"), (500, "Medium"), (math.inf, "High"))
 # Ranges with two cavities call them right and left ovens, not upper and lower.
 RANGE_SERIES = 8
-# E series and M series start with a power write alone; the app sends the
-# cooking mode, power, and setpoint to every other series.
+# Older E series and M series ovens start with a power write alone; the app sends the
+# cooking mode, power, and setpoint to every other series, including series 15, which
+# covers newer E series and M series ovens.
 LEGACY_START_SERIES = {3, 4}
 # The app's start dialog opens these cooking modes at these temperatures, in °F, and
 # the others at 325.

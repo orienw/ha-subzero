@@ -361,8 +361,8 @@ def held_for_start(data: dict, key: str) -> bool:
     """Whether a cooking mode or temperature waits for the remote start.
 
     An idle oven in Remote Ready drops a cooking mode sent on its own, so like the
-    app's start dialog the choice is kept and sent with the start. E series and M
-    series start with the settings made at the oven.
+    app's start dialog the choice is kept and sent with the start. Older E series and
+    M series ovens, series 3 and 4, start with the settings made at the oven.
     """
     prefix, _, name = key.partition("_")
     parts = appliance_type(data)
