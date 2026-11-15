@@ -1605,12 +1605,17 @@ class SubZeroAccount:
                 if pending:
                     await asyncio.gather(*pending, return_exceptions=True)
                 recoveries.clear()
-            if time.monotonic() - started >= 120:
-                backoff = RECONNECT_DELAY
             if full:
                 # A full service admits a connection when another client leaves, so
                 # waiting longer does not help; the delay is already randomized.
                 await asyncio.sleep(retry_after)
                 continue
-            await asyncio.sleep(max(backoff, retry_after) + random.uniform(0, 5))
-            backoff = min(backoff * 2, MAX_RECONNECT_DELAY)
+            if time.monotonic() - started >= 120:
+                # A connection that worked for a while is tried again at once, as the
+                # app does, then with increasing delays.
+                delay = retry_after
+                backoff = RECONNECT_DELAY
+            else:
+                delay = max(backoff, retry_after)
+                backoff = min(backoff * 2, MAX_RECONNECT_DELAY)
+            await asyncio.sleep(delay + random.uniform(0, 5))

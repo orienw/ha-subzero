@@ -1601,8 +1601,9 @@ async def test_recovery_auth_failure_starts_reauthentication(hass, loaded):
     ("lifetimes", "expected"),
     [
         ([1] * 7, [30, 60, 120, 240, 480, 900, 900]),
-        ([181] * 3, [30, 30, 30]),
-        ([1, 1, 181, 1], [30, 60, 30, 60]),
+        # A connection that worked for two minutes is tried again at once.
+        ([181] * 3, [0, 0, 0]),
+        ([1, 1, 181, 1, 1], [30, 60, 0, 30, 60]),
     ],
 )
 async def test_reconnect_backoff_uses_lifetime_without_events(
