@@ -149,6 +149,23 @@ async def test_an_oven_that_is_off_shows_no_temperature(hass, cloud_appliance):
     assert state(hass, "sensor.kitchen_oven_temperature") == "unknown"
 
 
+@pytest.mark.parametrize("cloud_appliance", [SINGLE_RANGE], indirect=True)
+async def test_an_oven_climate_shows_whether_it_is_preheating(hass, cloud_appliance):
+    def action():
+        return hass.states.get("climate.kitchen_oven").attributes.get("hvac_action")
+
+    assert action() == "off"
+    # Without the preheat flag, whether it is still heating up is unknown.
+    await cloud_appliance.update({"cav_unit_on": True})
+    assert action() is None
+    await cloud_appliance.update({"cav_at_set_temp": False})
+    assert action() == "preheating"
+    await cloud_appliance.update({"cav_at_set_temp": True})
+    assert action() == "heating"
+    await cloud_appliance.update({"cav_unit_on": False})
+    assert action() == "off"
+
+
 @pytest.mark.parametrize(
     "cloud_appliance",
     [{key: value for key, value in SINGLE_RANGE.items() if key != "cav_unit_on"}],

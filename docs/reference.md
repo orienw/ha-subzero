@@ -71,6 +71,8 @@ The cooking-mode selector lists the modes offered for the reported oven and cavi
 
 Each cavity also has an interior-light switch.
 
+Each cavity's climate entity shows whether the oven is off, preheating, or heating at its setpoint, from the oven's power and Preheated states. It shows neither while the oven has not reported whether it is preheated.
+
 The Start oven button requires Remote Ready and a supported cooking mode and temperature. Older E series and M series ovens start with the mode and temperature set at the oven and receive the power command alone. On other ovens, including newer E series and M series ovens, choose the cooking mode and temperature in Home Assistant while the oven waits in Remote Ready. Choosing a mode fills in the app's default temperature for it. Both are kept until the start, which follows the app's command order of cooking mode, power, then setpoint, and are cleared when Home Assistant sees Remote Ready end or a connection error. To start in one step after choosing a mode, call `climate.set_temperature` with a temperature and `hvac_mode: heat`.
 
 | Control | Range and restrictions |
