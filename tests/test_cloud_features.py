@@ -1992,7 +1992,17 @@ async def test_temperature_readings_and_limits_follow_home_assistant_units(hass,
 
 
 async def test_diagnostics_omit_private_values(hass, appliances):
+    client = appliances.entry.runtime_data.client
+    failure = {"time": "2026-11-15T06:26:14+00:00", "error": "ConnectionLimitReached"}
+    client.failed_connections = [{**failure, "renewal": True}]
+    client.disconnects = [failure]
+    client.rate_limits = [{"server": "sznacasigprod.service.signalr.net", "service_full": True}]
     result = await async_get_config_entry_diagnostics(hass, appliances.entry)
+    assert result["failed_connections"] == [{**failure, "renewal": True}]
+    assert result["disconnects"] == [failure]
+    assert result["rate_limits"] == [
+        {"server": "sznacasigprod.service.signalr.net", "service_full": True}
+    ]
     assert result["notifications"]["received"] == 0
     appliances.entry.runtime_data.client.notification_stats["received"] = 3
     assert result["notifications"]["received"] == 0

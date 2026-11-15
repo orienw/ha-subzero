@@ -514,6 +514,15 @@ async def test_only_a_full_signalr_service_is_tried_again_soon(
         with pytest.raises(api.RateLimited) as error:
             await client._json("POST", origins[server] / "refused")
         assert isinstance(error.value, api.ConnectionLimitReached) is full
+        record = client.rate_limits[-1]
+        assert record.pop("time")
+        assert record == {
+            "server": origins[server].host,
+            "api": "refused",
+            "wait_seconds": round(error.value.retry_after),
+            "retry_after_sent": bool(headers),
+            "service_full": full,
+        }
         if full:
             assert 60 <= error.value.retry_after <= 120
             assert "no free connections" in str(error.value)
@@ -1217,6 +1226,9 @@ async def test_refused_renewal_keeps_the_current_connection(
             assert await next_snapshot()
             assert len(sockets) == 1 and not sockets[0].closed
             assert client.push_connected
+            assert [
+                (failure["error"], failure["renewal"]) for failure in client.failed_connections
+            ] == [("RateLimited", True)]
             renew.set()
             await next_snapshot()
         # The new connection opened before the current one closed.
@@ -1334,8 +1346,8 @@ async def test_renewal_that_finishes_as_the_stream_ends_is_closed(monkeypatch, t
     client.open_channel = AsyncMock()
     connect = client._connect
 
-    async def connect_and_signal():
-        connection = await connect()
+    async def connect_and_signal(**kwargs):
+        connection = await connect(**kwargs)
         if len(connected) == 2:
             # The stream ends before the renewal is taken over.
             renewed.set()
@@ -1351,6 +1363,7 @@ async def test_renewal_that_finishes_as_the_stream_ends_is_closed(monkeypatch, t
             if ending == "dropped":
                 with pytest.raises(api.ApiError, match="disconnected"):
                     await anext(stream)
+                assert "disconnected" in client.disconnects[-1]["message"]
             else:
                 # Closed while the consumer has not asked for the next update.
                 await renewed.wait()

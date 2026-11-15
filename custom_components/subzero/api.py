@@ -370,6 +370,14 @@ def parse_notification(
 type _Connection = tuple[AsyncExitStack, aiohttp.ClientWebSocketResponse, str, float]
 
 
+def _failure(error: ApiError) -> dict:
+    return {
+        "time": datetime.now(UTC).isoformat(),
+        "error": type(error).__name__,
+        "message": str(error),
+    }
+
+
 def _transport_error(error: aiohttp.ClientError | TimeoutError) -> ApiError:
     _LOGGER.debug(
         "Notification transport failed: exception=%s status=%s",
@@ -434,6 +442,11 @@ class SubZeroClient:
         # Any message from a selected appliance, including ones without state, shows
         # that its update channel is still delivering.
         self.last_messages: dict[str, str] = {}
+        # The latest connection attempts that failed, connections that ended, and
+        # rate limits, for diagnostics.
+        self.failed_connections: deque[dict] = deque(maxlen=10)
+        self.disconnects: deque[dict] = deque(maxlen=10)
+        self.rate_limits: deque[dict] = deque(maxlen=10)
 
     @property
     def _api_token(self) -> str:
@@ -479,6 +492,17 @@ class SubZeroClient:
                     else:
                         error = RateLimited(retry_delay(header))
                     self._retry_at[origin] = time.monotonic() + error.retry_after
+                    self.rate_limits.append(
+                        {
+                            "time": datetime.now(UTC).isoformat(),
+                            "server": origin.host,
+                            # The API's name only; later segments can hold appliance IDs.
+                            "api": URL(url).path.strip("/").split("/", 1)[0],
+                            "wait_seconds": round(error.retry_after),
+                            "retry_after_sent": header is not None,
+                            "service_full": isinstance(error, ConnectionLimitReached),
+                        }
+                    )
                     _LOGGER.debug(
                         "%s limited requests for %.0f s (Retry-After %s): %s",
                         origin.host,
@@ -824,6 +848,10 @@ class SubZeroClient:
                     async with aclosing(self._watch_connection(device_ids, connection)) as updates:
                         async for event in updates:
                             yield event
+                except ApiError as error:
+                    if self.push_connected:
+                        self.disconnects.append(_failure(error))
+                    raise
                 finally:
                     self.push_connected = False
         finally:
@@ -832,8 +860,16 @@ class SubZeroClient:
                 self._next_connection = None
                 await connection[0].aclose()
 
-    async def _connect(self) -> _Connection:
+    async def _connect(self, *, renewal: bool = False) -> _Connection:
         """Open a notification connection and complete its SignalR handshake."""
+        try:
+            return await self._open_connection()
+        except ApiError as error:
+            # A failed renewal leaves the current connection delivering.
+            self.failed_connections.append({**_failure(error), "renewal": renewal})
+            raise
+
+    async def _open_connection(self) -> _Connection:
         info = await self._request(
             "POST", "/signal-r/negotiateUser", user_id=self.tokens["user_id"]
         )
@@ -970,7 +1006,7 @@ class SubZeroClient:
                         await asyncio.sleep(delay)
                         try:
                             # watch() closes it if this connection never hands over.
-                            self._next_connection = await self._connect()
+                            self._next_connection = await self._connect(renewal=True)
                             return
                         except ApiError as error:
                             retry_after = error.retry_after if isinstance(error, RateLimited) else 0

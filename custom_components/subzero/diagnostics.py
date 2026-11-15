@@ -45,6 +45,9 @@ async def async_get_config_entry_diagnostics(
         "connection": "cloud_push",
         "push_connected": account.client.push_connected,
         "notifications": dict(account.client.notification_stats),
+        "failed_connections": list(account.client.failed_connections),
+        "disconnects": list(account.client.disconnects),
+        "rate_limits": list(account.client.rate_limits),
         "firebase": (
             {
                 "connected": account.alerts.push is not None and account.alerts.push.is_started(),

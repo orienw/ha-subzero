@@ -181,6 +181,9 @@ Diagnostics downloads use cached state. They omit account credentials, appliance
 | --- | --- |
 | Connection handshake and last-frame times | Whether a connection was established and received frames, including heartbeats. |
 | Received, ignored, and invalid notification counts | Appliance-notification processing since reload. Heartbeats are excluded from the received count. |
+| Failed connections | The last 10 attempts to open the live connection that failed, with when, the error, and whether the attempt was a renewal, during which the current connection kept delivering. |
+| Disconnects | The last 10 live connections that ended, with when and why. |
+| Rate limits | The last 10 times Sub-Zero limited requests: when, the server and API, how long requests to that server wait, whether Sub-Zero said how long, and whether the live-update service had no free connections. |
 | Per-appliance snapshot and update counts | Parsed state traffic and when it last arrived. |
 | Snapshot flips | Full snapshots that changed an on/off value, such as a door, that no update had reported, and the latest one's age on arrival by the appliance clock. If that clock and its time zone are right, a few seconds means the snapshot corrected a missed update, and minutes means it arrived late and may have restored a stale value. The debug log names the keys. |
 | Last appliance message | Channel traffic, including messages without entity state. |
