@@ -914,15 +914,18 @@ class SubZeroClient:
                 async def open_channels() -> None:
                     backoff = RECONNECT_DELAY
                     while pending_channels:
+                        retry_after = 0.0
                         for index, device_id in enumerate(device_ids, 1):
                             if device_id not in pending_channels:
                                 continue
                             _LOGGER.debug("Opening update channel for appliance %d", index)
                             try:
                                 await self.open_channel(device_id)
-                            except RateLimited:
-                                raise
                             except ApiError as error:
+                                # A rate limit keeps the connection, so appliances whose
+                                # channels opened keep updating while this one waits.
+                                if isinstance(error, RateLimited):
+                                    retry_after = max(retry_after, error.retry_after)
                                 if device_id in pending_channels:
                                     channel_events.append((device_id, error))
                             else:
@@ -930,7 +933,7 @@ class SubZeroClient:
                                 channel_events.append((device_id, ChannelOpened()))
                                 pending_channels.discard(device_id)
                         if pending_channels:
-                            await asyncio.sleep(backoff + random.uniform(0, 5))
+                            await asyncio.sleep(max(backoff, retry_after) + random.uniform(0, 5))
                             backoff = min(backoff * 2, MAX_RECONNECT_DELAY)
 
                 async def reopen_channels() -> None:

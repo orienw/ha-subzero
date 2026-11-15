@@ -660,6 +660,7 @@ async def test_stream_surfaces_channel_errors_without_leaking_tasks(tokens, erro
     channel_cancelled = asyncio.Event()
     receive_cancelled = asyncio.Event()
     release = asyncio.Event()
+    release_open = asyncio.Event()
     frames = iter(
         [
             "{}" + api.SEPARATOR,
@@ -681,7 +682,7 @@ async def test_stream_surfaces_channel_errors_without_leaking_tasks(tokens, erro
     async def open_channel(device_id):
         opening.set()
         try:
-            await release.wait()
+            await release_open.wait()
         except asyncio.CancelledError:
             channel_cancelled.set()
             raise
@@ -690,6 +691,9 @@ async def test_stream_surfaces_channel_errors_without_leaking_tasks(tokens, erro
 
     socket = AsyncMock()
     socket.receive.side_effect = receive
+    # aiohttp's exception() is synchronous; the disconnect log reads it.
+    socket.exception = MagicMock(return_value=None)
+    socket.close_code = None
     session = MagicMock()
     session.ws_connect.return_value.__aenter__.return_value = socket
     client = api.SubZeroClient(session, "test-key", tokens)
@@ -706,8 +710,17 @@ async def test_stream_surfaces_channel_errors_without_leaking_tasks(tokens, erro
         )
         await opening.wait()
         await receiving.wait()
-        if error is not None:
+        if isinstance(error, api.RateLimited):
+            # The channel already delivered state, so its rate limit changes nothing:
+            # the stream ends only when the socket does.
+            release_open.set()
+            await asyncio.sleep(0.01)
             release.set()
+            with pytest.raises(api.ApiError, match="disconnected"):
+                await anext(stream)
+        elif error is not None:
+            release.set()
+            release_open.set()
             with pytest.raises(type(error)) as caught:
                 await anext(stream)
             assert caught.value is error
@@ -717,6 +730,71 @@ async def test_stream_surfaces_channel_errors_without_leaking_tasks(tokens, erro
         assert channel_cancelled.is_set()
         assert receive_cancelled.is_set()
     session.ws_connect.return_value.__aexit__.assert_awaited_once()
+
+
+async def test_a_rate_limited_channel_keeps_the_connection_for_the_others(
+    aiohttp_server, monkeypatch, socket_enabled, tokens
+):
+    sockets = []
+    opened = []
+
+    async def negotiate_user(request):
+        return web.json_response({"url": origin + "/client/", "accessToken": "token"})
+
+    async def negotiate_transport(request):
+        return web.json_response({"connectionToken": "connection"})
+
+    async def websocket(request):
+        socket = web.WebSocketResponse()
+        await socket.prepare(request)
+        sockets.append(socket)
+        await socket.receive_str()
+        await socket.send_str("{}" + api.SEPARATOR)
+        async for _message in socket:
+            pass
+        return socket
+
+    async def command(request):
+        device_id = request.match_info["device_id"]
+        opened.append(device_id)
+        if device_id == "test-oven" and opened.count(device_id) == 1:
+            return web.json_response({}, status=429)
+        await sockets[0].send_str(
+            json.dumps(notification({"appliance_model": "ANY"}, full=True, device=device_id))
+            + api.SEPARATOR
+        )
+        return web.json_response({})
+
+    app = web.Application()
+    app.router.add_post("/signal-r/negotiateUser", negotiate_user)
+    app.router.add_post("/client/negotiate", negotiate_transport)
+    app.router.add_get("/client/", websocket)
+    app.router.add_post("/consumerapp/device/{device_id}/directmethod/executeAPICmd", command)
+    server = await aiohttp_server(app)
+    origin = str(server.make_url("/")).rstrip("/")
+    monkeypatch.setattr(api, "API_BASE", origin)
+    monkeypatch.setattr(api, "SIGNALR_ORIGIN", origin)
+    monkeypatch.setattr(api, "retry_delay", lambda _: 0.5)
+    monkeypatch.setattr(api, "RECONNECT_DELAY", 0.01)
+    monkeypatch.setattr(api, "PING_INTERVAL", 0.05)
+    monkeypatch.setattr(api.random, "uniform", lambda _low, _high: 0)
+    async with aiohttp.ClientSession() as session:
+        stream = api.SubZeroClient(session, "test-key", tokens).watch(["test-fridge", "test-oven"])
+        try:
+            events = []
+            async with asyncio.timeout(3):
+                while not any(isinstance(event, api.RateLimited) for _, event in events):
+                    events.append(await anext(stream))
+            assert events[-1][0] == "test-oven" and isinstance(events[-1][1], api.RateLimited)
+            async with asyncio.timeout(3):
+                while events[-1] != ("test-oven", api.ChannelOpened()):
+                    events.append(await anext(stream))
+                events.append(await anext(stream))
+            assert events[-1] == ("test-oven", api.StateUpdate({"appliance_model": "ANY"}, True))
+            assert len(sockets) == 1 and not sockets[0].closed
+            assert opened == ["test-fridge", "test-oven", "test-oven"]
+        finally:
+            await stream.aclose()
 
 
 @pytest.fixture
