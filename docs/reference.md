@@ -173,6 +173,8 @@ Deleting the integration attempts cleanup for up to 30 seconds and logs failures
 
 ## Diagnostics
 
+Home Assistant raises a repair when Firebase appliance alerts fail three times in a row: setup fails, Sub-Zero does not accept the alert subscriptions, or the Firebase connection keeps closing. It names the latest problem and clears itself after a check where alerts work, when Firebase alerts are turned off or no appliance is selected, or when the integration is removed.
+
 Wi-Fi signal strength is enabled by default. **State confirmed**, uptime, IP address, MAC address, and live reporting mode are disabled diagnostic sensors; enable them in entity settings when needed. Disabling State confirmed does not disable checks or recovery.
 
 Appliances truncate uptime to eight characters. At 100 hours it has ten-second precision; at 1,000 hours it has minute precision.

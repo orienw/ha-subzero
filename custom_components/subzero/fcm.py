@@ -31,11 +31,14 @@ from .controls import (
     is_wine,
 )
 from .coordinator import SubZeroCoordinator
+from .repairs import async_report_firebase_alerts
 
 _LOGGER = logging.getLogger(__name__)
 RETRY_INTERVAL = 300
 REFRESH_INTERVAL = 60
 HEALTH_CHECK_INTERVAL = 60
+# Failures in a row before a repair: setup errors, refused syncs, or a closing listener.
+FAILURES_BEFORE_REPAIR = 3
 
 
 def parse_alert(message: dict) -> tuple[str, datetime, int, int] | None:
@@ -151,6 +154,7 @@ class FcmAlerts:
         self.last_error: str | None = None
         self.last_sync: str | None = None
         self.subscription_healthy = False
+        self._failures = 0
 
     @callback
     def _save(self, **changes: object) -> None:
@@ -238,6 +242,8 @@ class FcmAlerts:
         try:
             while not self._stop.is_set():
                 delay = HEALTH_CHECK_INTERVAL
+                # What failed in this pass, which counts once toward the repair.
+                problem: str | None = None
                 try:
                     if (
                         self.push is None
@@ -246,6 +252,8 @@ class FcmAlerts:
                         or any(task.done() for task in self.push.tasks)
                     ):
                         previous = self.push
+                        if previous is not None:
+                            problem = "the Firebase connection kept closing"
                         await self._close_push()
                         credentials = copy.deepcopy(self.entry.data.get("fcm_credentials"))
                         if (
@@ -278,6 +286,12 @@ class FcmAlerts:
                         self.subscription_healthy = await self._sync(psid, token)
                         if self.subscription_healthy:
                             self.last_sync = datetime.now(UTC).isoformat()
+                        else:
+                            problem = "Sub-Zero did not accept the alert subscriptions"
+                        if problem is None:
+                            # Only a pass where the listener stayed up shows recovery.
+                            self._failures = 0
+                            async_report_firebase_alerts(self.hass, self.entry, None)
                         interval = REFRESH_INTERVAL if self.subscription_healthy else RETRY_INTERVAL
                         next_sync = time.monotonic() + interval
                     delay = min(delay, max(1, next_sync - time.monotonic()))
@@ -289,13 +303,23 @@ class FcmAlerts:
                     self.last_error = type(error).__name__
                     self.subscription_healthy = False
                     _LOGGER.warning("Firebase alert setup failed: %s", type(error).__name__)
+                    problem = f"Firebase alert setup failed with {type(error).__name__}"
                     delay = RETRY_INTERVAL
+                if problem is not None:
+                    self._failed(problem)
                 try:
                     await asyncio.wait_for(self._stop.wait(), timeout=delay)
                 except TimeoutError:
                     pass
         finally:
             await self._close_push()
+
+    @callback
+    def _failed(self, problem: str) -> None:
+        """Raise a repair naming the latest problem once alerts fail repeatedly."""
+        self._failures += 1
+        if self._failures >= FAILURES_BEFORE_REPAIR:
+            async_report_firebase_alerts(self.hass, self.entry, problem)
 
     async def _sync(self, psid: str, token: str) -> bool:
         """Renew our own appliance registrations and subscribe to supported codes."""

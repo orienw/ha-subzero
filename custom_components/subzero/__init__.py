@@ -25,6 +25,7 @@ from .coordinator import (
     selected_devices,
 )
 from .fcm import FcmAlerts, async_remove_alert_subscriptions
+from .repairs import async_report_firebase_alerts
 from .services import async_setup_services
 
 PLATFORMS = [
@@ -120,6 +121,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: SubZeroConfigEntry) -> b
 def _async_start_alerts(hass: HomeAssistant, entry: SubZeroConfigEntry) -> None:
     account = entry.runtime_data
     account.alerts = None
+    if not (firebase_alerts_enabled(entry) and account.coordinators):
+        # No alerts run, so none can keep failing.
+        async_report_firebase_alerts(hass, entry, None)
     if (firebase_alerts_enabled(entry) and account.coordinators) or entry.data.get(
         "fcm_registration_ids"
     ):
@@ -142,6 +146,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: SubZeroConfigEntry) -> 
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Remove only this installation's saved appliance alert subscriptions."""
+    async_report_firebase_alerts(hass, entry, None)
     psid = entry.data.get("fcm_psid")
     device_ids = entry.data.get("fcm_registration_ids") or {}
     if not isinstance(psid, str) or not psid or not device_ids:

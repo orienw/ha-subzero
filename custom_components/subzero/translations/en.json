@@ -48,6 +48,12 @@
       "reauth_successful": "Sub-Zero sign-in renewed."
     }
   },
+  "issues": {
+    "firebase_alerts_failing": {
+      "title": "Firebase appliance alerts aren't working",
+      "description": "Firebase appliance alerts failed three times in a row. Latest problem: {problem}. Appliance state still updates through the live connection, and the integration keeps trying. To stop, turn off Firebase alerts in **Configure**."
+    }
+  },
   "services": {
     "read_status": {
       "name": "Read appliance status",

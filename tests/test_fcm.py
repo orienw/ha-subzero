@@ -14,13 +14,16 @@ from firebase_messaging import FcmPushClient, FcmRegisterConfig
 from firebase_messaging.fcmpushclient import ErrorType
 from firebase_messaging.proto.mcs_pb2 import DataMessageStanza
 from homeassistant.config_entries import ConfigEntryState
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 
 from custom_components.subzero import async_remove_entry
 from custom_components.subzero.alert_loc_keys import ALERT_LOCATION_KEYS
 from custom_components.subzero.api import ApiError, RateLimited
+from custom_components.subzero.const import DOMAIN
 from custom_components.subzero.fcm import FcmAlerts, PushClient, header_parameter, parse_alert
+from custom_components.subzero.repairs import async_report_firebase_alerts
 from tests.common import (
     async_capture_events,
     async_fire_time_changed,
@@ -509,7 +512,10 @@ async def test_enabling_and_disabling_starts_and_cleans_up_our_listener(
     assert credentials == push_clients[0].credentials
     await cloud_appliance.update({"ref_door_ajar": True})
     assert hass.states.get(entity_id).state == "on"
+    async_report_firebase_alerts(hass, entry, "the Firebase connection kept closing")
     await configure(False)
+    # Turning alerts off clears their repair.
+    assert firebase_issue(hass, entry) is None
     assert len(push_clients) == 1
     assert not push_clients[0].do_listen
     assert all(task.done() for task in push_clients[0].tasks)
@@ -816,13 +822,93 @@ async def test_a_failed_sdk_listener_is_restarted_and_all_tasks_stop(
     assert all(task.done() for push in push_clients for task in push.tasks)
 
 
+def firebase_issue(hass, entry):
+    return ir.async_get(hass).async_get_issue(DOMAIN, f"firebase_alerts_{entry.entry_id}")
+
+
+async def wait_a_pass(hass, freezer, seconds):
+    freezer.tick(seconds)
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+
+
+@fridge
+async def test_refused_alert_subscriptions_raise_a_repair_until_they_work(
+    hass, freezer, cloud_appliance, alerts, push_clients
+):
+    entry = cloud_appliance.entry
+    registration = cloud_appliance.client.alert_registration
+    # An earlier failure that recovered is not reported later.
+    registration.side_effect = TimeoutError
+    alerts.start()
+    await hass.async_block_till_done()
+    registration.side_effect = None
+    await wait_a_pass(hass, freezer, 301)
+    assert alerts.subscription_healthy
+    registration.side_effect = ApiError("Rejected")
+    alerts._subscribed.clear()
+    for _ in range(2):
+        await wait_a_pass(hass, freezer, 61 if alerts.subscription_healthy else 301)
+        assert firebase_issue(hass, entry) is None
+    await wait_a_pass(hass, freezer, 301)
+    issue = firebase_issue(hass, entry)
+    assert issue is not None
+    assert issue.translation_placeholders == {
+        "problem": "Sub-Zero did not accept the alert subscriptions"
+    }
+
+    registration.side_effect = None
+    await wait_a_pass(hass, freezer, 301)
+    assert alerts.subscription_healthy
+    assert firebase_issue(hass, entry) is None
+
+
+@fridge
+async def test_a_listener_that_keeps_closing_raises_a_repair(
+    hass, freezer, cloud_appliance, alerts, push_clients
+):
+    entry = cloud_appliance.entry
+    alerts.start()
+    await hass.async_block_till_done()
+    for count in range(3):
+        assert firebase_issue(hass, entry) is None
+        push_clients[-1].tasks[0].cancel()
+        await asyncio.gather(*push_clients[-1].tasks, return_exceptions=True)
+        await wait_a_pass(hass, freezer, 61)
+        # Each replacement syncs successfully, which alone does not show recovery.
+        assert len(push_clients) == count + 2 and alerts.subscription_healthy
+    issue = firebase_issue(hass, entry)
+    assert issue is not None
+    assert issue.translation_placeholders == {"problem": "the Firebase connection kept closing"}
+    # A pass where the listener stays up clears it.
+    await wait_a_pass(hass, freezer, 61)
+    assert firebase_issue(hass, entry) is None
+
+
+@fridge
+async def test_deselecting_every_appliance_clears_the_alerts_repair(hass, cloud_appliance):
+    entry = cloud_appliance.entry
+    async_report_firebase_alerts(hass, entry, "the Firebase connection kept closing")
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {"device_ids": [], "firebase_alerts": True, "status_poll_interval": "300"},
+    )
+    await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.LOADED
+    assert not entry.runtime_data.coordinators
+    assert firebase_issue(hass, entry) is None
+
+
 @oven
 async def test_removing_an_unloaded_entry_cleans_saved_subscriptions(hass, cloud_appliance, alerts):
     entry = cloud_appliance.entry
     alerts._save(fcm_psid="own-psid", fcm_registration_ids={"appliance": "ours"})
+    async_report_firebase_alerts(hass, entry, "the Firebase connection kept closing")
     await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
     await async_remove_entry(hass, entry)
+    assert firebase_issue(hass, entry) is None
     cloud_appliance.client.unsubscribe_all_alerts.assert_awaited_once_with("own-psid", "appliance")
 
 
