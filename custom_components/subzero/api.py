@@ -10,7 +10,7 @@ import time
 import uuid
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Collection
-from contextlib import aclosing
+from contextlib import AsyncExitStack, aclosing, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -34,6 +34,8 @@ API_BASE = "https://prod.iot.subzero.com"
 SIGNALR_ORIGIN = "https://sznacasigprod.service.signalr.net"
 SEPARATOR = "\x1e"
 PING_INTERVAL = 15
+# A renewal waits at most this long for the old socket to close before using the new one.
+SOCKET_CLOSE_TIMEOUT = 2
 CHANNEL_REOPEN_INTERVAL = 30 * 60
 
 _LOGGER = logging.getLogger(__name__)
@@ -356,6 +358,18 @@ def parse_notification(
     return device_id, StateUpdate(properties, full=full)
 
 
+type _Connection = tuple[AsyncExitStack, aiohttp.ClientWebSocketResponse, str, float]
+
+
+def _transport_error(error: aiohttp.ClientError | TimeoutError) -> ApiError:
+    _LOGGER.debug(
+        "Notification transport failed: exception=%s status=%s",
+        type(error).__name__,
+        error.status if isinstance(error, aiohttp.WSServerHandshakeError) else None,
+    )
+    return ApiError("Could not maintain Sub-Zero's notification connection.")
+
+
 def _log_notification_frame(
     websocket: aiohttp.ClientWebSocketResponse, message: aiohttp.WSMessage, phase: str
 ) -> None:
@@ -393,7 +407,9 @@ class SubZeroClient:
             self.tokens["expires_at"] = 0
         self.on_tokens = on_tokens
         self._refresh_lock = asyncio.Lock()
-        self._retry_at = 0.0
+        # Sub-Zero's API and its SignalR service limit requests separately.
+        self._retry_at: dict[URL, float] = {}
+        self._next_connection: _Connection | None = None
         self.push_connected = False
         self.notification_stats: dict[str, int | str | None] = {
             "received": 0,
@@ -426,8 +442,9 @@ class SubZeroClient:
         headers: dict[str, str] | None = None,
         **kwargs,
     ) -> dict | list:
-        if self._retry_at > time.monotonic():
-            raise RateLimited(self._retry_at - time.monotonic())
+        origin = URL(url).origin()
+        if (retry_at := self._retry_at.get(origin, 0)) > time.monotonic():
+            raise RateLimited(retry_at - time.monotonic())
         try:
             async with self.session.request(
                 method,
@@ -439,7 +456,13 @@ class SubZeroClient:
             ) as response:
                 if response.status == 429:
                     delay = retry_delay(response.headers.get("Retry-After"))
-                    self._retry_at = time.monotonic() + delay
+                    self._retry_at[origin] = time.monotonic() + delay
+                    _LOGGER.debug(
+                        "%s limited requests for %.0f s (Retry-After %s)",
+                        origin.host,
+                        delay,
+                        "sent" if "Retry-After" in response.headers else "missing",
+                    )
                     raise RateLimited(delay)
                 if response.status in (401, 403) or (token_request and response.status == 400):
                     raise InvalidAuth("Sub-Zero requires a new sign-in.")
@@ -770,17 +793,24 @@ class SubZeroClient:
     async def watch(
         self, device_ids: list[str]
     ) -> AsyncIterator[tuple[str, StateUpdate | ApiError | ChannelOpened]]:
-        while True:
-            try:
-                async with aclosing(self._watch_connection(device_ids)) as updates:
-                    async for event in updates:
-                        yield event
-            finally:
-                self.push_connected = False
+        self._next_connection = None
+        try:
+            while True:
+                connection, self._next_connection = self._next_connection, None
+                try:
+                    async with aclosing(self._watch_connection(device_ids, connection)) as updates:
+                        async for event in updates:
+                            yield event
+                finally:
+                    self.push_connected = False
+        finally:
+            # A renewal that finished as this stream ended.
+            if (connection := self._next_connection) is not None:
+                self._next_connection = None
+                await connection[0].aclose()
 
-    async def _watch_connection(
-        self, device_ids: list[str]
-    ) -> AsyncIterator[tuple[str, StateUpdate | ApiError | ChannelOpened]]:
+    async def _connect(self) -> _Connection:
+        """Open a notification connection and complete its SignalR handshake."""
         info = await self._request(
             "POST", "/signal-r/negotiateUser", user_id=self.tokens["user_id"]
         )
@@ -811,29 +841,46 @@ class SubZeroClient:
         ws_url = endpoint.with_scheme("wss" if endpoint.scheme == "https" else "ws").update_query(
             id=connection
         )
+        # Azure SignalR refuses a connection made more than 5 s after its negotiate.
+        stack = AsyncExitStack()
         try:
-            async with self.session.ws_connect(
-                ws_url, headers={**APP_HEADERS, **headers}, max_msg_size=262144
-            ) as websocket:
-                await websocket.send_str('{"protocol":"json","version":1}' + SEPARATOR)
-                first = await websocket.receive(timeout=20)
-                if first.type != aiohttp.WSMsgType.TEXT or SEPARATOR not in first.data:
-                    _log_notification_frame(websocket, first, "handshake incomplete")
-                    raise ApiError("Sub-Zero did not complete the notification handshake.")
-                handshake, pending = first.data.split(SEPARATOR, 1)
-                try:
-                    handshake = _object(handshake)
-                except ApiError:
-                    _log_notification_frame(websocket, first, "handshake invalid")
-                    raise
-                if handshake != {}:
-                    _log_notification_frame(websocket, first, "handshake rejected")
-                    error = handshake.get("error")
-                    _LOGGER.debug(
-                        "SignalR notification handshake rejected: error=%r",
-                        error[:256] if isinstance(error, str) else None,
-                    )
-                    raise ApiError("Sub-Zero rejected the notification handshake.")
+            websocket = await stack.enter_async_context(
+                self.session.ws_connect(
+                    ws_url, headers={**APP_HEADERS, **headers}, max_msg_size=262144
+                )
+            )
+            await websocket.send_str('{"protocol":"json","version":1}' + SEPARATOR)
+            first = await websocket.receive(timeout=20)
+            if first.type != aiohttp.WSMsgType.TEXT or SEPARATOR not in first.data:
+                _log_notification_frame(websocket, first, "handshake incomplete")
+                raise ApiError("Sub-Zero did not complete the notification handshake.")
+            handshake, pending = first.data.split(SEPARATOR, 1)
+            try:
+                handshake = _object(handshake)
+            except ApiError:
+                _log_notification_frame(websocket, first, "handshake invalid")
+                raise
+            if handshake != {}:
+                _log_notification_frame(websocket, first, "handshake rejected")
+                error = handshake.get("error")
+                _LOGGER.debug(
+                    "SignalR notification handshake rejected: error=%r",
+                    error[:256] if isinstance(error, str) else None,
+                )
+                raise ApiError("Sub-Zero rejected the notification handshake.")
+        except BaseException as error:
+            await stack.aclose()
+            if isinstance(error, aiohttp.ClientError | TimeoutError):
+                raise _transport_error(error) from None
+            raise
+        return stack, websocket, pending, renew_at
+
+    async def _watch_connection(
+        self, device_ids: list[str], connection: _Connection | None
+    ) -> AsyncIterator[tuple[str, StateUpdate | ApiError | ChannelOpened]]:
+        stack, websocket, pending, renew_at = connection or await self._connect()
+        try:
+            async with stack:
                 self.push_connected = True
                 connected_at = datetime.now(UTC).isoformat()
                 self.notification_stats["connected_at"] = connected_at
@@ -889,10 +936,32 @@ class SubZeroClient:
                                     "Update channel reopen accepted for appliance %d", index
                                 )
 
+                async def renew() -> None:
+                    # Connect before closing, so a refused renewal keeps this connection.
+                    delay = renew_at - time.monotonic()
+                    backoff = RECONNECT_DELAY
+                    while True:
+                        await asyncio.sleep(delay)
+                        try:
+                            # watch() closes it if this connection never hands over.
+                            self._next_connection = await self._connect()
+                            return
+                        except ApiError as error:
+                            retry_after = error.retry_after if isinstance(error, RateLimited) else 0
+                            delay = max(backoff, retry_after) + random.uniform(0, 5)
+                            backoff = min(backoff * 2, MAX_RECONNECT_DELAY)
+                            _LOGGER.info(
+                                "Could not renew Sub-Zero's live connection; "
+                                "keeping the current one and trying again in %.0f s: %s",
+                                delay,
+                                error,
+                            )
+
                 opening = asyncio.create_task(open_channels())
                 reopening = asyncio.create_task(reopen_channels())
                 receiving = asyncio.create_task(websocket.receive())
-                tasks = {opening, reopening, receiving}
+                renewing = asyncio.create_task(renew())
+                tasks = {opening, reopening, receiving, renewing}
                 try:
                     next_ping = time.monotonic() + PING_INTERVAL
                     last_received = time.monotonic()
@@ -943,9 +1012,10 @@ class SubZeroClient:
                             if not update.properties.keys().isdisjoint(STATE_KEYS):
                                 pending_channels.discard(device_id)
                             yield device_id, update
-                        now = time.monotonic()
-                        if now >= renew_at:
+                        if renewing.done():
+                            renewing.result()
                             return
+                        now = time.monotonic()
                         if now - last_received > 60:
                             raise ApiError("Sub-Zero's notification connection stopped responding.")
                         if now >= next_ping:
@@ -953,7 +1023,7 @@ class SubZeroClient:
                             next_ping = now + PING_INTERVAL
                         await asyncio.wait(
                             tasks,
-                            timeout=max(0.1, min(next_ping, renew_at) - time.monotonic()),
+                            timeout=max(0.1, next_ping - time.monotonic()),
                             return_when=asyncio.FIRST_COMPLETED,
                         )
                         if opening.done():
@@ -981,11 +1051,15 @@ class SubZeroClient:
                     opening.cancel()
                     reopening.cancel()
                     receiving.cancel()
-                    await asyncio.gather(opening, reopening, receiving, return_exceptions=True)
+                    renewing.cancel()
+                    await asyncio.gather(
+                        opening, reopening, receiving, renewing, return_exceptions=True
+                    )
+                    if self._next_connection is not None:
+                        # Use the new connection soon; aiohttp's close timeout restarts
+                        # with every frame received.
+                        with suppress(TimeoutError):
+                            async with asyncio.timeout(SOCKET_CLOSE_TIMEOUT):
+                                await websocket.close()
         except (aiohttp.ClientError, TimeoutError) as error:
-            _LOGGER.debug(
-                "Notification transport failed: exception=%s status=%s",
-                type(error).__name__,
-                error.status if isinstance(error, aiohttp.WSServerHandshakeError) else None,
-            )
-            raise ApiError("Could not maintain Sub-Zero's notification connection.") from None
+            raise _transport_error(error) from None

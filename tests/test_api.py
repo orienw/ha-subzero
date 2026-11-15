@@ -14,6 +14,7 @@ import jwt
 import pytest
 from aiohttp import web
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from yarl import URL
 
 from custom_components.subzero import api
 from custom_components.subzero.auth import InvalidAuth
@@ -1018,13 +1019,236 @@ async def test_live_signalr_socket_is_renewed_before_token_expiry(
     assert second_reopen.cancelled()
 
 
+async def test_refused_renewal_keeps_the_current_connection(
+    hass, aiohttp_server, monkeypatch, socket_enabled, tokens, channel_reopen_waits
+):
+    sockets = []
+    timeline = []
+    renew = asyncio.Event()
+
+    async def negotiate_user(request):
+        return web.json_response({"url": signalr_origin + "/client/", "accessToken": "token"})
+
+    async def negotiate_transport(request):
+        attempt = sum(event in ("negotiate", "refused") for event in timeline) + 1
+        if attempt == 2:
+            timeline.append("refused")
+            return web.json_response({}, status=429)
+        if attempt == 3:
+            await renew.wait()
+        timeline.append("negotiate")
+        return web.json_response({"connectionToken": "connection"})
+
+    async def websocket(request):
+        socket = web.WebSocketResponse(autoclose=False)
+        await socket.prepare(request)
+        sockets.append(socket)
+        timeline.append("connect")
+        await socket.receive_str()
+        await socket.send_str("{}" + api.SEPARATOR)
+        while (message := await socket.receive()).type == aiohttp.WSMsgType.TEXT:
+            await socket.send_str('{"type":6}' + api.SEPARATOR)
+        if message.type == aiohttp.WSMsgType.CLOSE:
+            # Recorded before the reply that lets the client finish closing.
+            timeline.append("close")
+            await socket.close()
+        return socket
+
+    async def command(request):
+        await sockets[-1].send_str(
+            json.dumps(notification({"appliance_model": "TEST-FRIDGE"}, full=True)) + api.SEPARATOR
+        )
+        return web.json_response({})
+
+    api_app = web.Application()
+    api_app.router.add_post("/signal-r/negotiateUser", negotiate_user)
+    api_app.router.add_post("/consumerapp/device/{device_id}/directmethod/executeAPICmd", command)
+    signalr_app = web.Application()
+    signalr_app.router.add_post("/client/negotiate", negotiate_transport)
+    signalr_app.router.add_get("/client/", websocket)
+    api_server = await aiohttp_server(api_app)
+    signalr_server = await aiohttp_server(signalr_app)
+    signalr_origin = str(signalr_server.make_url("/")).rstrip("/")
+    monkeypatch.setattr(api, "API_BASE", str(api_server.make_url("/")).rstrip("/"))
+    monkeypatch.setattr(api, "SIGNALR_ORIGIN", signalr_origin)
+    monkeypatch.setattr(api, "notification_lifetime", lambda _: 0.2)
+    monkeypatch.setattr(api, "retry_delay", lambda _: 1)
+    monkeypatch.setattr(api, "RECONNECT_DELAY", 0.01)
+    monkeypatch.setattr(api.random, "uniform", lambda _low, _high: 0)
+    client = api.SubZeroClient(async_get_clientsession(hass), "test-key", tokens)
+    stream = client.watch(["test-fridge"])
+
+    async def next_snapshot():
+        async for _device_id, event in stream:
+            if isinstance(event, api.StateUpdate):
+                return event
+        raise AssertionError("stream ended")
+
+    try:
+        async with asyncio.timeout(5):
+            await next_snapshot()
+            while URL(signalr_origin) not in client._retry_at:
+                await asyncio.sleep(0.01)
+            # The SignalR service's limit holds back only requests to that service.
+            with pytest.raises(api.RateLimited):
+                await client._json("POST", URL(signalr_origin) / "client" / "negotiate")
+            await client.open_channel("test-fridge")
+            assert await next_snapshot()
+            assert len(sockets) == 1 and not sockets[0].closed
+            assert client.push_connected
+            renew.set()
+            await next_snapshot()
+        # The new connection opened before the current one closed.
+        assert timeline == ["negotiate", "connect", "refused", "negotiate", "connect", "close"]
+        assert len(sockets) == 2 and sockets[0].closed
+    finally:
+        await stream.aclose()
+
+
+async def test_renewal_connects_without_waiting_for_a_slow_close(monkeypatch, tokens):
+    """Azure refuses a connection made more than 5 s after its negotiate."""
+    stalled = asyncio.Event()
+    connected = []
+
+    class Socket:
+        closing = False
+
+        def __init__(self):
+            self.frames = [aiohttp.WSMessage(aiohttp.WSMsgType.TEXT, "{}" + api.SEPARATOR, None)]
+
+        async def send_str(self, _data):
+            pass
+
+        async def receive(self, timeout=None):
+            if self.frames:
+                return self.frames.pop()
+            await stalled.wait()
+
+        async def close(self):
+            # Like aiohttp, wait for the close reply once; a closed socket returns at once.
+            if not self.closing:
+                self.closing = True
+                await stalled.wait()
+
+    class Connect:
+        async def __aenter__(self):
+            self.socket = Socket()
+            connected.append(self.socket)
+            return self.socket
+
+        async def __aexit__(self, *_exc):
+            await self.socket.close()
+
+    session = MagicMock()
+    session.ws_connect.side_effect = lambda *_args, **_kwargs: Connect()
+    client = api.SubZeroClient(session, "test-key", tokens)
+    client._request = AsyncMock(
+        return_value={"url": api.SIGNALR_ORIGIN + "/client/", "accessToken": "test-signalr"}
+    )
+    client._json = AsyncMock(return_value={"connectionToken": "test-connection"})
+    client.open_channel = AsyncMock()
+    lifetimes = [0.05, 3600]
+    monkeypatch.setattr(api, "notification_lifetime", lambda _: lifetimes.pop(0))
+    monkeypatch.setattr(api, "SOCKET_CLOSE_TIMEOUT", 0.05)
+    stream = client.watch(["test-fridge"])
+    try:
+        async with asyncio.timeout(2):
+            assert isinstance((await anext(stream))[1], api.ChannelOpened)
+            assert isinstance((await anext(stream))[1], api.ChannelOpened)
+        assert len(connected) == 2 and connected[0].closing
+    finally:
+        for socket in connected:
+            socket.closing = True
+        await stream.aclose()
+
+
+@pytest.mark.parametrize("ending", ["dropped", "closed"])
+async def test_renewal_that_finishes_as_the_stream_ends_is_closed(monkeypatch, tokens, ending):
+    renewed = asyncio.Event()
+    stalled = asyncio.Event()
+    handshake = aiohttp.WSMessage(aiohttp.WSMsgType.TEXT, "{}" + api.SEPARATOR, None)
+    connected = []
+
+    class Socket:
+        close_code = None
+
+        def __init__(self, frames):
+            self.frames = frames
+            self.closed = False
+
+        async def send_str(self, _data):
+            pass
+
+        async def receive(self, timeout=None):
+            frame = self.frames.pop(0)
+            if isinstance(frame, asyncio.Event):
+                await frame.wait()
+                return aiohttp.WSMessage(aiohttp.WSMsgType.CLOSED, None, None)
+            return frame
+
+        def exception(self):
+            return None
+
+        async def close(self):
+            self.closed = True
+
+    frames = [[handshake, renewed if ending == "dropped" else stalled], [handshake, stalled]]
+
+    class Connect:
+        async def __aenter__(self):
+            self.socket = Socket(frames.pop(0))
+            connected.append(self.socket)
+            return self.socket
+
+        async def __aexit__(self, *_exc):
+            await self.socket.close()
+
+    session = MagicMock()
+    session.ws_connect.side_effect = lambda *_args, **_kwargs: Connect()
+    client = api.SubZeroClient(session, "test-key", tokens)
+    client._request = AsyncMock(
+        return_value={"url": api.SIGNALR_ORIGIN + "/client/", "accessToken": "test-signalr"}
+    )
+    client._json = AsyncMock(return_value={"connectionToken": "test-connection"})
+    client.open_channel = AsyncMock()
+    connect = client._connect
+
+    async def connect_and_signal():
+        connection = await connect()
+        if len(connected) == 2:
+            # The stream ends before the renewal is taken over.
+            renewed.set()
+        return connection
+
+    client._connect = connect_and_signal
+    lifetimes = [0.05, 3600]
+    monkeypatch.setattr(api, "notification_lifetime", lambda _: lifetimes.pop(0))
+    stream = client.watch(["test-fridge"])
+    try:
+        async with asyncio.timeout(2):
+            assert isinstance((await anext(stream))[1], api.ChannelOpened)
+            if ending == "dropped":
+                with pytest.raises(api.ApiError, match="disconnected"):
+                    await anext(stream)
+            else:
+                # Closed while the consumer has not asked for the next update.
+                await renewed.wait()
+                await stream.aclose()
+        assert len(connected) == 2
+        assert connected[0].closed and connected[1].closed
+    finally:
+        stalled.set()
+        await stream.aclose()
+
+
 @pytest.fixture
 def channel_reopen_waits(monkeypatch):
     waits = asyncio.Queue()
     original_sleep = asyncio.sleep
 
     async def sleep(delay):
-        if delay < api.CHANNEL_REOPEN_INTERVAL:
+        task = asyncio.current_task().get_coro().__qualname__
+        if delay < api.CHANNEL_REOPEN_INTERVAL or not task.endswith("reopen_channels"):
             await original_sleep(delay)
             return
         resume = asyncio.get_running_loop().create_future()
