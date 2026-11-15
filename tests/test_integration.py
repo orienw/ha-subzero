@@ -622,6 +622,113 @@ async def test_startup_stream_auth_failure_stops_before_status_reads(hass, loade
     assert len(hass.config_entries.flow.async_progress_by_handler(DOMAIN)) == 1
 
 
+@pytest.mark.parametrize("read_fails", [False, True])
+async def test_full_service_at_startup_is_not_logged_as_an_error(hass, loaded, caplog, read_fails):
+    entry, client, _, _, _ = loaded
+
+    async def watch(device_ids):
+        raise ConnectionLimitReached(90)
+        yield
+
+    client.watch = watch
+    client.state.reset_mock()
+    if read_fails:
+        client.state.side_effect = ApiError("Status timed out")
+    caplog.clear()
+    await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    errors = [record.getMessage() for record in caplog.records if record.levelno >= logging.ERROR]
+    if read_fails:
+        # Only the failed read is reported, and setup is tried again.
+        assert errors == ["Error requesting subzero Kitchen data: Status timed out"]
+        assert entry.state is ConfigEntryState.SETUP_RETRY
+        return
+    assert not errors
+    assert entry.state is ConfigEntryState.LOADED
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
+    # Status checks still run until push connects.
+    assert entry.runtime_data.coordinators["test-fridge"]._transport_error is not None
+
+
+async def test_an_appliance_left_unread_by_setup_is_reported(hass, loaded, caplog):
+    entry, client, _, _, _ = loaded
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    hass.config_entries.async_update_entry(
+        entry,
+        options={
+            "devices": {
+                **entry.data["devices"],
+                "test-oven": {"name": "Wall oven", "temperature_unit": "F"},
+            }
+        },
+    )
+    fridge = dict(client.state.return_value)
+
+    async def watch(device_ids):
+        raise ConnectionLimitReached(90)
+        yield
+
+    async def state(device_id):
+        if device_id == "test-oven":
+            raise RateLimited(60)
+        return fridge
+
+    client.watch = watch
+    client.state.side_effect = state
+    caplog.clear()
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.LOADED
+    assert not entry.runtime_data.coordinators["test-oven"].last_update_success
+    problems = [
+        (record.levelno, record.getMessage())
+        for record in caplog.records
+        if record.levelno >= logging.WARNING and record.name.startswith("custom_components")
+    ]
+    assert len(problems) == 1
+    assert problems[0][0] == logging.WARNING
+    assert problems[0][1].startswith("Could not read Wall oven from Sub-Zero during setup")
+
+
+async def test_an_appliance_push_restores_during_setup_is_not_reported(
+    hass, loaded, caplog, monkeypatch
+):
+    entry, client, updates, _, _ = loaded
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    hass.config_entries.async_update_entry(
+        entry,
+        options={
+            "devices": {
+                **entry.data["devices"],
+                "test-oven": {"name": "Wall oven", "temperature_unit": "F"},
+            }
+        },
+    )
+    monkeypatch.setattr("custom_components.subzero.coordinator.INITIAL_STATE_TIMEOUT", 0)
+    fridge = dict(client.state.return_value)
+    reading, release = asyncio.Event(), asyncio.Event()
+
+    async def state(device_id):
+        if device_id == "test-fridge":
+            raise ApiError("Status timed out")
+        reading.set()
+        await release.wait()
+        return {"appliance_model": "SO3050PMSP", "cav_light_on": False}
+
+    client.state.side_effect = state
+    caplog.clear()
+    setup = asyncio.create_task(hass.config_entries.async_setup(entry.entry_id))
+    await asyncio.wait_for(reading.wait(), 1)
+    await updates.put(StateUpdate(fridge, full=True))
+    await hass.async_block_till_done()
+    release.set()
+    assert await setup
+    await hass.async_block_till_done()
+    assert entry.runtime_data.coordinators["test-fridge"].last_update_success
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
+    assert "Could not read" not in caplog.text
+
+
 async def test_partial_push_merges_new_properties(hass, loaded):
     entry, client, updates, _, _ = loaded
     await updates.put(StateUpdate({"ref_door_ajar": True, "frz_set_temp": 0}, full=False))

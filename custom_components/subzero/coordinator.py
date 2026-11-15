@@ -230,6 +230,9 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             self._transport_generation += 1
             # Remote Ready may end and return unseen while updates are missed.
             self.start_settings = {}
+        if not self.data:
+            # Before the first state nothing can go stale, and setup reads the state.
+            return
         healthy = (
             self.last_update_success
             and bool(self.data.get("appliance_model"))
@@ -1410,9 +1413,20 @@ class SubZeroAccount:
                     await coordinator.async_config_entry_first_refresh()
                 except ConfigEntryNotReady as error:
                     coordinator.data = {}
-                    errors.append(error)
+                    errors.append((coordinator, error))
             if errors and len(errors) == len(self.coordinators):
-                raise errors[0]
+                raise errors[0][1]
+            for coordinator, error in errors:
+                if coordinator.last_update_success and coordinator.data.get("appliance_model"):
+                    # Push delivered its state while setup read the others.
+                    continue
+                # Setup goes on for the others, so Home Assistant does not report this one.
+                _LOGGER.warning(
+                    "Could not read %s from Sub-Zero during setup, so it stays unavailable "
+                    "until its state arrives: %s",
+                    coordinator.device["name"],
+                    error.__cause__,
+                )
         finally:
             self._initial_states.clear()
         for coordinator in self.coordinators.values():
