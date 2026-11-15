@@ -958,8 +958,10 @@ async def test_each_source_is_held_to_only_the_keys_it_has_reported(hass, fridge
 async def test_incomplete_observations_revive_expired_transport_state(
     hass, freezer, loaded, fridge
 ):
-    _, _, updates, _, _ = loaded
+    entry, _, updates, _, _ = loaded
     coordinator, client = fridge
+    # Outage status checks would keep the state from expiring.
+    hass.config_entries.async_update_entry(entry, pref_disable_polling=True)
     complete = dict(client.state.return_value)
     client.state.return_value = {
         key: value for key, value in complete.items() if key != "ref_door_ajar"

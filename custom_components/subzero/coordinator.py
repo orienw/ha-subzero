@@ -27,6 +27,7 @@ from .api import (
     ApiError,
     ApplianceFault,
     ChannelOpened,
+    ConnectionLimitReached,
     RateLimited,
     StateUpdate,
     SubZeroClient,
@@ -75,6 +76,8 @@ from .controls import (
 _LOGGER = logging.getLogger(__name__)
 INITIAL_STATE_TIMEOUT = 16
 TRANSPORT_GRACE_SECONDS = 120
+# The state-check interval while push is down, within TRANSPORT_GRACE_SECONDS.
+OUTAGE_STATUS_INTERVAL = 60
 FOLLOWUP_DELAYS = (2, 60, 120)
 FOLLOWUP_KEYS = {key for key in BINARY_KEYS if key.endswith(("door_ajar", "timer_active"))} | {
     "kitchen_timer2_active",
@@ -174,6 +177,9 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self._read_snapshot: dict | None = None
         self._read_error: Exception | None = None
         self._channel_error: ApiError | None = None
+        # Sign-in failed and no update has succeeded since. Kept apart from
+        # last_exception, which a later transport error replaces.
+        self._sign_in_failed = False
         self._transport_error: ApiError | None = None
         self._transport_generation = 0
         self._transport_grace_task: asyncio.Task | None = None
@@ -270,6 +276,8 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
     def async_set_update_error(self, err: Exception) -> None:
         self._async_cancel_transport_grace()
         self.start_settings = {}
+        if isinstance(err, ConfigEntryAuthFailed | InvalidAuth):
+            self._sign_in_failed = True
         super().async_set_update_error(err)
 
     @callback
@@ -341,6 +349,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             self.data = data
             self.async_update_listeners()
         else:
+            self._sign_in_failed = False
             super().async_set_updated_data(data)
         _LOGGER.debug("%s state published: %s", self.device["name"], _state_for_log(self.data))
         if (
@@ -1349,6 +1358,7 @@ class SubZeroAccount:
         self._verification_order = cycle(self.coordinators.values())
         self._verifications: dict[str, asyncio.Task] = {}
         self._state_check_interval: int | None = None
+        self._outage_checks = False
         self._cancel_state_checks: Callable[[], None] | None = None
         self.entry.async_on_unload(self._async_cancel_state_checks)
 
@@ -1433,6 +1443,11 @@ class SubZeroAccount:
                     coordinator._followup_task.cancel()
                     coordinator._followup_task = None
         interval = 0 if self.entry.pref_disable_polling else status_poll_interval(self.entry)
+        self._outage_checks = not self.entry.pref_disable_polling and self._push_interrupted()
+        if self._outage_checks:
+            # Each current read keeps the appliance available for another
+            # TRANSPORT_GRACE_SECONDS until push returns.
+            interval = min(interval or OUTAGE_STATUS_INTERVAL, OUTAGE_STATUS_INTERVAL)
         if interval == self._state_check_interval:
             return
         self._state_check_interval = interval
@@ -1445,6 +1460,13 @@ class SubZeroAccount:
                 cancel_on_shutdown=True,
             )
 
+    def _push_interrupted(self) -> bool:
+        """Whether a reachable appliance waits for push to return and reconfirm its state."""
+        return any(
+            coordinator._transport_error is not None and coordinator._channel_error is None
+            for coordinator in self.coordinators.values()
+        )
+
     @callback
     def _async_cancel_state_checks(self) -> None:
         if self._cancel_state_checks is not None:
@@ -1453,11 +1475,15 @@ class SubZeroAccount:
 
     @callback
     def _verify_next_appliance(self, _now: datetime) -> None:
+        if self._outage_checks and not self._push_interrupted():
+            # Push returned and reconfirmed state; go back to the configured interval.
+            self.async_update_state_checks()
+            return
         coordinator = next(self._verification_order)
         pending = self._verifications.get(coordinator.device_id)
         if (
             self.entry.pref_disable_polling
-            or not status_poll_interval(self.entry)
+            or not self._state_check_interval
             or (
                 not coordinator.last_update_success
                 and (
@@ -1465,6 +1491,7 @@ class SubZeroAccount:
                     or isinstance(coordinator.last_exception, ConfigEntryAuthFailed | InvalidAuth)
                 )
             )
+            or coordinator._sign_in_failed
             or pending is not None
             and not pending.done()
         ):
@@ -1562,11 +1589,15 @@ class SubZeroAccount:
                     coordinator.async_transport_error(error, lost=delivered)
                 for ready in self._initial_states.values():
                     ready.set()
+                # Status reads keep appliances available while push is down.
+                self.async_update_state_checks()
                 retry_after = error.retry_after if isinstance(error, RateLimited) else 0
+                full = isinstance(error, ConnectionLimitReached)
             except Exception as error:
                 _LOGGER.exception("Sub-Zero's notification stream failed unexpectedly")
                 self.set_error(error)
                 retry_after = 0
+                full = False
             finally:
                 pending = {*recoveries.values(), *canceled}
                 for recovery in pending:
@@ -1576,5 +1607,10 @@ class SubZeroAccount:
                 recoveries.clear()
             if time.monotonic() - started >= 120:
                 backoff = RECONNECT_DELAY
+            if full:
+                # A full service admits a connection when another client leaves, so
+                # waiting longer does not help; the delay is already randomized.
+                await asyncio.sleep(retry_after)
+                continue
             await asyncio.sleep(max(backoff, retry_after) + random.uniform(0, 5))
             backoff = min(backoff * 2, MAX_RECONNECT_DELAY)

@@ -483,6 +483,49 @@ async def test_rate_limit_blocks_followup_requests(api_server, tokens):
     assert api_server["refreshes"] == 0
 
 
+@pytest.mark.parametrize(
+    ("server", "body", "headers", "full"),
+    [
+        ("signalr", "Connection count reaches limit.", {}, True),
+        ("signalr", "Connection count reaches limit.", {"Retry-After": "30"}, False),
+        ("signalr", "Too many negotiate requests.", {}, False),
+        ("api", "Connection count reaches limit.", {}, False),
+    ],
+)
+async def test_only_a_full_signalr_service_is_tried_again_soon(
+    aiohttp_server, monkeypatch, socket_enabled, tokens, server, body, headers, full
+):
+    async def refuse(request):
+        return web.Response(status=429, text=body, headers=headers)
+
+    async def accept(request):
+        return web.json_response({})
+
+    apps = {}
+    for name in ("signalr", "api"):
+        apps[name] = web.Application()
+        apps[name].router.add_post("/refused", refuse if name == server else accept)
+        apps[name].router.add_post("/accepted", accept)
+    servers = {name: await aiohttp_server(app) for name, app in apps.items()}
+    origins = {name: URL(str(item.make_url("/")).rstrip("/")) for name, item in servers.items()}
+    monkeypatch.setattr(api, "SIGNALR_ORIGIN", str(origins["signalr"]))
+    async with aiohttp.ClientSession() as session:
+        client = api.SubZeroClient(session, "test-key", tokens)
+        with pytest.raises(api.RateLimited) as error:
+            await client._json("POST", origins[server] / "refused")
+        assert isinstance(error.value, api.ConnectionLimitReached) is full
+        if full:
+            assert 60 <= error.value.retry_after <= 120
+            assert "no free connections" in str(error.value)
+        else:
+            assert error.value.retry_after == (30 if headers else 600)
+        # Only the server that refused waits.
+        with pytest.raises(api.RateLimited):
+            await client._json("POST", origins[server] / "accepted")
+        other = "api" if server == "signalr" else "signalr"
+        assert await client._json("POST", origins[other] / "accepted") == {}
+
+
 @pytest.mark.parametrize("offline", [False, True, "recover"])
 @pytest.mark.parametrize("slow_open", [False, True])
 async def test_single_signalr_connection_routes_multiple_appliances(

@@ -21,6 +21,7 @@ from custom_components.subzero.api import (
     ApiError,
     Appliance,
     ChannelOpened,
+    ConnectionLimitReached,
     RateLimited,
     StateUpdate,
     parse_notification,
@@ -512,6 +513,8 @@ async def test_setup_recovers_a_reconnected_appliance_while_another_initial_read
             },
             "status_poll_interval": 0,
         },
+        # Outage status checks would read the fridge too.
+        pref_disable_polling=True,
     )
     monkeypatch.setattr("custom_components.subzero.coordinator.random.uniform", lambda *_: 0)
     updates = asyncio.Queue()
@@ -964,6 +967,8 @@ async def test_metadata_failure_uses_setup_retry_or_reauth(hass, loaded, error):
 @pytest.mark.parametrize("error", [ApiError("Disconnected"), RateLimited(300)])
 async def test_stream_failure_preserves_state_until_the_grace_expires(hass, freezer, loaded, error):
     entry, client, updates, _, _ = loaded
+    # Without polling, no status checks keep the state available during the outage.
+    hass.config_entries.async_update_entry(entry, pref_disable_polling=True)
     await updates.put(error)
     await hass.async_block_till_done()
     assert entry.runtime_data.coordinators["test-fridge"].last_update_success
@@ -983,7 +988,12 @@ async def test_stream_failure_preserves_state_until_the_grace_expires(hass, free
 
 @pytest.mark.parametrize(
     ("error", "delay"),
-    [(ApiError("Disconnected"), 30), (RateLimited(300), 300), (RecursionError("nested"), 30)],
+    [
+        (ApiError("Disconnected"), 30),
+        (RateLimited(300), 300),
+        (ConnectionLimitReached(90), 90),
+        (RecursionError("nested"), 30),
+    ],
 )
 async def test_reconnect_waits_then_recovers_from_push_without_polling(
     hass, loaded, monkeypatch, error, delay
@@ -1232,9 +1242,131 @@ async def test_reconnected_read_restores_state_without_a_key_it_lacks(
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
 
 
+async def test_status_checks_keep_state_available_until_push_returns(
+    hass, freezer, loaded, monkeypatch
+):
+    entry, client, updates, _, _ = loaded
+    monkeypatch.setattr("custom_components.subzero.coordinator.random.uniform", lambda *_: 0)
+    hass.config_entries.async_update_entry(entry, options={"status_poll_interval": 0})
+    await hass.async_block_till_done()
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    client.state.reset_mock()
+    await updates.put(RateLimited(300))
+    await hass.async_block_till_done()
+    client.state.return_value["ref_door_ajar"] = True
+    # Two grace periods pass while push stays down.
+    for _ in range(4):
+        freezer.tick(60)
+        async_fire_time_changed(hass, dt_util.utcnow())
+        await hass.async_block_till_done()
+    assert client.state.await_count == 4
+    assert coordinator._transport_error is not None
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
+
+    # Push returns and its snapshot reconfirms state, so the checks stop.
+    freezer.tick(61)
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+    assert len(client.watched) == 2
+    await updates.put(StateUpdate(dict(client.state.return_value), full=True))
+    await hass.async_block_till_done()
+    assert coordinator._transport_error is None
+    for _ in range(3):
+        freezer.tick(60)
+        async_fire_time_changed(hass, dt_util.utcnow())
+        await hass.async_block_till_done()
+    assert client.state.await_count == 5
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
+
+
+async def test_status_checks_stop_for_an_appliance_whose_channel_is_offline(
+    hass, freezer, loaded, monkeypatch
+):
+    entry, client, updates, _, _ = loaded
+    monkeypatch.setattr("custom_components.subzero.coordinator.random.uniform", lambda *_: 0)
+    hass.config_entries.async_update_entry(entry, options={"status_poll_interval": 0})
+    await hass.async_block_till_done()
+    client.state.reset_mock()
+    await updates.put(RateLimited(300))
+    await hass.async_block_till_done()
+    freezer.tick(301)
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+    assert len(client.watched) == 2
+    reads = client.state.await_count
+    # The appliance is offline, so it cannot reconfirm and checks would never end.
+    await updates.put(("test-fridge", ApiError("The appliance rejected opening its channel.")))
+    await hass.async_block_till_done()
+    for _ in range(3):
+        freezer.tick(60)
+        async_fire_time_changed(hass, dt_util.utcnow())
+        await hass.async_block_till_done()
+    assert client.state.await_count == reads
+    assert not entry.runtime_data._outage_checks
+
+
+async def test_status_checks_stay_stopped_after_a_rejected_sign_in(
+    hass, freezer, loaded, monkeypatch
+):
+    entry, client, updates, _, _ = loaded
+    monkeypatch.setattr("custom_components.subzero.coordinator.random.uniform", lambda *_: 0)
+    hass.config_entries.async_update_entry(entry, options={"status_poll_interval": 0})
+    await hass.async_block_till_done()
+    client.state.reset_mock()
+    client.state.side_effect = InvalidAuth("Sub-Zero requires a new sign-in.")
+    await updates.put(ConnectionLimitReached(90))
+    await hass.async_block_till_done()
+    freezer.tick(60)
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+    assert client.state.await_count == 1
+    # Push keeps failing for another reason, which must not hide the sign-in failure.
+    for _ in range(4):
+        freezer.tick(91)
+        async_fire_time_changed(hass, dt_util.utcnow())
+        await hass.async_block_till_done()
+        await updates.put(ConnectionLimitReached(90))
+        await hass.async_block_till_done()
+    assert client.state.await_count == 1
+    assert entry.runtime_data.coordinators["test-fridge"]._sign_in_failed
+
+
+async def test_a_failed_sign_in_stops_checks_until_an_update_succeeds(hass, loaded):
+    entry, client, _, _, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    client.state.side_effect = InvalidAuth("Sub-Zero requires a new sign-in.")
+    await coordinator.async_refresh()
+    assert coordinator._sign_in_failed
+    # Home Assistant's refresh records this failure without async_set_update_error.
+    client.state.side_effect = ApiError("Status timed out")
+    await coordinator.async_refresh()
+    coordinator.async_set_update_error(ApiError("Stream disconnected"))
+    assert coordinator._sign_in_failed
+    client.state.side_effect = None
+    await coordinator.async_refresh()
+    assert coordinator.last_update_success
+    assert not coordinator._sign_in_failed
+
+
+async def test_full_service_is_tried_again_without_a_growing_wait(hass, loaded, monkeypatch):
+    entry, client, updates, _, _ = loaded
+    monkeypatch.setattr("custom_components.subzero.coordinator.random.uniform", lambda *_: 0)
+    hass.config_entries.async_update_entry(entry, pref_disable_polling=True)
+    for attempt in range(1, 5):
+        await updates.put(ConnectionLimitReached(90))
+        await hass.async_block_till_done()
+        async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=89))
+        await hass.async_block_till_done()
+        assert len(client.watched) == attempt
+        async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=91))
+        await hass.async_block_till_done()
+        assert len(client.watched) == attempt + 1
+
+
 async def test_manual_status_during_a_stream_outage_has_bounded_freshness(hass, freezer, loaded):
     entry, client, updates, _, _ = loaded
     coordinator = entry.runtime_data.coordinators["test-fridge"]
+    hass.config_entries.async_update_entry(entry, pref_disable_polling=True)
     await updates.put(RateLimited(300))
     await hass.async_block_till_done()
     freezer.tick(91)

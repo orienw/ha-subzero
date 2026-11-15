@@ -36,6 +36,8 @@ SEPARATOR = "\x1e"
 PING_INTERVAL = 15
 # A renewal waits at most this long for the old socket to close before using the new one.
 SOCKET_CLOSE_TIMEOUT = 2
+# Seconds before trying a full live-update service again, randomized up to double.
+CONNECTION_LIMIT_RETRY = 60
 CHANNEL_REOPEN_INTERVAL = 30 * 60
 
 _LOGGER = logging.getLogger(__name__)
@@ -64,9 +66,16 @@ class ApiError(Exception):
 class RateLimited(ApiError):
     """Wait before making another request to the service."""
 
-    def __init__(self, retry_after: float):
+    def __init__(self, retry_after: float, message: str = "Sub-Zero temporarily limited requests."):
         self.retry_after = max(1, retry_after)
-        super().__init__("Sub-Zero temporarily limited requests.")
+        super().__init__(message)
+
+
+class ConnectionLimitReached(RateLimited):
+    """Sub-Zero's live-update service is full until another client disconnects."""
+
+    def __init__(self, retry_after: float):
+        super().__init__(retry_after, "Sub-Zero's live-update service has no free connections.")
 
 
 @dataclass(frozen=True)
@@ -455,15 +464,29 @@ class SubZeroClient:
                 **kwargs,
             ) as response:
                 if response.status == 429:
-                    delay = retry_delay(response.headers.get("Retry-After"))
-                    self._retry_at[origin] = time.monotonic() + delay
+                    header = response.headers.get("Retry-After")
+                    if (
+                        header is None
+                        and origin == URL(SIGNALR_ORIGIN)
+                        and "Connection count reaches limit"
+                        in await response.text(errors="replace")
+                    ):
+                        # A connection frees up only when another client disconnects,
+                        # so waiting longer does not help; spread out the attempts.
+                        error = ConnectionLimitReached(
+                            random.uniform(CONNECTION_LIMIT_RETRY, 2 * CONNECTION_LIMIT_RETRY)
+                        )
+                    else:
+                        error = RateLimited(retry_delay(header))
+                    self._retry_at[origin] = time.monotonic() + error.retry_after
                     _LOGGER.debug(
-                        "%s limited requests for %.0f s (Retry-After %s)",
+                        "%s limited requests for %.0f s (Retry-After %s): %s",
                         origin.host,
-                        delay,
-                        "sent" if "Retry-After" in response.headers else "missing",
+                        error.retry_after,
+                        "missing" if header is None else "sent",
+                        error,
                     )
-                    raise RateLimited(delay)
+                    raise error
                 if response.status in (401, 403) or (token_request and response.status == 400):
                     raise InvalidAuth("Sub-Zero requires a new sign-in.")
                 if appliance_command and (200 <= response.status < 300 or response.status == 500):
