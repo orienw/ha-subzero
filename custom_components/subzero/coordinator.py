@@ -1621,7 +1621,7 @@ class SubZeroAccount:
                 recoveries.clear()
             if full:
                 # A full service admits a connection when another client leaves, so
-                # waiting longer does not help; the delay is already randomized.
+                # the delay does not grow; it is already randomized.
                 await asyncio.sleep(retry_after)
                 continue
             if time.monotonic() - started >= 120:

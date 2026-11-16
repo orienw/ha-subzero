@@ -35,7 +35,7 @@ SIGNALR_ORIGIN = "https://sznacasigprod.service.signalr.net"
 SEPARATOR = "\x1e"
 PING_INTERVAL = 15
 # Seconds before trying a full live-update service again, randomized up to double.
-CONNECTION_LIMIT_RETRY = 60
+CONNECTION_LIMIT_RETRY = 120
 CHANNEL_REOPEN_INTERVAL = 30 * 60
 
 _LOGGER = logging.getLogger(__name__)
@@ -470,7 +470,7 @@ class SubZeroClient:
                         in await response.text(errors="replace")
                     ):
                         # A connection frees up only when another client disconnects,
-                        # so waiting longer does not help; spread out the attempts.
+                        # so the wait does not grow; spread out the attempts.
                         error = ConnectionLimitReached(
                             random.uniform(CONNECTION_LIMIT_RETRY, 2 * CONNECTION_LIMIT_RETRY)
                         )

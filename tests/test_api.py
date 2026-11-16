@@ -523,7 +523,7 @@ async def test_only_a_full_signalr_service_is_tried_again_soon(
             "service_full": full,
         }
         if full:
-            assert 60 <= error.value.retry_after <= 120
+            assert 120 <= error.value.retry_after <= 240
             assert "no free connections" in str(error.value)
         else:
             assert error.value.retry_after == (30 if headers else 600)
