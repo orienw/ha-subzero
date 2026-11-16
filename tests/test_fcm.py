@@ -18,7 +18,7 @@ from homeassistant.helpers import issue_registry as ir
 from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 
-from custom_components.subzero import async_remove_entry
+from custom_components.subzero import async_remove_entry, fcm
 from custom_components.subzero.alert_loc_keys import ALERT_LOCATION_KEYS
 from custom_components.subzero.api import ApiError, RateLimited
 from custom_components.subzero.const import DOMAIN
@@ -883,6 +883,28 @@ async def test_a_listener_that_keeps_closing_raises_a_repair(
     # A pass where the listener stays up clears it.
     await wait_a_pass(hass, freezer, 61)
     assert firebase_issue(hass, entry) is None
+
+
+@fridge
+async def test_alerts_that_start_working_after_failed_setups_raise_no_repair(
+    hass, freezer, cloud_appliance, alerts, push_clients, monkeypatch
+):
+    offline = [OSError(), OSError()]
+
+    class Offline(fcm.PushClient):
+        async def checkin_or_register(self):
+            if offline:
+                raise offline.pop()
+            return await super().checkin_or_register()
+
+    monkeypatch.setattr(fcm, "PushClient", Offline)
+    alerts.start()
+    await hass.async_block_till_done()
+    await wait_a_pass(hass, freezer, 301)
+    assert not offline and not alerts.subscription_healthy
+    await wait_a_pass(hass, freezer, 301)
+    assert alerts.subscription_healthy
+    assert firebase_issue(hass, cloud_appliance.entry) is None
 
 
 @fridge

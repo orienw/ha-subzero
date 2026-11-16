@@ -252,7 +252,8 @@ class FcmAlerts:
                         or any(task.done() for task in self.push.tasks)
                     ):
                         previous = self.push
-                        if previous is not None:
+                        # A client whose setup failed never listened, and that failure counted.
+                        if previous is not None and previous.tasks:
                             problem = "the Firebase connection kept closing"
                         await self._close_push()
                         credentials = copy.deepcopy(self.entry.data.get("fcm_credentials"))
