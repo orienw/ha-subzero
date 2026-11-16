@@ -405,7 +405,7 @@ async def test_registration_sync_reuses_our_id_and_skips_healthy_subscriptions(
     assert await alerts._sync("own-psid", "test-token")
     registration = client.register_for_alerts.await_args.args[0]
     assert registration["psid"] == "own-psid"
-    assert registration["mobile_name"] == "Home Assistant"
+    assert registration["mobile_name"] is None
     assert cloud_appliance.entry.data["fcm_registration_ids"] == {"appliance": registration["id"]}
     assert await alerts._sync("own-psid", "test-token")
     client.alert_registration.assert_awaited_once()

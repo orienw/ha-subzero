@@ -364,7 +364,7 @@ class FcmAlerts:
                     "fcmToken": token,
                     "deviceId": device_id,
                     "psid": psid,
-                    "mobile_name": "Home Assistant",
+                    "mobile_name": None,
                 }
                 if existing is None or existing.get("fcmToken") != token:
                     try:
