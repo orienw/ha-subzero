@@ -1625,8 +1625,8 @@ class SubZeroAccount:
                 await asyncio.sleep(retry_after)
                 continue
             if time.monotonic() - started >= 120:
-                # A connection that worked for a while is tried again at once, as the
-                # app does, then with increasing delays.
+                # A connection that worked for a while is tried again at once, then with
+                # increasing delays.
                 delay = retry_after
                 backoff = RECONNECT_DELAY
             else:
