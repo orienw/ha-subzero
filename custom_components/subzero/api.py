@@ -1037,6 +1037,9 @@ class SubZeroClient:
                             timeout=max(0.1, next_ping - time.monotonic()),
                             return_when=asyncio.FIRST_COMPLETED,
                         )
+                        # Channel results that arrived before a close still count.
+                        while channel_events:
+                            yield channel_events.popleft()
                         if opening.done():
                             opening.result()
                             tasks.discard(opening)

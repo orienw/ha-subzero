@@ -1384,6 +1384,30 @@ async def test_connection_failures_and_drops_are_recorded(notification_stream):
     assert not client.push_connected
 
 
+async def test_a_channel_result_is_reported_before_the_connection_closes(notification_stream):
+    client, _, _, sockets = notification_stream
+    opened, hold = asyncio.Event(), asyncio.Event()
+
+    async def open_channel(device_id):
+        if device_id == "test-oven":
+            # The fridge's channel was accepted; the oven's is still being opened.
+            opened.set()
+            await hold.wait()
+
+    client.open_channel.side_effect = open_channel
+    stream = client.watch(["test-fridge", "test-oven"])
+    try:
+        async with asyncio.timeout(5):
+            first = asyncio.create_task(anext(stream))
+            await opened.wait()
+            await sockets[0].close()
+            assert await first == ("test-fridge", api.ChannelOpened())
+            with pytest.raises(api.ApiError, match="disconnected"):
+                await anext(stream)
+    finally:
+        await stream.aclose()
+
+
 @pytest.mark.parametrize("rejected", [False, True])
 async def test_channel_acceptance_is_reported_without_a_push_snapshot(
     notification_stream, monkeypatch, rejected
