@@ -1417,12 +1417,15 @@ class SubZeroAccount:
                 except ConfigEntryNotReady as error:
                     coordinator.data = {}
                     errors.append((coordinator, error))
+            errors = [
+                (coordinator, error)
+                for coordinator, error in errors
+                # Push may have delivered its state while setup read the others.
+                if not (coordinator.last_update_success and coordinator.data.get("appliance_model"))
+            ]
             if errors and len(errors) == len(self.coordinators):
                 raise errors[0][1]
             for coordinator, error in errors:
-                if coordinator.last_update_success and coordinator.data.get("appliance_model"):
-                    # Push delivered its state while setup read the others.
-                    continue
                 # Setup goes on for the others, so Home Assistant does not report this one.
                 _LOGGER.warning(
                     "Could not read %s from Sub-Zero during setup, so it stays unavailable "
