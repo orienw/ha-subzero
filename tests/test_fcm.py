@@ -512,7 +512,7 @@ async def test_enabling_and_disabling_starts_and_cleans_up_our_listener(
     assert credentials == push_clients[0].credentials
     await cloud_appliance.update({"ref_door_ajar": True})
     assert hass.states.get(entity_id).state == "on"
-    async_report_firebase_alerts(hass, entry, "the Firebase connection kept closing")
+    async_report_firebase_alerts(hass, entry, "Home Assistant could not stay connected to Firebase")
     await configure(False)
     # Turning alerts off clears their repair.
     assert firebase_issue(hass, entry) is None
@@ -879,8 +879,37 @@ async def test_a_listener_that_keeps_closing_raises_a_repair(
         assert len(push_clients) == count + 2 and alerts.subscription_healthy
     issue = firebase_issue(hass, entry)
     assert issue is not None
-    assert issue.translation_placeholders == {"problem": "the Firebase connection kept closing"}
+    assert issue.translation_placeholders == {
+        "problem": "Home Assistant could not stay connected to Firebase"
+    }
     # A pass where the listener stays up clears it.
+    await wait_a_pass(hass, freezer, 61)
+    assert firebase_issue(hass, entry) is None
+
+
+@fridge
+async def test_a_listener_that_never_connects_raises_a_repair(
+    hass, freezer, cloud_appliance, alerts, push_clients, monkeypatch
+):
+    entry = cloud_appliance.entry
+    monkeypatch.setattr(fcm.PushClient, "is_started", lambda self: False)
+    alerts.start()
+    await hass.async_block_till_done()
+    for count in range(3):
+        assert firebase_issue(hass, entry) is None
+        # The listener keeps trying to connect through a pass, then gives up.
+        await wait_a_pass(hass, freezer, 61)
+        push_clients[-1].tasks[0].cancel()
+        await asyncio.gather(*push_clients[-1].tasks, return_exceptions=True)
+        await wait_a_pass(hass, freezer, 61)
+        assert len(push_clients) == count + 2 and alerts.subscription_healthy
+    issue = firebase_issue(hass, entry)
+    assert issue is not None
+    assert issue.translation_placeholders == {
+        "problem": "Home Assistant could not stay connected to Firebase"
+    }
+    # A pass where the listener is connected clears it.
+    monkeypatch.setattr(fcm.PushClient, "is_started", lambda self: True)
     await wait_a_pass(hass, freezer, 61)
     assert firebase_issue(hass, entry) is None
 
@@ -910,7 +939,7 @@ async def test_alerts_that_start_working_after_failed_setups_raise_no_repair(
 @fridge
 async def test_deselecting_every_appliance_clears_the_alerts_repair(hass, cloud_appliance):
     entry = cloud_appliance.entry
-    async_report_firebase_alerts(hass, entry, "the Firebase connection kept closing")
+    async_report_firebase_alerts(hass, entry, "Home Assistant could not stay connected to Firebase")
     result = await hass.config_entries.options.async_init(entry.entry_id)
     await hass.config_entries.options.async_configure(
         result["flow_id"],
@@ -926,7 +955,7 @@ async def test_deselecting_every_appliance_clears_the_alerts_repair(hass, cloud_
 async def test_removing_an_unloaded_entry_cleans_saved_subscriptions(hass, cloud_appliance, alerts):
     entry = cloud_appliance.entry
     alerts._save(fcm_psid="own-psid", fcm_registration_ids={"appliance": "ours"})
-    async_report_firebase_alerts(hass, entry, "the Firebase connection kept closing")
+    async_report_firebase_alerts(hass, entry, "Home Assistant could not stay connected to Firebase")
     await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
     await async_remove_entry(hass, entry)

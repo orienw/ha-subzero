@@ -254,7 +254,7 @@ class FcmAlerts:
                         previous = self.push
                         # A client whose setup failed never listened, and that failure counted.
                         if previous is not None and previous.tasks:
-                            problem = "the Firebase connection kept closing"
+                            problem = "Home Assistant could not stay connected to Firebase"
                         await self._close_push()
                         credentials = copy.deepcopy(self.entry.data.get("fcm_credentials"))
                         if (
@@ -289,8 +289,8 @@ class FcmAlerts:
                             self.last_sync = datetime.now(UTC).isoformat()
                         else:
                             problem = "Sub-Zero did not accept the alert subscriptions"
-                        if problem is None:
-                            # Only a pass where the listener stayed up shows recovery.
+                        if problem is None and self.push.is_started():
+                            # Only a pass where the listener stayed connected shows recovery.
                             self._failures = 0
                             async_report_firebase_alerts(self.hass, self.entry, None)
                         interval = REFRESH_INTERVAL if self.subscription_healthy else RETRY_INTERVAL
