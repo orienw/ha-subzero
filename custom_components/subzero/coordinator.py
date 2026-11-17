@@ -225,6 +225,9 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         """Keep established state briefly while the shared stream reconnects."""
         first = self._transport_error is None
         self._transport_error = error
+        # A channel error belongs to the connection that ended, so status reads cover
+        # every appliance until the stream returns.
+        self._channel_error = None
         if first or lost:
             # A failed attempt that delivered nothing cannot have changed state.
             self._transport_generation += 1

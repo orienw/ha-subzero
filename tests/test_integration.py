@@ -1412,6 +1412,31 @@ async def test_status_checks_stop_for_an_appliance_whose_channel_is_offline(
     assert not entry.runtime_data._outage_checks
 
 
+REJECTED = ApiError("The appliance rejected opening its channel.")
+
+
+@pytest.mark.parametrize("error", [RateLimited(30), REJECTED])
+async def test_status_checks_cover_an_appliance_whose_channel_failed_once_the_connection_drops(
+    hass, freezer, loaded, monkeypatch, error
+):
+    entry, client, updates, _, _ = loaded
+    monkeypatch.setattr("custom_components.subzero.coordinator.random.uniform", lambda *_: 0)
+    hass.config_entries.async_update_entry(entry, options={"status_poll_interval": 0})
+    await hass.async_block_till_done()
+    client.state.reset_mock()
+    await updates.put(("test-fridge", error))
+    await hass.async_block_till_done()
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "unavailable"
+    # The connection drops before the channel is tried again, and stays down.
+    await updates.put(RateLimited(300))
+    await hass.async_block_till_done()
+    freezer.tick(60)
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+    assert client.state.await_count == 1
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
+
+
 async def test_status_checks_stay_stopped_after_a_rejected_sign_in(
     hass, freezer, loaded, monkeypatch
 ):
