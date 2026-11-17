@@ -154,6 +154,8 @@ class FcmAlerts:
         self.last_error: str | None = None
         self.last_sync: str | None = None
         self.subscription_healthy = False
+        # Why the last sync was incomplete, for the repair.
+        self._sync_problem: str | None = None
         self._failures = 0
 
     @callback
@@ -288,7 +290,7 @@ class FcmAlerts:
                         if self.subscription_healthy:
                             self.last_sync = datetime.now(UTC).isoformat()
                         else:
-                            problem = "Sub-Zero did not accept the alert subscriptions"
+                            problem = self._sync_problem
                         if problem is None and self.push.is_started():
                             # Only a pass where the listener stayed connected shows recovery.
                             self._failures = 0
@@ -325,11 +327,13 @@ class FcmAlerts:
     async def _sync(self, psid: str, token: str) -> bool:
         """Renew our own appliance registrations and subscribe to supported codes."""
         succeeded = await self._remove_subscriptions(psid, set(self.coordinators))
+        # Appliances whose alerts depend on state they have not reported.
+        waiting: list[str] = []
         ids = dict(self.entry.data.get("fcm_registration_ids", {}))
         for device_id, coordinator in self.coordinators.items():
             data = coordinator.data
             if not data:
-                succeeded = False
+                waiting.append(coordinator.device["name"])
                 continue
             if is_dishwasher(data):
                 family = 3
@@ -338,7 +342,7 @@ class FcmAlerts:
             elif is_fridge(data) or is_wine(data) or is_ice_maker(data):
                 family = 1
             elif appliance_type(data) is None:
-                succeeded = False
+                waiting.append(coordinator.device["name"])
                 continue
             else:
                 # Hoods do not have an appliance alert family in the app.
@@ -403,7 +407,13 @@ class FcmAlerts:
                     "Could not subscribe to alerts for %s: %s", coordinator.device["name"], error
                 )
                 succeeded = False
-        return succeeded
+        if not succeeded:
+            self._sync_problem = (
+                "Home Assistant could not update the alert subscriptions with Sub-Zero"
+            )
+        elif waiting:
+            self._sync_problem = f"Home Assistant has no usable state for {waiting[0]}"
+        return succeeded and not waiting
 
     async def _remove_subscriptions(self, psid: str, retain: set[str]) -> bool:
         """Unsubscribe appliances removed from this entry or all when turned off."""

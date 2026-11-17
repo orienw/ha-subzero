@@ -4,6 +4,7 @@ import asyncio
 import os
 from base64 import urlsafe_b64encode
 from datetime import timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import http_ece
@@ -854,13 +855,33 @@ async def test_refused_alert_subscriptions_raise_a_repair_until_they_work(
     issue = firebase_issue(hass, entry)
     assert issue is not None
     assert issue.translation_placeholders == {
-        "problem": "Sub-Zero did not accept the alert subscriptions"
+        "problem": "Home Assistant could not update the alert subscriptions with Sub-Zero"
     }
 
     registration.side_effect = None
     await wait_a_pass(hass, freezer, 301)
     assert alerts.subscription_healthy
     assert firebase_issue(hass, entry) is None
+
+
+@fridge
+async def test_an_appliance_without_state_is_named_in_the_repair(
+    hass, freezer, cloud_appliance, alerts, push_clients
+):
+    alerts.coordinators = {
+        **alerts.coordinators,
+        "offline": SimpleNamespace(data={}, device={"name": "Wall oven"}),
+    }
+    alerts.start()
+    await hass.async_block_till_done()
+    for _ in range(2):
+        await wait_a_pass(hass, freezer, 301)
+    issue = firebase_issue(hass, cloud_appliance.entry)
+    assert issue.translation_placeholders == {
+        "problem": "Home Assistant has no usable state for Wall oven"
+    }
+    # Nothing was refused: the appliance that has state is subscribed.
+    cloud_appliance.client.subscribe_alerts.assert_awaited_once()
 
 
 @fridge
