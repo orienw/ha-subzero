@@ -191,6 +191,7 @@ Diagnostics downloads use cached state. They omit account credentials, appliance
 | Per-appliance snapshot and update counts | Parsed state traffic and when it last arrived. |
 | Snapshot flips | Full snapshots that changed an on/off value, such as a door, that no update had reported, and the latest one's age on arrival by the appliance clock. If that clock and its time zone are right, a few seconds means the snapshot corrected a missed update, and minutes means it arrived late and may have restored a stale value. The debug log names the keys. |
 | Last appliance message | Channel traffic, including messages without entity state. |
+| Channel errors | Per appliance, the last 10 attempts to open its update channel that failed, with when, the error, and whether it was a 30-minute reopen. |
 | Verification statistics and missing keys | Check attempts, complete pushed snapshots, status reads, and the keys each source's latest observation lacked. |
 
 Connection health and message counts do not prove that every state change arrived or was applied.

@@ -737,6 +737,12 @@ async def test_stream_surfaces_channel_errors_without_leaking_tasks(tokens, erro
     if error is None:
         assert channel_cancelled.is_set()
         assert receive_cancelled.is_set()
+        assert not client.channel_errors
+    else:
+        assert [
+            (failure["error"], failure["reopen"])
+            for failure in client.channel_errors["test-fridge"]
+        ] == [(type(error).__name__, False)]
     session.ws_connect.return_value.__aexit__.assert_awaited_once()
 
 
@@ -1322,6 +1328,11 @@ async def test_channel_reopen_failures_preserve_delivery(
             delay, deferred = await channel_reopen_waits.get()
             assert delay == (3600 if rate_limited else 1800)
             assert client.open_channel.await_count == (3 if rate_limited else 4)
+            assert [
+                (failure["error"], failure["reopen"])
+                for failure in client.channel_errors["test-fridge"]
+            ] == [(type(error).__name__, True)]
+            assert "test-oven" not in client.channel_errors
 
             await sockets[0].send_str(
                 json.dumps(notification({"ref_door_ajar": False})) + api.SEPARATOR
@@ -1354,6 +1365,10 @@ async def test_channel_reopen_auth_failure_reaches_the_listener(
                 await anext(stream)
             assert len(sockets) == 1
             assert not client.push_connected
+            assert [
+                (failure["error"], failure["reopen"])
+                for failure in client.channel_errors["test-fridge"]
+            ] == [("InvalidAuth", True)]
     finally:
         await stream.aclose()
 
@@ -1423,7 +1438,11 @@ async def test_channel_acceptance_is_reported_without_a_push_snapshot(
                 device_id, error = await anext(stream)
                 assert device_id == "test-fridge"
                 assert isinstance(error, api.ApiError)
+                (failure,) = client.channel_errors["test-fridge"]
+                assert datetime.fromisoformat(failure.pop("time")).utcoffset() == timedelta(0)
+                assert failure == {"error": "ApiError", "message": "Rejected", "reopen": False}
             assert await anext(stream) == ("test-fridge", api.ChannelOpened())
+            assert len(client.channel_errors.get("test-fridge", ())) == rejected
         assert len(sockets) == 1
         assert client.notification_stats["received"] == 0
         assert client.open_channel.await_count == (2 if rejected else 1)

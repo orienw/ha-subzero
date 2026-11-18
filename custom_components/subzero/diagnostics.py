@@ -27,6 +27,9 @@ def appliance_diagnostics(
         "push": {
             **coordinator.push_stats,
             "last_channel_message": coordinator.client.last_messages.get(coordinator.device_id),
+            "channel_errors": list(
+                coordinator.client.channel_errors.get(coordinator.device_id, ())
+            ),
         },
         "state_verification": dict(coordinator.verification_stats),
         "confirmed_at": coordinator.confirmed_at.isoformat() if coordinator.confirmed_at else None,

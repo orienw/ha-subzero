@@ -200,6 +200,7 @@ async def appliances(hass, tokens, request, unit_system):
             "last_received": None,
         }
         client.last_messages = {}
+        client.channel_errors = {}
         client.appliances = AsyncMock(
             return_value=[
                 Appliance(device_id, device["name"], unit)
@@ -2321,10 +2322,18 @@ async def test_diagnostics_count_push_updates(hass, appliances):
         "last_snapshot_flip_age_seconds": None,
         "last_received": None,
         "last_channel_message": None,
+        "channel_errors": [],
     }
     before = await async_get_device_diagnostics(hass, appliances.entry, device)
     assert before["push"] == initial
     appliances.client.last_messages["fridge"] = "2026-10-04T12:00:00+00:00"
+    failure = {
+        "time": "2026-10-04T12:00:00+00:00",
+        "error": "RateLimited",
+        "message": "Sub-Zero temporarily limited requests.",
+        "reopen": False,
+    }
+    appliances.client.channel_errors["fridge"] = [failure]
     await appliances.update("fridge", {"ref_door_ajar": True})
     await appliances.update("fridge", {"appliance_model": "TEST-MODEL"}, full=True)
     result = await async_get_device_diagnostics(hass, appliances.entry, device)
@@ -2332,6 +2341,7 @@ async def test_diagnostics_count_push_updates(hass, appliances):
     assert result["push"]["updates"] == 1
     assert dt_util.parse_datetime(result["push"]["last_received"]) <= dt_util.utcnow()
     assert result["push"]["last_channel_message"] == "2026-10-04T12:00:00+00:00"
+    assert result["push"]["channel_errors"] == [failure]
     assert before["push"] == initial
 
 

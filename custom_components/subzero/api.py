@@ -356,7 +356,7 @@ def parse_notification(
 type _Connection = tuple[AsyncExitStack, aiohttp.ClientWebSocketResponse, str]
 
 
-def _failure(error: ApiError) -> dict:
+def _failure(error: ApiError | InvalidAuth) -> dict:
     return {
         "time": datetime.now(UTC).isoformat(),
         "error": type(error).__name__,
@@ -432,6 +432,8 @@ class SubZeroClient:
         self.failed_connections: deque[dict] = deque(maxlen=10)
         self.disconnects: deque[dict] = deque(maxlen=10)
         self.rate_limits: deque[dict] = deque(maxlen=10)
+        # Per appliance, the latest attempts to open its update channel that failed.
+        self.channel_errors: dict[str, deque[dict]] = {}
 
     @property
     def _api_token(self) -> str:
@@ -639,6 +641,13 @@ class SubZeroClient:
         if not isinstance(data.get("appliance_model"), str):
             raise ApiError("The appliance did not return a status snapshot.")
         return data
+
+    def _channel_failed(
+        self, device_id: str, error: ApiError | InvalidAuth, *, reopen: bool
+    ) -> None:
+        self.channel_errors.setdefault(device_id, deque(maxlen=10)).append(
+            {**_failure(error), "reopen": reopen}
+        )
 
     async def open_channel(self, device_id: str) -> None:
         response = await self._command(device_id, "open_cloud_async")
@@ -931,7 +940,11 @@ class SubZeroClient:
                             _LOGGER.debug("Opening update channel for appliance %d", index)
                             try:
                                 await self.open_channel(device_id)
+                            except InvalidAuth as error:
+                                self._channel_failed(device_id, error, reopen=False)
+                                raise
                             except ApiError as error:
+                                self._channel_failed(device_id, error, reopen=False)
                                 # A rate limit keeps the connection, so appliances whose
                                 # channels opened keep updating while this one waits.
                                 if isinstance(error, RateLimited):
@@ -957,11 +970,16 @@ class SubZeroClient:
                             _LOGGER.debug("Reopening update channel for appliance %d", index)
                             try:
                                 await self.open_channel(device_id)
+                            except InvalidAuth as error:
+                                self._channel_failed(device_id, error, reopen=True)
+                                raise
                             except RateLimited as error:
+                                self._channel_failed(device_id, error, reopen=True)
                                 delay = max(delay, error.retry_after)
                                 _LOGGER.debug("Update channel reopen deferred: %s", error)
                                 break
                             except ApiError as error:
+                                self._channel_failed(device_id, error, reopen=True)
                                 _LOGGER.debug(
                                     "Could not reopen update channel for appliance %d: %s",
                                     index,
