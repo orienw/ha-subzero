@@ -28,7 +28,7 @@ Entities are created automatically from what each appliance reports, and new ent
 | [Wolf hoods](docs/reference.md#hoods) | Four-speed fan, task-light brightness and color temperature, halo light, automatic fan sensitivity, delayed shutoff, button tones, control lock, and filter usage |
 | [Cove dishwashers](docs/reference.md#dishwashers) | Cycle and mode selection, remote start and cancel, delayed start, wash options, cycle status and end time, door status, rinse aid, and softener salt |
 
-Every appliance also includes a **Wi-Fi signal** sensor, an **Active faults** diagnostic sensor (refreshed every 30 minutes while Home Assistant polling is enabled), and an **Appliance event** entity for alerts.
+Every appliance also includes an **Active faults** diagnostic sensor (refreshed every 30 minutes while Home Assistant polling is enabled) and an **Appliance event** entity for alerts, plus a **Wi-Fi signal** sensor when the appliance reports signal strength.
 
 Temperatures are shown and controlled in your preferred Home Assistant unit. Because appliances accept whole-degree Fahrenheit setpoints, Celsius values may be rounded.
 
@@ -99,16 +99,16 @@ Because cloud updates can occasionally be missed, call **Sub-Zero: Read applianc
 
 Select your appliance in Home Assistant's action editor to fill in `device_id`, and replace the door entity ID with your own.
 
-The action waits for a fresh status read and for the updated state to reach Home Assistant. If the read fails or the state changes during the read, the action errors and stops the automation unless you enable `continue_on_error`.
+The action waits for a fresh status read and for the updated state to reach Home Assistant. The action errors (stopping the automation unless you enable `continue_on_error`) if the read fails, the state changes, or the live connection drops or reconnects during the read.
 
 ## Troubleshooting
 
 ### Common issues
 
-- **An appliance is unavailable or its state looks stale:** During a brief cloud push interruption, readings stay available for up to two minutes while the integration reconnects, and turn unavailable if state cannot be reconfirmed in time. During longer push outages, automatic one-minute checks keep readings available while status reads succeed, though values can be up to a minute old and brief door movements between checks will not be seen. Run **Sub-Zero: Read appliance status** to request fresh state, verify the appliance is online in the Sub-Zero Group Owner's App, and consider enabling a **State check interval** in **Configure** if updates are frequently missed. You can also enable the disabled **State confirmed** diagnostic sensor to see when state was last confirmed.
+- **An appliance is unavailable or its state looks stale:** During a cloud push interruption, established readings stay available for up to two minutes and turn unavailable only if neither a live update nor a status read reconfirms state in time. While Home Assistant polling is enabled, automatic one-minute checks run during push outages and extend that window as long as status reads succeed, though values can be up to a minute old and brief changes between checks will not be seen. Run **Sub-Zero: Read appliance status** to request fresh state, verify the appliance is online in the Sub-Zero Group Owner's App, and consider enabling a **State check interval** in **Configure** if updates are frequently missed. You can also enable the disabled **State confirmed** diagnostic sensor to see when state was last confirmed.
 - **A control is unavailable or refuses changes:** Check the appliance interlocks in [Using the controls](#using-the-controls), such as **Remote Ready** on ovens and dishwashers, **Max ice** on freezers, and **Manual** crisper temperature mode.
 - **An appliance is missing:** Confirm the model is cloud-connected (see [What it supports](#what-it-supports)), and open **Configure** to make sure it is checked.
-- **Repair says "Firebase appliance alerts aren't working":** This appears after three consecutive failures. Live appliance state still updates normally, and the repair clears automatically once alerts succeed again. To stop trying, turn off **Firebase appliance alerts** in **Configure**.
+- **Repair says "Firebase appliance alerts aren't working":** This appears after three consecutive failures. Firebase alerts use a separate channel from regular appliance updates, and the repair clears automatically once alerts succeed again. To stop trying, turn off **Firebase appliance alerts** in **Configure**.
 - **Home Assistant asks you to sign in again:** Your renewable account tokens expired or were rejected. Follow Home Assistant's re-authentication prompt to sign in again.
 
 ### Reporting a bug

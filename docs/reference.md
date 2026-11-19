@@ -276,7 +276,7 @@ Changing **State check interval** or **Firebase appliance alerts** in **Configur
 
 Availability during cloud or connection issues behaves as follows:
 
-- **Brief live-connection interruptions:** Established readings stay available for up to two minutes while the integration reconnects. Repeated disconnects or partial updates do not extend that window.
+- **Brief live-connection interruptions:** Established readings stay available for up to two minutes while the integration reconnects, turning unavailable only if neither a live update nor a status read reconfirms state in time. Repeated disconnects or partial updates do not extend that window.
 - **How long reconnecting takes:** After a connection that had been up for at least two minutes drops, the integration tries again within five seconds. After a failed attempt or a short-lived connection, retries start about 30 seconds apart and lengthen up to 15 minutes. When Sub-Zero's live-update service has no free connections, it retries every two to four minutes.
 - **Longer live-connection outages:** While live updates stay down (and Home Assistant polling is enabled), automatic checks run every minute per appliance regardless of the configured check interval. Each successful read extends availability, so readings stay available as long as status reads succeed, though values can be up to a minute old and brief changes between checks are not seen.
 - **Per-appliance and auth errors:** Authentication failures and per-appliance channel errors affect availability immediately. A channel failure on one appliance leaves other appliances on the same account updating normally.
