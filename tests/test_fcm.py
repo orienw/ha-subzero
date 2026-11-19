@@ -14,7 +14,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from firebase_messaging import FcmPushClient, FcmRegisterConfig
 from firebase_messaging.fcmpushclient import ErrorType
 from firebase_messaging.proto.mcs_pb2 import DataMessageStanza
-from homeassistant.config_entries import ConfigEntryState
+from homeassistant.config_entries import ConfigEntryDisabler, ConfigEntryState
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
@@ -969,6 +969,15 @@ async def test_deselecting_every_appliance_clears_the_alerts_repair(hass, cloud_
     await hass.async_block_till_done()
     assert entry.state is ConfigEntryState.LOADED
     assert not entry.runtime_data.coordinators
+    assert firebase_issue(hass, entry) is None
+
+
+@fridge
+async def test_disabling_the_integration_clears_the_alerts_repair(hass, cloud_appliance):
+    entry = cloud_appliance.entry
+    async_report_firebase_alerts(hass, entry, "Home Assistant could not stay connected to Firebase")
+    await hass.config_entries.async_set_disabled_by(entry.entry_id, ConfigEntryDisabler.USER)
+    await hass.async_block_till_done()
     assert firebase_issue(hass, entry) is None
 
 

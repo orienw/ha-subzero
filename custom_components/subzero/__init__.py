@@ -141,6 +141,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: SubZeroConfigEntry) -> 
         async with account.options_lock:
             if account.alerts is not None:
                 await account.alerts.stop()
+        if entry.disabled_by is not None:
+            # Nothing retries while disabled, and the repair points to Configure.
+            async_report_firebase_alerts(hass, entry, None)
     return unloaded
 
 
