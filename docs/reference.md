@@ -14,7 +14,7 @@ Home Assistant displays temperatures and accepts setpoints in your preferred uni
 
 Appliance units are read at startup and on reload. If the appliance list is temporarily unavailable, the integration uses the last saved unit. An appliance with unknown units keeps its non-temperature entities.
 
-Configured setpoints and display temperatures are separate properties. On the primary tested refrigerator, temperature entities are configured setpoints; the integration does not turn a setpoint into an inferred measured temperature.
+Configured setpoints and display temperatures are separate properties. Refrigerator temperature entities show configured setpoints. Display temperatures get their own entities only when the appliance reports them; the integration does not turn a setpoint into an inferred measured temperature.
 
 ### Timestamps
 
@@ -50,7 +50,7 @@ Sub-Zero's guides explain [Night ice](https://www.subzero-wolf.com/assistance/an
 
 ## Dedicated ice makers
 
-Dedicated ice makers can report power, door-open delay, Sabbath mode, water-filter status, cleaning progress, delay schedules, and fault or winterization flags.
+Dedicated ice makers can report power, door-open delay, Sabbath mode, water-filter status, cleaning progress, delay schedules, and fault or winterization flags. An **Ice maker** selector turns production On or Off, and an **Ice maker status** sensor shows Disabled, Delayed, On, or Off.
 
 Use **Sub-Zero: Schedule ice delay** to pause production for 1–12 hours. The action accepts the number of minutes before starting, with zero meaning immediately, and an option to repeat daily. The schedule settings are sent together, followed by a status refresh.
 
@@ -65,7 +65,7 @@ Each reported cavity has separate entities. Double ovens use Upper oven and Lowe
 
 ### Controls and Remote Ready
 
-Temperature changes require the cavity to be running or in Remote Ready. Enable Remote Ready at the oven before each remote start; opening a door cancels it. Broil, Convection broil, Proof, Self clean, and Gourmet must be started at the appliance. These restrictions also apply to automations.
+Temperature and cooking-mode changes require the cavity to be running or in Remote Ready. Ovens with knobs also refuse a mode change while they report that mode changes are not allowed, which the **Cooking mode change enabled** sensor shows. Enable Remote Ready at the oven before each remote start; opening a door cancels it. Broil, Convection broil, Proof, Self clean, and Gourmet must be started at the appliance. These restrictions also apply to automations.
 
 The cooking-mode selector lists the modes offered for the reported oven and cavity. For example, Convection bake appears on older E series ovens, which lack Warm; some lower ovens omit Convection, Dehydrate, or Bake stone. Selecting Off turns the cavity off. Unknown mode codes cannot be selected.
 
@@ -73,7 +73,7 @@ Each cavity also has an interior-light switch.
 
 Each cavity's climate entity shows whether the oven is off, preheating, or heating at its setpoint, from the oven's power and Preheated states. It shows neither while the oven has not reported whether it is preheated.
 
-The Start oven button requires Remote Ready and a supported cooking mode and temperature. Older E series and M series ovens start with the mode and temperature set at the oven and receive the power command alone. On other ovens, including newer E series and M series ovens, choose the cooking mode and temperature in Home Assistant while the oven waits in Remote Ready. Choosing a mode fills in the app's default temperature for it. Both are kept until the start, which follows the app's command order of cooking mode, power, then setpoint, and are cleared when Home Assistant sees Remote Ready end or a connection error. To start in one step after choosing a mode, call `climate.set_temperature` with a temperature and `hvac_mode: heat`.
+The Start oven button requires Remote Ready and a supported cooking mode and temperature. Older E series and M series ovens start with the mode and temperature set at the oven and receive the power command alone. On other ovens, including newer E series and M series ovens, choose the cooking mode and temperature in Home Assistant while the oven waits in Remote Ready. Choosing a mode keeps a temperature that suits it, whether chosen earlier or already reported by the oven, and otherwise fills in the app's default temperature for that mode. Both are kept until the start, which follows the app's command order of cooking mode, power, then setpoint, and are cleared when Home Assistant sees Remote Ready end or a connection error. To start in one step after choosing a mode, call `climate.set_temperature` with a temperature and `hvac_mode: heat`.
 
 | Control | Range and restrictions |
 | --- | --- |
@@ -114,7 +114,7 @@ Modes are Normal, Child lock, and Sabbath. Reported status includes the door, Re
 
 To enable remote starting, hold ENTER for five seconds, then close the door within four seconds. Opening the door cancels Remote Ready.
 
-Delay start supports Off or 1–12 hours. Cancel wash cycle is available while running, drying, or waiting for a delayed start. When cancelling a delayed wash, confirmation also requires the active delay to end.
+Delay start supports Off or 1–12 hours. Cancel wash cycle is available while running, drying, or waiting for a delayed start. When canceling a delayed wash, confirmation also requires the active delay to end.
 
 Some dishwashers report Start pending whenever they are idle, which the app displays as Idle. Automations waiting for idle should accept both values. Unknown cycle and status codes show as unknown.
 
@@ -122,7 +122,7 @@ The integration sends supported option properties; the appliance determines whic
 
 ## Events and Firebase alerts
 
-The **Appliance event** entity reports appliance alerts such as door alerts, setpoint changes, ice maker clean cycles, preheating, probe targets, timers, oven self-clean, and dishwasher cycles. Its attributes include event type, numeric code, sequence, appliance timestamp, `source`, and `received_at`.
+The **Appliance event** entity reports appliance alerts such as door alerts, setpoint changes, ice maker clean cycles, preheating, probe targets, timers, oven self-clean, and dishwasher cycles. Its attributes include event type, numeric code, sequence, appliance timestamp, `source`, and `received_at`. `source` is `channel` for an alert in a live update, `history` for one found in the notification history of a snapshot or status read, and `firebase` for a Firebase alert.
 
 Automations match event-type IDs such as `refrigerator_door_ajar`; Home Assistant displays readable names. An unrecognized code uses the `unknown` type and retains its numeric code. The event entity keeps its last occurrence when disconnected.
 
@@ -139,6 +139,7 @@ Not every appliance sends every type. `oven_*` types refer to the only oven, the
 | | Wine temperature out of range | `wine_temperature_alert` |
 | | Filter expired | `water_filter_expired`, `air_filter_expired` |
 | | Ice maker clean cycle | `ice_cleaning_required`, `ice_cleaning_due_soon`, `ice_cleaning_add_descaler`, `ice_cleaning_add_sanitizer`, `ice_cleaning_cancelled`, `ice_cleaning_complete` |
+| | Service required | `refrigerator_service_required` |
 | Ovens | Preheat complete | `oven_preheated`, `lower_oven_preheated` |
 | | Probe in use | `oven_probe_connected`, `lower_oven_probe_connected` |
 | | Probe within 10°F of target | `oven_probe_within_ten_degrees`, `lower_oven_probe_within_ten_degrees` |
@@ -149,9 +150,15 @@ Not every appliance sends every type. `oven_*` types refer to the only oven, the
 | | Kitchen timer ended | `kitchen_timer_complete`, `kitchen_timer_2_complete` |
 | | Door open | `oven_door_ajar`, `lower_oven_door_ajar` |
 | | Self-clean complete | `oven_self_clean_complete`, `lower_oven_self_clean_complete` |
+| | Service required | `oven_service_required` |
 | Dishwashers | Wash cycle | `dishwasher_started`, `dishwasher_paused`, `dishwasher_cancelled`, `dishwasher_complete` |
 | | Supplies low | `softener_salt_low`, `rinse_aid_low` |
-| Any | Unrecognized code | `unknown` |
+| | Service required | `dishwasher_service_required` |
+| Any | Appliance fault | `fault_notification` |
+| | Feedback request | `feedback_notification` |
+| | Unrecognized code | `unknown` |
+
+Service required, appliance fault, and feedback request are not among the Firebase alert subscriptions, so they arrive only through the live connection or notification history.
 
 ### History and duplicate events
 
@@ -177,6 +184,8 @@ Home Assistant raises a repair when Firebase appliance alerts fail three times i
 
 Wi-Fi signal strength is enabled by default. **State confirmed**, uptime, IP address, MAC address, and live reporting mode are disabled diagnostic sensors; enable them in entity settings when needed. Disabling State confirmed does not disable checks or recovery.
 
+**Active faults** is a diagnostic sensor on every appliance. Its state is the number of active faults, and its `faults` attribute lists each one with its code, severity, description, and creation time. The list refreshes every 30 minutes while Home Assistant polling is enabled.
+
 Appliances truncate uptime to eight characters. At 100 hours it has ten-second precision; at 1,000 hours it has minute precision.
 
 Diagnostics downloads use cached state. They omit account credentials, appliance names, serial numbers, and network identifiers, and list unrecognized state-key names without their values.
@@ -193,10 +202,11 @@ Diagnostics downloads use cached state. They omit account credentials, appliance
 | Last appliance message | Channel traffic, including messages without entity state. |
 | Channel errors | Per appliance, the last 10 attempts to open its update channel that failed, with when, the error, and whether it was a 30-minute reopen. |
 | Verification statistics and missing keys | Check attempts, complete pushed snapshots, status reads, and the keys each source's latest observation lacked. |
+| Firebase alerts | When in use: whether the listener is connected and the subscriptions are healthy, how many alerts arrived and when the last one did, the last error, and the last subscription sync. |
 
 Connection health and message counts do not prove that every state change arrived or was applied.
 
-Debug logging for `custom_components.subzero` records channel-open attempts, notification types and key names, source timestamps and sequence values with their runtime types, parsed updates, status-response timing and values, and published coordinator state. Connection failures also record the WebSocket message type, close code/reason, and exception type when available. This distinguishes the returned status from the state published after concurrent updates. Logged state values are recognized scalar properties, excluding network identifiers.
+Debug logging for `custom_components.subzero` records channel-open attempts, notification types and key names, source timestamps and sequence values with their runtime types, parsed updates, status-response timing and values, and published coordinator state. Connection failures also record the WebSocket message type, close code/reason, and exception type when available. This distinguishes the returned status from the state published after concurrent updates. Logged state values are recognized scalar properties, excluding network identifiers and the serial number.
 
 ## State checks and recovery
 
@@ -206,7 +216,7 @@ While the notification connection is open, accepted appliance channels receive a
 
 Periodic state checks are disabled by default. When enabled, checks run at the selected interval per appliance, staggered across selected appliances. Incoming updates do not postpone them. Checks read status without reopening channels or restarting the shared connection. Known offline appliance channels wait for their existing channel retry before automatic checks resume. A channel error does not outlast the connection it happened on, so once the connection drops every appliance is checked. While push is down, checks run every minute per appliance whatever the selected interval, until push returns and a snapshot or status read reconfirms the state.
 
-Configure offers one-, two-, five-, and ten-minute intervals. **No periodic checks** keeps alert follow-up and reconnect recovery reads; silently missed updates can leave stale values until those values are reported again. Existing saved intervals are preserved. Home Assistant's system option to disable polling turns off scheduled checks, including those while push is down, and alert follow-up reads.
+Configure offers one-, two-, five-, and ten-minute intervals. **No periodic checks** keeps alert follow-up and reconnect recovery reads; silently missed updates can leave stale values until those values are reported again. Existing saved intervals are preserved. Home Assistant's system option to disable polling turns off scheduled checks, including those while push is down, alert follow-up reads, and Active faults refreshes.
 
 Changes to the check interval and Firebase alerts apply without reloading entities. Changing the appliance selection or its saved temperature units reloads the integration.
 
@@ -220,7 +230,7 @@ Background read failures preserve otherwise available state while push remains c
 
 **Sub-Zero: Read appliance status** waits for a read started after its request and for the resulting state to reach Home Assistant. It optionally returns `confirmed_at` and `missing_keys`, the state keys status reads have reported for the appliance model that the published state lacks. A failed read, a conflicting concurrent update, or a push reconnection during the read fails the action, stopping an automation unless `continue_on_error` is enabled. A reply that lacks a key does not.
 
-Concurrent callers share reads. Cancelling a caller does not interrupt a read needed by others. `homeassistant.update_entity` also waits for a read; use the Sub-Zero action when failed confirmation must stop an automation.
+Concurrent callers share reads. Canceling a caller does not interrupt a read needed by others. `homeassistant.update_entity` also waits for a read; use the Sub-Zero action when failed confirmation must stop an automation.
 
 **State confirmed** advances for a successful status read, or for a full push snapshot, that no concurrent update contradicts. Its `missing_keys` attribute lists the state keys that observation lacked: a status read is held to the keys status reads have reported for the appliance model, and a snapshot also to the keys snapshots have reported, since a snapshot merges into state from the last read. A key that only arrives in partial updates is held against neither, and notification history is not expected of a read. Diagnostics list each source's latest gaps under `missing_state_keys`. A missing key never keeps an observation from confirming state or restoring availability, and a status reply that lacks a key never refuses a control. It matters in two places: only a complete snapshot rescues a failed status request, since the rescue merges into cached state, and a control reads status first while the state lacks a key status reads have reported (see Control confirmation). Individual updates and cached data retained after failed reads do not advance the sensor. A conflicting partial still reaches Home Assistant, but prevents the read from certifying the merged state. A failed GET is rescued only by a concurrent snapshot that lacks no key snapshots or reads have reported, since the rescue merges into cached state and would otherwise confirm whatever a missing key last held; later conflicting updates still prevent confirmation. A reply that arrives after a snapshot has replaced state following a reconnect is superseded by that snapshot in the same way. Clock, uptime, and Wi-Fi signal readings change between any two observations, so they never count as conflicts, and neither does the appliance type, which an observation without a usable one keeps.
 
@@ -232,7 +242,7 @@ Control changes require appliance-state confirmation. Property writes use up to 
 
 Repeated writes of an already-reported value also require a cloud acknowledgement. Ordered operations stop if a required write fails. Ice modes and remote starts preserve the app's write order, including repeated values. A start for an already-running oven changes only its setpoint.
 
-Commands are serialized and check the state left by earlier commands before deciding what to send. Cancelling a command can leave its appliance effect unsettled, so the next command reads status first.
+Commands are serialized and check the state left by earlier commands before deciding what to send. Canceling a command can leave its appliance effect unsettled, so the next command reads status first.
 
 Controls require reconfirmed state after a push interruption. Cached availability during the reconnect window does not permit a write based on unverified interlocks. A full push snapshot or a status read must refresh state before controls proceed, and an unavailable push connection requires a fresh read before writing. A write's interlock checks skip keys the state does not carry, so whenever the state lacks a key status reads have reported for the model, whether a reduced reply or a reduced snapshot that replaced state left it that way, a control reads status first and then proceeds on the state that read returned. A reply that still lacks the key does not block the write: the appliance enforces its own interlocks, and refusing would refuse every control on the appliance for as long as its replies lack the key. If a snapshot that replaces state supersedes the control's reply and lacks a key the reply carried, the control waits for another read first, and fails with a try-again error when three reads in a row are superseded that way. A setting the state does not report is refused as unsupported. A reconnect attempt that fails before delivering anything does not invalidate a read in progress. Like a status read, the snapshot that ends a push interruption replaces cached state, so a value that only arrives in partial updates is unavailable until it is pushed again.
 
