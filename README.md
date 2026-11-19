@@ -1,75 +1,92 @@
 # Sub-Zero for Home Assistant
 
-<img src="custom_components/subzero/brand/icon.png" alt="Sub-Zero integration icon" width="80">
-
-Monitor and control connected Sub-Zero, Wolf, and Cove appliances from Home Assistant. The integration uses Sub-Zero's cloud service over your appliances' existing Wi-Fi connections.
+<img src="custom_components/subzero/brand/icon.png" alt="Sub-Zero integration icon" width="72">
 
 [![Latest stable release](https://img.shields.io/github/v/release/orienw/ha-subzero?sort=date&style=for-the-badge&label=stable&color=blue)](https://github.com/orienw/ha-subzero/releases/latest)
 
+Monitor and control Wi-Fi-connected **Sub-Zero**, **Wolf**, and **Cove** appliances in Home Assistant.
+
+This is an unofficial cloud integration and is not affiliated with Sub-Zero Group. It connects over the internet using your existing Sub-Zero Group Owner account and does not require Bluetooth. Local-only control is not supported.
+
+## What it supports
+
+Entities are created automatically from what each appliance reports, and new entities appear if additional properties are reported later. Installing, restarting, or reconnecting the integration never changes appliance settings on its own.
+
+<table>
+  <tr>
+    <td valign="top"><img src="docs/images/refrigerator-controls.png" alt="Sub-Zero refrigerator controls in Home Assistant" width="370"></td>
+    <td valign="top"><img src="docs/images/refrigerator-sensors.png" alt="Sub-Zero refrigerator sensors, doors, and filters in Home Assistant" width="370"></td>
+  </tr>
+</table>
+
+| Appliance | Controls and sensors |
+| --- | --- |
+| [Refrigerators and freezers](docs/reference.md#refrigerators-and-wine-storage) | Temperature setpoints and climate entities, door sensors, air and water filters, air filter reset, ice maker modes, Sabbath and vacation modes, crisper settings, humidity control, night mode, accent lighting, air purification, internal water dispenser, and door-open delay |
+| [Wine storage](docs/reference.md#refrigerators-and-wine-storage) | Per-zone temperature setpoints, climate entities, display temperatures, door sensors, temperature alerts, and operating modes |
+| [Dedicated ice makers](docs/reference.md#dedicated-ice-makers) | Ice maker on/off, status sensor, delay schedules, door status and door-open delay, water filter status, cleaning progress, Sabbath mode, failsafe, and winterization flags |
+| [Wolf ovens](docs/reference.md#ovens) | Separate controls per cavity, cooking modes, remote start, interior lights, meat probes, preheat status, cooking and kitchen timers, broil level, and Gourmet program status |
+| [Wolf hoods](docs/reference.md#hoods) | Four-speed fan, task-light brightness and color temperature, halo light, automatic fan sensitivity, delayed shutoff, button tones, control lock, and filter usage |
+| [Cove dishwashers](docs/reference.md#dishwashers) | Cycle and mode selection, remote start and cancel, delayed start, wash options, cycle status and end time, door status, rinse aid, and softener salt |
+
+Every appliance also includes a **Wi-Fi signal** sensor, an **Active faults** diagnostic sensor (refreshed every 30 minutes while Home Assistant polling is enabled), and an **Appliance event** entity for alerts.
+
+Temperatures are shown and controlled in your preferred Home Assistant unit. Because appliances accept whole-degree Fahrenheit setpoints, Celsius values may be rounded.
+
+**Appliances that will not appear:** Models that [cannot connect to Sub-Zero's cloud](https://www.subzero-wolf.com/assistance/answers/multi-brand/sub-zero-group-owners-app-cannot-find-appliance) (including Wolf convection steam ovens, speed ovens, microwaves, and cooktops) cannot be added to Home Assistant.
+
 ## Installation
 
-You need Home Assistant **2026.8.0 or newer** and an appliance already connected to your Sub-Zero Group Owner account. The Owner's App is available in [Canada, Mexico, and the United States](https://www.subzero-wolf.com/assistance/answers/multi-brand/sub-zero-group-owner-s-app-location-availability).
+### Requirements
+
+- Home Assistant **2026.8.0 or newer**
+- A **Sub-Zero Group Owner account** (available in [Canada, Mexico, and the United States](https://www.subzero-wolf.com/assistance/answers/multi-brand/sub-zero-group-owner-s-app-location-availability)) with your appliances already connected to Wi-Fi
+
+### Setup steps
 
 [![Open this repository in the Marketplace or HACS](https://my.home-assistant.io/badges/marketplace_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=orienw&repository=ha-subzero&category=integration)
 
 1. On Home Assistant 2026.11 or newer, open **Settings → Marketplace**. On earlier versions, open **HACS**. Search for **Sub-Zero** and download it.
 2. Go to **Settings → Devices & services → Add integration → Sub-Zero**.
-3. Sign in with your Sub-Zero account email and password, then select your appliances.
+3. Sign in with your Sub-Zero account email and password, then select the appliances you want to add.
 
-If your account uses multi-factor authentication, setup supports text-message codes and phone calls. It may also ask you to enter characters from an image. External-provider sign-in and other verification methods are not supported.
+**Sign-in and security:** Your password is used only to sign in and is never saved. Home Assistant stores renewable account tokens, so protect any backups that contain them. If multi-factor authentication is enabled on your account, setup supports text-message codes, phone calls, and image character prompts; external sign-in providers and other verification methods are not supported.
 
-Use **Configure** on the integration to change your appliance selection, state check interval, or Firebase alerts. Deselecting an appliance removes its Home Assistant device and entities.
+**Manual installation:** Copy `custom_components/subzero` into your Home Assistant `custom_components` folder, restart Home Assistant, and continue from step 2.
 
-For manual installation, copy `custom_components/subzero` into your Home Assistant configuration's `custom_components` directory, restart, and continue from step 2.
+## Configuration
 
-## Features
+Open **Configure** on the Sub-Zero integration at any time to adjust your setup:
 
-Controls and sensors depend on what each appliance reports. Additional entities can appear as new properties arrive.
+<img src="docs/images/configure.png" alt="Sub-Zero Configure dialog with appliance selection, Firebase alerts, and state check interval" width="480">
 
-<table>
-  <tr>
-    <td valign="top"><img src="docs/images/refrigerator-controls.png" alt="Refrigerator controls in Home Assistant" width="370"></td>
-    <td valign="top"><img src="docs/images/refrigerator-sensors.png" alt="Refrigerator door states, temperatures, and filter readings in Home Assistant" width="370"></td>
-  </tr>
-</table>
+- **Appliances:** Add newly connected appliances or remove existing ones. Deselecting an appliance removes its Home Assistant device and entities.
+- **State check interval:** Updates normally arrive live via cloud push, so periodic checks default to **No periodic checks**. You can choose a 1-, 2-, 5-, or 10-minute interval as a safety net to catch missed updates. If live updates are interrupted, the integration automatically checks each appliance every minute until live updates recover, regardless of this setting.
+- **Firebase appliance alerts:** Optional and off by default. Turn this on to receive appliance alerts over a separate Firebase notification channel into the same **Appliance event** entity. It delivers alerts only; sensor values still come from appliance status updates.
 
-| Appliance | Controls and monitoring |
-| --- | --- |
-| [Refrigerators and freezers](docs/reference.md#refrigerators-and-wine-storage) | Temperature setpoints and climate entities, doors, filters, ice modes, Sabbath and vacation modes, crisper settings, humidity, lighting, and water dispenser |
-| [Wine storage](docs/reference.md#refrigerators-and-wine-storage) | Setpoints, climate entities, display temperatures, and doors for each zone, plus shared operating modes |
-| [Dedicated ice makers](docs/reference.md#dedicated-ice-makers) | Ice production, delay schedules, door status, filters, and cleaning status |
-| [Wolf ovens](docs/reference.md#ovens) | Separate controls for each cavity, cooking modes, remote start, lights, probes, preheat status, cooking and kitchen timers, and Gourmet program status |
-| [Wolf hoods](docs/reference.md#hoods) | Four fan speeds, task-light brightness and color temperature, halo lighting, automatic fan sensitivity, delayed shutoff, and control lock |
-| [Cove dishwashers](docs/reference.md#dishwashers) | Cycle selection, remote start and cancel, delayed start, wash options, cycle progress, door status, rinse aid, and softener salt |
+If you turn off Home Assistant's built-in **Enable polling for updates** system option for this integration, scheduled state checks (including checks during a push interruption), alert follow-up reads, and 30-minute **Active faults** refreshes are all paused.
 
-Some appliances [can't connect to Sub-Zero's cloud](https://www.subzero-wolf.com/assistance/answers/multi-brand/sub-zero-group-owners-app-cannot-find-appliance), including Wolf convection steam ovens, speed ovens, microwaves, and cooktops. The Owner's App can list them for guides and recipes, but they don't appear in Home Assistant.
+## Using the controls
 
-Temperatures use your preferred Home Assistant unit. Celsius setpoints may be rounded to the appliance's whole-degree Fahrenheit precision. Shared features include Wi-Fi signal strength and **Active faults**. The fault list refreshes every 30 minutes while Home Assistant polling is enabled.
+Several appliances enforce safety interlocks or require a specific mode before Home Assistant can change a setting:
 
-### Using the controls
+- **Refrigerators and freezers:** Temperature sensors show configured setpoints; display temperatures appear only if the appliance reports them. Turn off **Max ice** before changing the freezer setpoint. Switch **Crisper temperature mode** to **Manual** before adjusting the crisper setpoint.
+- **Dedicated ice makers:** Use the **Sub-Zero: Schedule ice delay** action to pause ice production for 1 to 12 hours, starting immediately or within the next 24 hours, with an option to repeat daily. Press **End current ice delay** to resume production while keeping a repeating schedule, or **Cancel ice delay schedule** to remove the schedule.
+- **Wolf ovens:** Turn on **Remote Ready** at the oven before each remote start; opening the door cancels it. Choose the cooking mode and temperature in Home Assistant (including on newer E series and M series ovens) and press **Start oven**. On older E series and M series ovens, set the mode and temperature at the oven first, then press **Start oven**. Broil, Convection broil, Proof, Self clean, and Gourmet must be started at the oven. See [Wolf's Remote Ready guide](https://www.subzero-wolf.com/assistance/answers/wolf/m-series-oven/sub-zero-group-owners-app---set-up-remote-access).
+- **Cove dishwashers:** Choose the wash cycle and options, hold **ENTER** for five seconds, and close the door within four seconds when prompted to enable **Remote Ready**; opening the door cancels it. Selecting a cycle does not start the wash; press **Start wash cycle** to begin. Cycle and mode can only be changed while the dishwasher is idle or waiting to start. See [Cove's Remote Ready guide](https://www.subzero-wolf.com/assistance/answers/cove/dishwasher/cove-dishwasher-remote-ready-feature).
 
-- **Refrigerators:** temperature setpoints are configured targets; measured temperatures appear only when the appliance reports them. Turn off Max ice before changing the freezer setpoint. Choose Manual crisper mode to adjust the crisper setpoint.
-- **Dedicated ice makers:** use **Schedule ice delay** to pause production for 1–12 hours, optionally repeating daily. **End current ice delay** resumes production; **Cancel ice delay schedule** removes the schedule.
-- **Ovens:** enable Remote Ready at the oven before each remote start. Opening the door cancels it. Then choose the cooking mode and temperature in Home Assistant, including on newer E series and M series ovens, and press **Start oven**. On older E series and M series ovens, set them at the oven instead, then press **Start oven**. Broil, Convection broil, Proof, Self clean, and Gourmet must be started at the appliance. See [Wolf's Remote Ready guide](https://www.subzero-wolf.com/assistance/answers/wolf/m-series-oven/sub-zero-group-owners-app---set-up-remote-access).
-- **Dishwashers:** choose the cycle and options, hold ENTER for five seconds, then close the door within four seconds when prompted to enable Remote Ready. Opening the door cancels it. Use **Start wash cycle** to start the wash; selecting a cycle does not start it. See [Cove's Remote Ready guide](https://www.subzero-wolf.com/assistance/answers/cove/dishwasher/cove-dishwasher-remote-ready-feature).
+See the [reference guide](docs/reference.md) for temperature ranges, timers, probes, hood controls, and model-specific details.
 
-Appliance settings change only when you use a control or automation. See the [reference](docs/reference.md) for control ranges and model-specific behavior.
+## Automations and alerts
 
-## Status updates
+### Reacting to appliance alerts
 
-State updates normally arrive through push. The integration reopens appliance update channels every 30 minutes without restarting the shared cloud connection.
+Use the **Appliance event** entity to automate on appliance alerts such as doors left open, setpoint changes, wine temperature alerts, expired filters, ice maker clean cycles, oven preheat, probe milestones, finished timers, self-clean completion, and dishwasher cycle or supply warnings. For ordinary door open/close state changes, use the door binary sensor instead.
 
-Periodic appliance status checks are off by default. In **Configure**, keep **No periodic checks** or choose a one-, two-, five-, or ten-minute interval to help recover silently missed updates. Incoming push updates do not postpone these checks. While push is down, the integration checks each appliance every minute whatever this setting, and returns to it once push is back and has reconfirmed the state.
+In automations, match the event entity's `event_type` attribute (for example `refrigerator_door_ajar`, `oven_preheated`, or `dishwasher_complete`). Events also include `code`, `sequence`, `appliance_timestamp`, `source`, and `received_at` attributes. See the reference for [all event types](docs/reference.md#event-types) and [event history and duplicate handling](docs/reference.md#events-and-firebase-alerts).
 
-Appliance alerts can trigger follow-up status reads while the reported condition remains active, and reconnection can trigger a recovery read. These reads run independently of the state check interval. Home Assistant's option to disable polling turns off scheduled state checks, including those while push is down, alert follow-ups, and fault list refreshes; channel maintenance and reconnect recovery continue.
+### Confirming state before sending reminders
 
-<img src="docs/images/configure.png" alt="Sub-Zero configuration with appliance selection, Firebase alerts, and a ten-minute state-check interval" width="500">
-
-Cloud outages or missed messages can leave sensors stale. During a brief push interruption, existing readings remain available for up to two minutes while reconnection runs. Readings become unavailable if state is not reconfirmed within that time. While push stays down, each status check that confirms the state keeps readings available for another two minutes, and the one-minute checks during an outage keep them available as long as status reads work. Readings can then be up to a minute old, and a door opened and closed between two checks is not seen. If Sub-Zero's live-update service has no free connections, the integration tries to reconnect every two to four minutes. Status reads can recover the current state, but cannot recreate every brief door movement. Enable the optional **State confirmed** diagnostic sensor to see when a full snapshot or status read last confirmed the appliance state, and which state keys that observation lacked.
-
-### Check state before sending a reminder
-
-Use **Sub-Zero: Read appliance status** before an automation checks whether a door is still open:
+Because cloud updates can occasionally be missed, call **Sub-Zero: Read appliance status** (`subzero.read_status`) before checking whether a door is still open:
 
 ```yaml
 - action: subzero.read_status
@@ -80,39 +97,37 @@ Use **Sub-Zero: Read appliance status** before an automation checks whether a do
   state: "on"
 ```
 
-Select the appliance in Home Assistant's action editor to fill in `device_id`, and replace the example door entity with your own.
+Select your appliance in Home Assistant's action editor to fill in `device_id`, and replace the door entity ID with your own.
 
-The action waits for a new status read and for its result to reach Home Assistant. If it cannot confirm state, it fails and stops the automation unless you enable `continue_on_error`.
-
-## Appliance alerts
-
-The **Appliance event** entity reports door-left-open alerts, setpoint changes, wine temperature alerts, filter reminders, ice maker clean cycles, oven preheat, probe, timer, and self-clean alerts, and dishwasher cycles and supply warnings. For ordinary door open/close changes, use the door binary sensor.
-
-Match the event entity's `event_type` attribute, such as `refrigerator_door_ajar` or `oven_self_clean_complete`, in automations. The reference [lists every event type](docs/reference.md#event-types). Other attributes include `code`, `sequence`, `appliance_timestamp`, `source`, and `received_at`.
-
-**Firebase appliance alerts** is optional and off by default. Enable it in **Configure** to receive alerts through the mobile app's separate Firebase channel. It feeds the same event entity; sensor values still come from appliance status. Details on [event history and duplicate handling](docs/reference.md#events-and-firebase-alerts) are in the reference.
+The action waits for a fresh status read and for the updated state to reach Home Assistant. If the read fails or the state changes during the read, the action errors and stops the automation unless you enable `continue_on_error`.
 
 ## Troubleshooting
 
-If an appliance is unavailable or its state looks wrong:
+### Common issues
+
+- **An appliance is unavailable or its state looks stale:** During a brief cloud push interruption, readings stay available for up to two minutes while the integration reconnects, and turn unavailable if state cannot be reconfirmed in time. During longer push outages, automatic one-minute checks keep readings available while status reads succeed, though values can be up to a minute old and brief door movements between checks will not be seen. Run **Sub-Zero: Read appliance status** to request fresh state, verify the appliance is online in the Sub-Zero Group Owner's App, and consider enabling a **State check interval** in **Configure** if updates are frequently missed. You can also enable the disabled **State confirmed** diagnostic sensor to see when state was last confirmed.
+- **A control is unavailable or refuses changes:** Check the appliance interlocks in [Using the controls](#using-the-controls), such as **Remote Ready** on ovens and dishwashers, **Max ice** on freezers, and **Manual** crisper temperature mode.
+- **An appliance is missing:** Confirm the model is cloud-connected (see [What it supports](#what-it-supports)), and open **Configure** to make sure it is checked.
+- **Repair says "Firebase appliance alerts aren't working":** This appears after three consecutive failures. Live appliance state still updates normally, and the repair clears automatically once alerts succeed again. To stop trying, turn off **Firebase appliance alerts** in **Configure**.
+- **Home Assistant asks you to sign in again:** Your renewable account tokens expired or were rejected. Follow Home Assistant's re-authentication prompt to sign in again.
+
+### Reporting a bug
+
+If an appliance stays unavailable or behaves unexpectedly, capture diagnostics in this order before resetting anything:
 
 1. Enable debug logging for `custom_components.subzero`, reproduce the problem, and note the time.
-2. Download diagnostics before requesting a status read, opening the Sub-Zero app, or reloading the integration.
-3. Run **Read appliance status** to request its current state, check that the appliance is online in the Sub-Zero Owner's App, and save the debug logs.
+2. Download diagnostics from the integration or device page **before** requesting a status read, opening the Sub-Zero app, or reloading the integration.
+3. Run **Sub-Zero: Read appliance status**, check whether the appliance is online in the Sub-Zero Group Owner's App, and save the debug logs.
 
-You can download diagnostics from the integration or device page. Diagnostics omit account credentials, appliance names, serial numbers, and network identifiers. Debug logs include incoming updates and status-read results; review them for private information before sharing. See [diagnostics](docs/reference.md#diagnostics) for the available counters and sensors.
+Diagnostics omit account credentials, appliance names, serial numbers, and network identifiers. Debug logs include appliance updates and status-read results, so review them for private information before sharing. See [diagnostics](docs/reference.md#diagnostics) for what each diagnostic field records.
 
-[Open an issue](https://github.com/orienw/ha-subzero/issues) with your Home Assistant version, integration version, appliance model, steps to reproduce, and relevant logs. Include whether **Read appliance status** corrected the state and whether the same operation works in the Sub-Zero app.
+[Open an issue](https://github.com/orienw/ha-subzero/issues) with your Home Assistant version, integration version, appliance model, steps to reproduce, diagnostics, and relevant logs. Mention whether **Read appliance status** corrected the state and whether the same action works in the Sub-Zero app.
 
-## Account and connection
+## Further reading and development
 
-Your password is used to sign in and is not saved. Home Assistant stores renewable account tokens; protect backups containing them. If token renewal fails, the integration asks you to sign in again.
+The [technical reference](docs/reference.md) documents detailed appliance behavior, all event types, diagnostics, state recovery, and command confirmation. Because this integration relies on Sub-Zero's cloud service, cloud changes can affect functionality.
 
-This is an unofficial integration and is not affiliated with Sub-Zero Group. It requires internet access and uses the mobile app's cloud endpoints, which may change. Local appliance access is not supported. Bluetooth is not required.
-
-## Development
-
-Use Python 3.14:
+To run the test suite and linter locally (Python 3.14):
 
 ```sh
 python -m venv .venv
@@ -121,5 +136,3 @@ python -m venv .venv
 .venv/bin/ruff check .
 .venv/bin/ruff format --check .
 ```
-
-The [technical reference](docs/reference.md) covers state recovery, timestamps, event delivery, and command confirmation.
