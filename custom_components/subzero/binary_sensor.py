@@ -159,7 +159,7 @@ DESCRIPTIONS = (
         icon="mdi:thermometer-check",
     ),
     BinarySensorEntityDescription(
-        key="cav2_gourmet_mode_on", name="Lower oven gourmet mode", icon="mdi:chef-hat"
+        key="cav2_gourmet_mode_on", name="Lower oven Gourmet mode", icon="mdi:chef-hat"
     ),
     BinarySensorEntityDescription(
         key="cav2_cook_timer_within_1min",

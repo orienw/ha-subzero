@@ -565,7 +565,7 @@ def validate_control_properties(
                     raise ServiceValidationError("The ice maker mode is unknown.")
                 if data["max_ice_on"]:
                     raise ServiceValidationError(
-                        "Turn off Max Ice before changing the freezer setpoint."
+                        "Turn off Max ice before changing the freezer setpoint."
                     )
             if key == "crisp_set_temp":
                 if type(data.get("crisp_temp_mode")) is not int or data["crisp_temp_mode"] != 0:

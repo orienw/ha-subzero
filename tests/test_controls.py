@@ -625,7 +625,7 @@ async def test_queued_write_revalidates_after_the_previous_one(hass, controls):
     assert controls.client.set_property.await_count == 1
     release.set()
     await first
-    with pytest.raises(ServiceValidationError, match="Max Ice"):
+    with pytest.raises(ServiceValidationError, match="Max ice"):
         await second
     assert controls.client.set_property.await_args_list == [
         call("test-fridge", "night_ice_on", False),
@@ -641,7 +641,7 @@ async def test_control_reads_current_state_after_stream_loss(hass, controls):
     await hass.async_block_till_done()
     assert hass.states.get("number.kitchen_freezer_setpoint").state == "0"
 
-    with pytest.raises(ServiceValidationError, match="Max Ice"):
+    with pytest.raises(ServiceValidationError, match="Max ice"):
         await coordinator.async_set_properties({"frz_set_temp": 1})
 
     assert controls.client.state.await_count == reads + 1
@@ -659,7 +659,7 @@ async def test_every_command_reads_again_while_the_stream_is_down(hass, controls
     assert controls.client.state.await_count == reads + 1
 
     controls.states["test-fridge"]["max_ice_on"] = True
-    with pytest.raises(ServiceValidationError, match="Max Ice"):
+    with pytest.raises(ServiceValidationError, match="Max ice"):
         await coordinator.async_set_properties({"frz_set_temp": 1})
 
     assert controls.client.state.await_count == reads + 2
@@ -725,7 +725,7 @@ async def test_control_reads_first_while_the_state_lacks_a_key_reads_have_report
     release.set()
     if reply == "complete":
         # The read restored the interlock, and the write is checked against it.
-        with pytest.raises(ServiceValidationError, match="Max Ice"):
+        with pytest.raises(ServiceValidationError, match="Max ice"):
             await command
         controls.client.set_property.assert_not_awaited()
         assert coordinator.data["max_ice_on"] is True
@@ -772,7 +772,7 @@ async def test_control_waits_for_a_read_that_stands_when_a_reduced_snapshot_supe
     )
     assert "max_ice_on" not in coordinator.data
     release.set()
-    with pytest.raises(ServiceValidationError, match="Max Ice"):
+    with pytest.raises(ServiceValidationError, match="Max ice"):
         await command
     controls.client.set_property.assert_not_awaited()
     assert coordinator.data["max_ice_on"] is True
@@ -820,7 +820,7 @@ async def test_control_does_not_write_while_every_read_is_superseded_by_a_reduce
     # Whether the control runs out of reads, sees the connection change under one, or
     # finally gets a read that stands and shows Max Ice on, no write goes out against
     # state without the key.
-    with pytest.raises(ServiceValidationError, match="try again|Max Ice"):
+    with pytest.raises(ServiceValidationError, match="try again|Max ice"):
         await coordinator.async_set_properties({"frz_set_temp": 1})
     flapping = False
     controls.client.set_property.assert_not_awaited()
@@ -842,7 +842,7 @@ async def test_disconnect_between_ordered_writes_rechecks_the_next_setting(hass,
         await hass.async_block_till_done()
 
     controls.client.set_property.side_effect = write
-    with pytest.raises(ServiceValidationError, match="Max Ice"):
+    with pytest.raises(ServiceValidationError, match="Max ice"):
         await coordinator.async_set_properties({"night_ice_on": False, "frz_set_temp": 1})
 
     assert controls.client.state.await_count == reads + 1
@@ -872,7 +872,7 @@ async def test_read_started_before_disconnect_does_not_bypass_the_next_control_r
         release.set()
         await pending
 
-    with pytest.raises(ServiceValidationError, match="Max Ice"):
+    with pytest.raises(ServiceValidationError, match="Max ice"):
         await coordinator.async_set_properties({"frz_set_temp": 1})
 
     assert controls.client.state.await_count == reads + 2
