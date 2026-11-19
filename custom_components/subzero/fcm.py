@@ -37,7 +37,8 @@ _LOGGER = logging.getLogger(__name__)
 RETRY_INTERVAL = 300
 REFRESH_INTERVAL = 60
 HEALTH_CHECK_INTERVAL = 60
-# Failures in a row before a repair: setup errors, refused syncs, or a closing listener.
+# Failures in a row before a repair: setup errors, incomplete syncs, or a listener that
+# closes or never connects.
 FAILURES_BEFORE_REPAIR = 3
 
 
