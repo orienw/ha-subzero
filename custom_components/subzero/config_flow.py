@@ -483,6 +483,7 @@ class SubZeroOptionsFlow(config_entries.OptionsFlow):
                     if device_id not in configured
                 }
                 if not saved:
+                    errors["base"] = f"{errors['base']}_no_saved"
                     return self.async_show_form(
                         step_id="init", data_schema=vol.Schema({}), errors=errors
                     )

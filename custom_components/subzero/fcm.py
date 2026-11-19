@@ -307,7 +307,9 @@ class FcmAlerts:
                     self.last_error = type(error).__name__
                     self.subscription_healthy = False
                     _LOGGER.warning("Firebase alert setup failed: %s", type(error).__name__)
-                    problem = f"Firebase alert setup failed with {type(error).__name__}"
+                    problem = (
+                        f"Home Assistant could not set up Firebase alerts ({type(error).__name__})"
+                    )
                     delay = RETRY_INTERVAL
                 if problem is not None:
                     self._failed(problem)

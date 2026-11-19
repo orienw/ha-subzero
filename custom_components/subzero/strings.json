@@ -8,12 +8,12 @@
       },
       "mfa_challenge": {
         "title": "Multi-factor authentication",
-        "description": "Sub-Zero requires verification for {masked_phone}. Choose how to receive your verification code.{captcha_image}",
+        "description": "Sub-Zero requires verification for {masked_phone}. Choose how to verify your sign-in.{captcha_image}",
         "data": {"captcha": "CAPTCHA characters", "method": "Verification method"}
       },
       "mfa_code": {
         "title": "Enter verification code",
-        "description": "Enter the 6-digit verification code sent to {masked_phone}, or leave it blank to request a new code.",
+        "description": "Enter the 6-digit verification code sent to {masked_phone}, or leave the field blank and submit to go back and choose a verification method.",
         "data": {"code": "Verification code"}
       },
       "mfa_call": {
@@ -29,14 +29,14 @@
       "wait_for_call": "Answer the call to {masked_phone} and press # to verify."
     },
     "error": {
-      "invalid_auth": "Sub-Zero did not accept the sign-in details, or the session expired. Start setup again if needed.",
+      "invalid_auth": "Sub-Zero did not accept the sign-in details, or the sign-in session expired. Try signing in again.",
       "invalid_captcha": "The characters did not match the CAPTCHA challenge. Please try again with the new image.",
-      "invalid_mfa_code": "The verification code was not accepted. Check the code and try again, or leave it blank to request a new code.",
-      "mfa_code_expired": "The verification code expired or was rejected too many times. Request a new code to try again.",
-      "mfa_call_failed": "The verification phone call was not completed in time. Please try again.",
-      "cannot_connect": "Could not connect to Sub-Zero or read the appliance. Try again later.",
+      "invalid_mfa_code": "The verification code was not accepted. Check the code and try again, or leave the field blank and submit to go back and choose a verification method.",
+      "mfa_code_expired": "The verification code expired or was rejected too many times. Choose a verification method to try again.",
+      "mfa_call_failed": "The verification phone call did not complete. Choose a verification method to try again.",
+      "cannot_connect": "Could not connect to Sub-Zero. Try again later.",
       "rate_limited": "Sub-Zero asked us to slow down. Wait before trying again.",
-      "verification_required": "This account requires an additional verification step that this release does not yet support.",
+      "verification_required": "This account requires an additional verification step that this integration does not support.",
       "invalid_device": "Select appliances from this account.",
       "select_device": "Select at least one appliance."
     },
@@ -51,13 +51,13 @@
   "issues": {
     "firebase_alerts_failing": {
       "title": "Firebase appliance alerts aren't working",
-      "description": "Firebase appliance alerts failed three times in a row. Latest problem: {problem}. Appliance state still updates through the live connection, and the integration keeps trying. To stop, turn off Firebase alerts in **Configure**."
+      "description": "Firebase appliance alerts have failed repeatedly. Latest problem: {problem}. This channel is separate from regular appliance updates, and the integration keeps retrying. To stop, turn off **Firebase appliance alerts** in **Configure**."
     }
   },
   "services": {
     "read_status": {
       "name": "Read appliance status",
-      "description": "Read and confirm current appliance state before continuing. Fails if the state cannot be read or changes during the read.",
+      "description": "Read and confirm current appliance state before continuing. Fails if the appliance cannot be read, or if its state changes or the live connection drops or reconnects during the read.",
       "fields": {
         "device_id": {"name": "Appliance", "description": "The appliance to read."}
       }
@@ -77,13 +77,15 @@
     "step": {
       "init": {
         "title": "Appliances and updates",
-        "description": "The list is refreshed from your Sub-Zero account. Deselecting an appliance removes its Home Assistant device and entities. Periodic state checks help recover missed updates. Optional Firebase alerts use a separate notification channel; sensor values still require appliance status.",
+        "description": "The list is refreshed from your Sub-Zero account. Deselecting an appliance removes its Home Assistant device and entities. Periodic state checks help recover missed updates. Optional Firebase appliance alerts use a separate notification channel; sensor values still come from appliance status updates.",
         "data": {"device_ids": "Appliances", "status_poll_interval": "State check interval", "firebase_alerts": "Firebase appliance alerts"}
       }
     },
     "error": {
-      "cannot_connect": "Could not refresh the appliance list. You can configure any saved appliances listed below, or try again later.",
-      "rate_limited": "Sub-Zero asked us to slow down. You can configure any saved appliances listed below. Wait before refreshing the list.",
+      "cannot_connect": "Could not refresh the appliance list. You can still configure the saved appliances below, or reopen Configure later to try again.",
+      "cannot_connect_no_saved": "Could not refresh the appliance list, and there are no saved appliances to configure. Submit to try again, or try again later.",
+      "rate_limited": "Sub-Zero asked us to slow down. You can still configure the saved appliances below, or wait and reopen Configure to refresh the list.",
+      "rate_limited_no_saved": "Sub-Zero asked us to slow down, and there are no saved appliances to configure. Wait before submitting to try again.",
       "invalid_device": "Select appliances from this account."
     },
     "abort": {
@@ -145,8 +147,8 @@
               "oven_service_required": "Oven service required",
               "oven_door_ajar": "Oven door open",
               "lower_oven_door_ajar": "Lower oven door open",
-              "oven_self_clean_complete": "Oven clean complete",
-              "lower_oven_self_clean_complete": "Lower oven clean complete",
+              "oven_self_clean_complete": "Oven self-clean complete",
+              "lower_oven_self_clean_complete": "Lower oven self-clean complete",
               "dishwasher_started": "Wash cycle started",
               "dishwasher_complete": "Wash cycle complete",
               "softener_salt_low": "Water softener salt low",

@@ -800,7 +800,9 @@ async def test_options_list_failure_is_retryable(hass, tokens, error):
     ):
         result = await hass.config_entries.options.async_init(entry.entry_id)
         assert result["type"] is FlowResultType.FORM
-        assert result["errors"]
+        # With nothing saved to show, the error says so.
+        kind = "rate_limited" if isinstance(error, RateLimited) else "cannot_connect"
+        assert result["errors"] == {"base": f"{kind}_no_saved"}
         assert not result["data_schema"].schema
         result = await hass.config_entries.options.async_configure(result["flow_id"], {})
     assert not result["errors"]
