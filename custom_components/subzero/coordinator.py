@@ -236,11 +236,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         if not self.data:
             # Before the first state nothing can go stale, and setup reads the state.
             return
-        healthy = (
-            self.last_update_success
-            and bool(self.data.get("appliance_model"))
-            and self._channel_error is None
-        )
+        healthy = self.last_update_success and bool(self.data.get("appliance_model"))
         if first and healthy:
             self._async_start_transport_grace()
         if healthy and self._transport_grace_task is not None:
