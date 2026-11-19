@@ -8,22 +8,26 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, call, patch
 
 import pytest
+from aiohttp import web
 from homeassistant.components.sensor import DATA_COMPONENT as SENSOR_COMPONENT
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import EVENT_STATE_CHANGED, STATE_UNAVAILABLE
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_system import US_CUSTOMARY_SYSTEM
 
 from custom_components.subzero.api import (
+    SEPARATOR,
     ApiError,
     Appliance,
     ChannelOpened,
     ConnectionLimitReached,
     RateLimited,
     StateUpdate,
+    SubZeroClient,
     parse_notification,
     token_state,
 )
@@ -1442,6 +1446,79 @@ async def test_status_checks_cover_an_appliance_whose_channel_failed_once_the_co
     await hass.async_block_till_done()
     assert client.state.await_count == 1
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
+
+
+async def test_a_channel_refused_on_a_connection_that_closes_leaves_the_appliance_available(
+    hass, aiohttp_server, monkeypatch, socket_enabled, tokens
+):
+    # The real client runs against a local server here; other tests replace its stream.
+    sockets = []
+    opens = asyncio.Queue()
+
+    async def websocket(request):
+        socket = web.WebSocketResponse()
+        await socket.prepare(request)
+        sockets.append(socket)
+        await socket.receive_str()
+        await socket.send_str("{}" + SEPARATOR)
+        async for _ in socket:
+            pass
+        return socket
+
+    async def open_channel(device_id):
+        opens.put_nowait(len(sockets))
+        if len(sockets) == 2:
+            raise RateLimited(60)
+        if len(sockets) == 3:
+            await asyncio.Event().wait()
+
+    app = web.Application()
+    app.router.add_get("/client/", websocket)
+    origin = str((await aiohttp_server(app)).make_url("/")).rstrip("/")
+    monkeypatch.setattr("custom_components.subzero.api.SIGNALR_ORIGIN", origin)
+    monkeypatch.setattr("custom_components.subzero.coordinator.RECONNECT_DELAY", 0.01)
+    monkeypatch.setattr("custom_components.subzero.coordinator.random.uniform", lambda *_: 0)
+    hass.config.units = US_CUSTOMARY_SYSTEM
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Kitchen",
+        unique_id="test-fridge",
+        data={"device_id": "test-fridge", "temperature_unit": "F", "tokens": token_state(tokens)},
+        options={"status_poll_interval": 0},
+    )
+    entry.add_to_hass(hass)
+    client = SubZeroClient(async_get_clientsession(hass), "test-key", tokens)
+    client._request = AsyncMock(
+        return_value={"url": origin + "/client/", "accessToken": "test-signalr"}
+    )
+    client._json = AsyncMock(return_value={"connectionToken": "test-connection"})
+    client.appliances = AsyncMock(return_value=[Appliance("test-fridge", "Kitchen", "F")])
+    client.appliance_faults = AsyncMock(return_value=[])
+    client.fault_metadata = AsyncMock(return_value=None)
+    client.open_channel = open_channel
+    client.state = AsyncMock(
+        return_value={
+            "appliance_model": "ANOTHER-MODEL",
+            "ref_set_temp": 38,
+            "ref_door_ajar": False,
+            "version": {"fw": "1.0"},
+        }
+    )
+    with patch("custom_components.subzero.SubZeroClient", return_value=client):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+    try:
+        async with asyncio.timeout(5):
+            assert await opens.get() == 1
+            await sockets[0].close()
+            # The next connection refuses the channel, then closes before that is reported.
+            assert await opens.get() == 2
+            await sockets[1].close()
+            assert await opens.get() == 3
+        assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
+    finally:
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
 
 
 async def test_status_checks_stay_stopped_after_a_rejected_sign_in(
