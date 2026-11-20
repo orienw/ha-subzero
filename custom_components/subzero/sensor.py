@@ -38,6 +38,7 @@ from .controls import (
     broil_level,
     is_finite_number,
     is_ice_maker,
+    is_int,
     uptime_seconds,
 )
 from .coordinator import SubZeroCoordinator, SubZeroFaultsCoordinator
@@ -337,6 +338,21 @@ async def async_setup_entry(
     )
 
 
+def _cavity_sensor_value(data: dict, key: str, value: int | float) -> int | float | None:
+    prefix = key.split("_", 1)[0]
+    if value == 0:
+        return None
+    # Ranges keep reporting their last temperature after turning off.
+    if key == f"{prefix}_temp" and data.get(f"{prefix}_unit_on") is False:
+        return None
+    if "_probe_" in key and data.get(f"{prefix}_probe_on") is not True:
+        return None
+    # The app shows a probe temperature of 1 as no reading.
+    if key == f"{prefix}_probe_temp" and value == 1:
+        return None
+    return value
+
+
 class SubZeroSensor(SubZeroEntity, SensorEntity):
     @property
     def available(self) -> bool:
@@ -373,7 +389,7 @@ class SubZeroSensor(SubZeroEntity, SensorEntity):
             # The app shows the Gourmet program only while Gourmet mode is on.
             return GOURMET_RECIPES[0]
         if key in ENUM_VALUES:
-            return ENUM_VALUES[key].get(value) if type(value) is int else None
+            return ENUM_VALUES[key].get(value) if is_int(value) else None
         if key in NETWORK_KEYS:
             return value if isinstance(value, str) else None
         if key == "uptime" and isinstance(value, str):
@@ -381,17 +397,7 @@ class SubZeroSensor(SubZeroEntity, SensorEntity):
         if not is_finite_number(value):
             return None
         if key.startswith(("cav_", "cav2_")):
-            prefix = key.split("_", 1)[0]
-            if value == 0:
-                return None
-            # Ranges keep reporting their last temperature after turning off.
-            if key == f"{prefix}_temp" and self.coordinator.data.get(f"{prefix}_unit_on") is False:
-                return None
-            if "_probe_" in key and self.coordinator.data.get(f"{prefix}_probe_on") is not True:
-                return None
-            # The app shows a probe temperature of 1 as no reading.
-            if key == f"{prefix}_probe_temp" and value == 1:
-                return None
+            return _cavity_sensor_value(self.coordinator.data, key, value)
         return value
 
 

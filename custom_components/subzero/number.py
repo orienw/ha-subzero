@@ -1,4 +1,4 @@
-"""Refrigeration and probe setpoints, and oven kitchen timers."""
+"""Refrigeration and probe setpoints, hood shutoff delay, and oven kitchen timers."""
 
 from datetime import UTC, datetime, timedelta
 
@@ -18,24 +18,28 @@ from . import SubZeroConfigEntry
 from .const import KITCHEN_TIMERS
 from .controls import (
     appliance_datetime,
+    crisper_manual_enabled,
+    freezer_setpoint_enabled,
     is_finite_number,
+    is_int,
+    probe_setpoint_enabled,
     supports_control,
     temperature_range,
     timer_minutes,
 )
 from .entity import SubZeroEntity, async_setup_entities
 
-DESCRIPTIONS = (
-    NumberEntityDescription(
-        key="delay_off_duration",
-        name="Delayed shutoff duration",
-        icon="mdi:timer-outline",
-        mode=NumberMode.BOX,
-        native_min_value=0,
-        native_max_value=719,
-        native_step=1,
-        native_unit_of_measurement=UnitOfTime.MINUTES,
-    ),
+DELAY_OFF_DESCRIPTION = NumberEntityDescription(
+    key="delay_off_duration",
+    name="Delayed shutoff duration",
+    icon="mdi:timer-outline",
+    mode=NumberMode.BOX,
+    native_min_value=0,
+    native_max_value=719,
+    native_step=1,
+    native_unit_of_measurement=UnitOfTime.MINUTES,
+)
+TEMPERATURE_DESCRIPTIONS = (
     *(
         NumberEntityDescription(
             key=key,
@@ -66,22 +70,22 @@ DESCRIPTIONS = (
             ("cav2_probe_set_temp", "Lower oven probe target temperature"),
         )
     ),
-    *(
-        NumberEntityDescription(
-            key=key,
-            name=name,
-            icon="mdi:timer-outline",
-            mode=NumberMode.BOX,
-            native_min_value=0,
-            native_max_value=719,
-            native_step=1,
-            native_unit_of_measurement=UnitOfTime.MINUTES,
-        )
-        for key, name in (
-            ("kitchen_timer_duration", "Kitchen timer duration"),
-            ("kitchen_timer2_duration", "Kitchen timer 2 duration"),
-        )
-    ),
+)
+TIMER_DESCRIPTIONS = tuple(
+    NumberEntityDescription(
+        key=key,
+        name=name,
+        icon="mdi:timer-outline",
+        mode=NumberMode.BOX,
+        native_min_value=0,
+        native_max_value=719,
+        native_step=1,
+        native_unit_of_measurement=UnitOfTime.MINUTES,
+    )
+    for key, name in (
+        ("kitchen_timer_duration", "Kitchen timer duration"),
+        ("kitchen_timer2_duration", "Kitchen timer 2 duration"),
+    )
 )
 
 
@@ -91,19 +95,99 @@ async def async_setup_entry(
     async_setup_entities(
         entry,
         async_add_entities,
-        DESCRIPTIONS,
-        SubZeroNumber,
+        (DELAY_OFF_DESCRIPTION,),
+        SubZeroDelayOffNumber,
+        lambda coordinator, description: supports_control(coordinator.data, description.key),
+    )
+    async_setup_entities(
+        entry,
+        async_add_entities,
+        TEMPERATURE_DESCRIPTIONS,
+        SubZeroTemperatureNumber,
         lambda coordinator, description: (
-            (
-                description.device_class != NumberDeviceClass.TEMPERATURE
-                or coordinator.device.get("temperature_unit") in ("F", "C")
-            )
+            coordinator.device.get("temperature_unit") in ("F", "C")
             and supports_control(coordinator.data, description.key)
         ),
     )
+    async_setup_entities(
+        entry,
+        async_add_entities,
+        TIMER_DESCRIPTIONS,
+        SubZeroKitchenTimerNumber,
+        lambda coordinator, description: supports_control(coordinator.data, description.key),
+    )
 
 
-class SubZeroNumber(SubZeroEntity, NumberEntity):
+class SubZeroDelayOffNumber(SubZeroEntity, NumberEntity):
+    @property
+    def native_value(self) -> float | None:
+        value = self.coordinator.data.get(self.entity_description.key)
+        return value / 60000 if is_int(value) else None
+
+    @property
+    def available(self) -> bool:
+        data = self.coordinator.data
+        key = self.entity_description.key
+        return (
+            self.coordinator.last_update_success
+            and supports_control(data, key)
+            and is_int(data[key])
+            and 0 <= data[key] <= 719 * 60000
+        )
+
+    async def async_set_native_value(self, value: float) -> None:
+        if not is_finite_number(value):
+            raise ServiceValidationError("Enter a valid number.")
+        await self.coordinator.async_set_properties(
+            {self.entity_description.key: round(value) * 60000}
+        )
+
+
+class SubZeroTemperatureNumber(SubZeroEntity, NumberEntity):
+    @property
+    def native_value(self) -> int | float | None:
+        key = self.entity_description.key
+        value = self.coordinator.data.get(key)
+        if key.endswith("_probe_set_temp") and value == 0:
+            return None
+        return value if is_finite_number(value) else None
+
+    @property
+    def native_min_value(self) -> float:
+        return (temperature_range(self.entity_description.key, self.coordinator.data) or (34, 42))[
+            0
+        ]
+
+    @property
+    def native_max_value(self) -> float:
+        return (temperature_range(self.entity_description.key, self.coordinator.data) or (34, 42))[
+            1
+        ]
+
+    @property
+    def available(self) -> bool:
+        data = self.coordinator.data
+        key = self.entity_description.key
+        if (
+            not self.coordinator.last_update_success
+            or not supports_control(data, key)
+            or not is_finite_number(data.get(key))
+            or temperature_range(key, data) is None
+        ):
+            return False
+        if key == "crisp_set_temp":
+            return crisper_manual_enabled(data)
+        if key.endswith("_probe_set_temp"):
+            return probe_setpoint_enabled(data, key.split("_", 1)[0])
+        return key != "frz_set_temp" or freezer_setpoint_enabled(data)
+
+    async def async_set_native_value(self, value: float) -> None:
+        if not is_finite_number(value):
+            raise ServiceValidationError("Enter a valid number.")
+        await self.coordinator.async_set_properties({self.entity_description.key: round(value)})
+
+
+class SubZeroKitchenTimerNumber(SubZeroEntity, NumberEntity):
     _cancel_countdown: CALLBACK_TYPE | None = None
 
     async def async_added_to_hass(self) -> None:
@@ -127,14 +211,11 @@ class SubZeroNumber(SubZeroEntity, NumberEntity):
         """Update a running kitchen timer's minutes left as each one passes."""
         self._stop_countdown()
         key = self.entity_description.key
-        if key not in KITCHEN_TIMERS:
-            return
+        prefix = KITCHEN_TIMERS[key]
         data = self.coordinator.data
-        end = appliance_datetime(
-            data.get(f"{KITCHEN_TIMERS[key]}_end_time"), self.coordinator.clock_zone
-        )
+        end = appliance_datetime(data.get(f"{prefix}_end_time"), self.coordinator.clock_zone)
         minutes = timer_minutes(data, key, self.coordinator.clock_zone)
-        if data.get(f"{KITCHEN_TIMERS[key]}_active") is not True or end is None or not minutes:
+        if data.get(f"{prefix}_active") is not True or end is None or not minutes:
             return
         # In UTC, since a time read in a zone with daylight saving steps by wall clock.
         self._cancel_countdown = async_track_point_in_utc_time(
@@ -149,60 +230,21 @@ class SubZeroNumber(SubZeroEntity, NumberEntity):
 
     @property
     def native_value(self) -> int | float | None:
-        if self.entity_description.key in KITCHEN_TIMERS:
-            return timer_minutes(
-                self.coordinator.data, self.entity_description.key, self.coordinator.clock_zone
-            )
-        value = self.coordinator.data.get(self.entity_description.key)
-        if self.entity_description.key == "delay_off_duration":
-            return value / 60000 if type(value) is int else None
-        if self.entity_description.key.endswith("_probe_set_temp") and value == 0:
-            return None
-        return value if is_finite_number(value) else None
-
-    @property
-    def native_min_value(self) -> float:
-        if self.entity_description.device_class != NumberDeviceClass.TEMPERATURE:
-            return self.entity_description.native_min_value
-        return (temperature_range(self.entity_description.key, self.coordinator.data) or (34, 42))[
-            0
-        ]
-
-    @property
-    def native_max_value(self) -> float:
-        if self.entity_description.device_class != NumberDeviceClass.TEMPERATURE:
-            return self.entity_description.native_max_value
-        return (temperature_range(self.entity_description.key, self.coordinator.data) or (34, 42))[
-            1
-        ]
+        return timer_minutes(
+            self.coordinator.data, self.entity_description.key, self.coordinator.clock_zone
+        )
 
     @property
     def available(self) -> bool:
         data = self.coordinator.data
         key = self.entity_description.key
-        if not self.coordinator.last_update_success or not supports_control(data, key):
-            return False
-        if key in KITCHEN_TIMERS:
-            return type(data.get(f"{KITCHEN_TIMERS[key]}_active")) is bool
-        if key == "delay_off_duration":
-            return type(data[key]) is int and 0 <= data[key] <= 719 * 60000
-        if not is_finite_number(data.get(key)):
-            return False
-        if temperature_range(key, data) is None:
-            return False
-        if key == "crisp_set_temp":
-            return type(data.get("crisp_temp_mode")) is int and data["crisp_temp_mode"] == 0
-        if key.endswith("_probe_set_temp"):
-            prefix = key.split("_", 1)[0]
-            return data.get(f"{prefix}_probe_on") is True and (
-                data.get(f"{prefix}_unit_on") is True or data.get(f"{prefix}_remote_ready") is True
-            )
-        return key != "frz_set_temp" or "max_ice_on" not in data or data["max_ice_on"] is False
+        return (
+            self.coordinator.last_update_success
+            and supports_control(data, key)
+            and type(data.get(f"{KITCHEN_TIMERS[key]}_active")) is bool
+        )
 
     async def async_set_native_value(self, value: float) -> None:
         if not is_finite_number(value):
             raise ServiceValidationError("Enter a valid number.")
-        key = self.entity_description.key
-        await self.coordinator.async_set_properties(
-            {key: round(value) * 60000 if key == "delay_off_duration" else round(value)}
-        )
+        await self.coordinator.async_set_properties({self.entity_description.key: round(value)})
