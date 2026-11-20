@@ -829,7 +829,8 @@ class SubZeroClient:
         data = _object(data.get("resp", data))
         if _rejected(data):
             raise ApiError("The appliance rejected the status request.")
-        if not isinstance(data.get("appliance_model"), str):
+        model = data.get("appliance_model")
+        if not isinstance(model, str) or not model:
             raise ApiError("The appliance did not return a status snapshot.")
         return data
 

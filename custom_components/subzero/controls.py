@@ -284,6 +284,14 @@ def ice_mode(data: dict) -> str | None:
     return "On" if data["ice_maker_on"] else "Off"
 
 
+def operating_mode_keys(data: dict) -> tuple[str, ...]:
+    # The app offers the modes an appliance reports when it has a
+    # refrigerator, freezer, or wine setpoint.
+    if all(data.get(k) is None for k in ("ref_set_temp", "frz_set_temp", "wine_set_temp")):
+        return ()
+    return tuple(k for k in FRIDGE_MODE_KEYS if data.get(k) is not None)
+
+
 def ice_mode_properties(data: dict, mode: str) -> dict[str, bool]:
     keys = {key for key in ICE_KEYS if supports_control(data, key)}
     options = {"Off", "On", *(name for name, key in ICE_MODES.items() if key in keys)}

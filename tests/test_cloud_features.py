@@ -697,7 +697,7 @@ async def test_settings_for_a_start_cannot_be_chosen_while_updates_are_interrupt
         coordinator.async_transport_error(ApiError("Stream disconnected"))
     else:
         # The oven's own channel failed, and a status read restored availability.
-        coordinator._channel_error = ApiError("Channel error")
+        coordinator._push.channel_failed(ApiError("Channel error"))
     with pytest.raises(ServiceValidationError, match="reconnecting"):
         await select_cooking_mode(hass, "Convection")
     assert coordinator.start_settings == {}

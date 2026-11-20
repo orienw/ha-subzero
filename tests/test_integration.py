@@ -263,7 +263,9 @@ async def test_verification_handles_a_stream_failure_during_its_status_read(hass
     task = entry.runtime_data._verifications["test-fridge"]
     await task
     assert task.exception() is None
-    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
+    # The reply spans the end of the stream, so it is not published. The read that
+    # follows the reconnect restores the appliance.
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "unavailable"
 
 
 async def test_staggered_state_checks_keep_other_appliances_reporting(hass, oven_loaded):
@@ -493,15 +495,12 @@ async def test_setup_recovers_a_reconnected_appliance_while_another_initial_read
         freezer.tick(31)
         async_fire_time_changed(hass, dt_util.utcnow())
         await asyncio.wait_for(reconnected.wait(), 1)
-        # The reconnect snapshot lacked the door, so a read filled it in at once.
-        assert [call.args[0] for call in client.state.await_args_list] == [
-            "test-oven",
-            "test-fridge",
-        ]
     finally:
         release.set()
         assert await setup
     await hass.async_block_till_done()
+    # The reconnect snapshot lacked the door, so the read that confirms recovery
+    # once setup has finished filled it in.
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
     assert [call.args[0] for call in client.state.await_args_list].count("test-fridge") == 1
 
@@ -1191,7 +1190,7 @@ async def test_reconnects_and_partial_pushes_do_not_extend_the_grace(
     assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "38"
 
 
-async def test_incomplete_snapshot_ends_a_reconnect_wait_and_a_read_fills_what_it_lacked(
+async def test_incomplete_snapshot_keeps_a_reconnected_appliance_available_until_a_read_confirms(
     hass, freezer, loaded, monkeypatch
 ):
     entry, client, updates, _, _ = loaded
@@ -1216,17 +1215,19 @@ async def test_incomplete_snapshot_ends_a_reconnect_wait_and_a_read_fills_what_i
         StateUpdate({"appliance_model": "ANOTHER-MODEL", "ref_set_temp": 40}, full=True)
     )
     await hass.async_block_till_done()
-    # The snapshot confirms state and ends the wait with what it carries.
+    # The snapshot keeps the appliance available with what it carries, but a status
+    # read still has to confirm state.
     assert coordinator.confirmed_at > confirmed
-    assert coordinator.transport_healthy
+    assert not coordinator.transport_healthy
     assert coordinator.last_update_success
     assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "40"
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "unavailable"
-    # A follow-up read fills in any keys the snapshot lacked.
+    # The read confirms recovery and fills in any keys the snapshot lacked.
     await asyncio.wait_for(reading.wait(), 1)
     release.set()
     await coordinator._read_task
     await hass.async_block_till_done()
+    assert coordinator.transport_healthy
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
     assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "38"
 
@@ -1709,10 +1710,16 @@ async def test_shared_recovery_read_survives_stream_changes_and_stops_on_unload(
         error = ApiError("Disconnected again")
         await updates.put(error if finish == "disconnect" else ("test-fridge", error))
     await hass.async_block_till_done()
-    await asyncio.gather(recovery, return_exceptions=True)
-    assert recovery.cancelled()
+    if finish == "snapshot":
+        # A snapshot does not end recovery: the read still has to confirm state.
+        assert not recovery.done()
+    else:
+        await asyncio.gather(recovery, return_exceptions=True)
+        assert recovery.cancelled()
     assert not cancelled.is_set()
     release.set()
+    if finish == "snapshot":
+        await recovery
     await hass.async_block_till_done()
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == (
         "on" if finish == "snapshot" else "unavailable" if finish == "disconnect" else "off"

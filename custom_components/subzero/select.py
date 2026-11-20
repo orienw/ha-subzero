@@ -14,7 +14,6 @@ from .const import (
     DISHWASHER_MODES,
     DOOR_AJAR_TIMEOUTS,
     FRIDGE_ENUM_OPTIONS,
-    FRIDGE_MODE_KEYS,
     HOOD_SENSITIVITY,
     ICE_KEYS,
     ICE_MODES,
@@ -29,6 +28,7 @@ from .controls import (
     is_fridge,
     is_ice_maker,
     is_int,
+    operating_mode_keys,
     supports_control,
     wash_settings_enabled,
 )
@@ -106,21 +106,13 @@ def _ice_maker_keys(data: dict) -> tuple[str, ...]:
     return ()
 
 
-def _operating_mode_keys(data: dict) -> tuple[str, ...]:
-    # The app offers the modes an appliance reports when it has a
-    # refrigerator, freezer, or wine setpoint.
-    if all(data.get(k) is None for k in ("ref_set_temp", "frz_set_temp", "wine_set_temp")):
-        return ()
-    return tuple(k for k in FRIDGE_MODE_KEYS if data.get(k) is not None)
-
-
 async def async_setup_entry(
     hass: HomeAssistant, entry: SubZeroConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
     def control_supported(coordinator, description) -> bool:
         return supports_control(coordinator.data, description.key)
 
-    # Keep entity registration order aligned with the original DESCRIPTIONS order.
+    # Entities write state in this order within one update, and automations can observe it.
     for descriptions, entity_class, supported in (
         (AUTO_SENSITIVITY_DESCRIPTIONS, SubZeroEnumSelect, control_supported),
         (
@@ -131,7 +123,7 @@ async def async_setup_entry(
         (
             OPERATING_MODE_DESCRIPTIONS,
             SubZeroOperatingModeSelect,
-            lambda coordinator, _: bool(_operating_mode_keys(coordinator.data)),
+            lambda coordinator, _: bool(operating_mode_keys(coordinator.data)),
         ),
         (FRIDGE_ENUM_DESCRIPTIONS, SubZeroFridgeEnumSelect, control_supported),
         (DOOR_DELAY_DESCRIPTIONS, SubZeroEnumSelect, control_supported),
@@ -176,13 +168,13 @@ class SubZeroIceMakerSelect(_SubZeroSelect):
 class SubZeroOperatingModeSelect(_SubZeroSelect):
     @property
     def options(self) -> list[str]:
-        keys = _operating_mode_keys(self.coordinator.data)
+        keys = operating_mode_keys(self.coordinator.data)
         return ["Normal", *(name for name, key in MODES.items() if key in keys)]
 
     @property
     def available(self) -> bool:
         data = self.coordinator.data
-        keys = _operating_mode_keys(data)
+        keys = operating_mode_keys(data)
         return (
             self.coordinator.last_update_success
             and bool(keys)
@@ -199,13 +191,7 @@ class SubZeroOperatingModeSelect(_SubZeroSelect):
 
     async def async_select_option(self, option: str) -> None:
         self._validate_option(option)
-        selected = MODES.get(option)
-        properties = {
-            key: False for key in _operating_mode_keys(self.coordinator.data) if key != selected
-        }
-        if selected is not None:
-            properties[selected] = True
-        await self.coordinator.async_set_properties(properties)
+        await self.coordinator.async_set_operating_mode(MODES.get(option))
 
 
 class SubZeroEnumSelect(_SubZeroSelect):

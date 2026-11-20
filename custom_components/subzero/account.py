@@ -154,7 +154,7 @@ class SubZeroAccount:
         finally:
             self._initial_states.clear()
         for coordinator in self.coordinators.values():
-            if coordinator.needs_recovery and self.client.push_connected:
+            if coordinator.needs_recovery and coordinator.receiving_live_updates:
                 coordinator.start_recovery()
         if metadata_error is not None:
             _LOGGER.warning(

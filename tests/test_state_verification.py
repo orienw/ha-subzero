@@ -7,7 +7,11 @@ from unittest.mock import Mock
 
 import pytest
 from homeassistant.config_entries import RELOAD_AFTER_UPDATE_DELAY
-from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+from homeassistant.exceptions import (
+    ConfigEntryNotReady,
+    HomeAssistantError,
+    ServiceValidationError,
+)
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.setup import async_setup_component
@@ -80,11 +84,6 @@ def first_read_blocks(client, *, then=None):
 
     client.state.side_effect = read
     return reading, release
-
-
-async def read_conflicts(coordinator):
-    with pytest.raises(HomeAssistantError, match="state changed during"):
-        await coordinator.async_read_status()
 
 
 async def read_confirms(coordinator):
@@ -186,6 +185,18 @@ async def test_old_full_push_does_not_publish_confirm_or_clear_an_error(hass, fr
     published.assert_not_called()
 
 
+async def test_old_full_push_still_shows_the_channel_is_open(dated):
+    coordinator, client, _, older = dated
+    coordinator.on_channel_error(ApiError("Channel refused"))
+    reads = client.state.await_count
+    # The snapshot is ignored as state, but it arrived on the appliance's channel.
+    assert coordinator.apply_update(snapshot(older), recover=True) is False
+    await asyncio.sleep(0)
+    assert client.state.await_count == reads + 1
+    assert coordinator.transport_healthy
+    assert coordinator.data["ref_door_ajar"] is True
+
+
 async def test_queued_old_full_push_does_not_cancel_account_recovery(hass, loaded, dated):
     _, _, updates, _, _ = loaded
     coordinator, client, fresh, older = dated
@@ -211,20 +222,6 @@ async def test_queued_old_full_push_does_not_cancel_account_recovery(hass, loade
     assert hass.states.get(DOOR).state == "on"
 
 
-async def test_initial_read_discards_old_full_push_but_keeps_later_partial(
-    hass, loaded, dated_snapshots
-):
-    entry, client, _, _, _ = loaded
-    fresh, older = dated_snapshots
-    coordinator = SubZeroCoordinator(hass, entry, client, "test-fridge", {"name": "Kitchen"})
-    read_during(coordinator, client, snapshot(older), partial(ref_set_temp=39), reply=fresh)
-    await read_conflicts(coordinator)
-    assert coordinator.data["ref_door_ajar"] is True
-    assert coordinator.data["time"] == fresh["time"]
-    assert coordinator.data["uptime"] == fresh["uptime"]
-    assert coordinator.data["ref_set_temp"] == 39
-
-
 async def test_failed_read_cannot_be_rescued_by_an_old_full_push(freezer, dated):
     coordinator, client, _, older = dated
     confirmed = coordinator.confirmed_at
@@ -235,17 +232,6 @@ async def test_failed_read_cannot_be_rescued_by_an_old_full_push(freezer, dated)
     assert coordinator.confirmed_at == confirmed
     assert coordinator.data["ref_door_ajar"] is True
     assert not coordinator.last_update_success
-
-
-async def test_old_incomplete_snapshot_during_read_is_ignored(freezer, fridge, dated_snapshots):
-    coordinator, client = fridge
-    fresh, older = dated_snapshots
-    del older["ref_set_temp"]
-    read_during(coordinator, client, snapshot(older), reply=fresh)
-    await read_confirms(coordinator)
-    assert coordinator.data["ref_door_ajar"] is True
-    assert coordinator.data["time"] == fresh["time"]
-    assert coordinator.data["uptime"] == fresh["uptime"]
 
 
 async def test_old_full_push_does_not_satisfy_verification(dated):
@@ -342,7 +328,7 @@ async def test_debug_logs_distinguish_observed_and_published_state_without_priva
             "version": {"secret": "redact-nested"},
         },
     )
-    await read_conflicts(coordinator)
+    await coordinator.async_read_status()
     replies = [record.message for record in caplog.records if "status response" in record.message]
     publications = [
         record.message for record in caplog.records if "state published" in record.message
@@ -356,7 +342,7 @@ async def test_debug_logs_distinguish_observed_and_published_state_without_priva
 
 
 @pytest.mark.parametrize("opened", [False, True])
-async def test_conflicting_partial_push_is_immediate_but_read_cannot_confirm_it(
+async def test_partial_push_during_a_read_is_immediate_and_stands_over_the_reply(
     hass, freezer, fridge, opened
 ):
     coordinator, client = fridge
@@ -371,15 +357,11 @@ async def test_conflicting_partial_push_is_immediate_but_read_cannot_confirm_it(
     assert hass.states.get(DOOR).state == ("on" if opened else "off")
     assert coordinator.confirmed_at == confirmed
     release.set()
-    with pytest.raises(HomeAssistantError, match="state changed during"):
-        await request
-    assert coordinator.confirmed_at == confirmed
-    assert coordinator.last_update_success
-
-    client.state.side_effect = None
-    client.state.return_value["ref_door_ajar"] = opened
-    await read_confirms(coordinator)
+    # Nothing orders the reply against the update, so the update stands.
+    await request
+    assert hass.states.get(DOOR).state == ("on" if opened else "off")
     assert coordinator.confirmed_at > confirmed
+    assert coordinator.last_update_success
 
 
 @pytest.mark.parametrize("background", [False, True], ids=["read_status", "verify_state"])
@@ -388,7 +370,7 @@ async def test_conflicting_partial_push_is_immediate_but_read_cannot_confirm_it(
     [partial(ref_door_ajar=True), partial(frz_door_ajar=True)],
     ids=["disagrees-with-the-reply", "key-the-reply-lacks"],
 )
-async def test_a_conflicting_partial_push_is_published_but_leaves_the_read_unconfirmed(
+async def test_a_partial_push_during_a_read_stands_and_the_read_still_confirms(
     fridge, freezer, pushed, background
 ):
     coordinator, client = fridge
@@ -397,23 +379,132 @@ async def test_a_conflicting_partial_push_is_published_but_leaves_the_read_uncon
     read_during(coordinator, client, pushed)
     if background:
         await coordinator.async_verify_state()
-        assert coordinator.verification_stats["last_success"] is None
+        assert coordinator.verification_stats["last_success"] is not None
     else:
-        await read_conflicts(coordinator)
-    assert coordinator.confirmed_at == confirmed
+        await coordinator.async_read_status()
+    assert coordinator.confirmed_at > confirmed
     assert coordinator.last_update_success
     for key, value in pushed.properties.items():
         assert coordinator.data[key] is value
 
 
-async def test_conflicted_read_after_push_returns_ends_the_reconnect_wait(freezer, fridge):
+async def test_recovery_read_does_not_bring_back_what_a_replacing_snapshot_dropped(fridge):
+    coordinator, client = fridge
+    coordinator.async_transport_error(ApiError("Stream disconnected"))
+    coordinator.on_channel_opened(recover=False)
+    reply = {k: v for k, v in client.state.return_value.items() if k != "ref_door_ajar"}
+    # The snapshot replaces state without the door, so the earlier update goes with
+    # the rest, and a reply that also lacks the door leaves it unknown.
+    read_during(coordinator, client, partial(ref_door_ajar=True), snapshot(INCOMPLETE), reply=reply)
+    await coordinator.async_read_status()
+    assert coordinator.transport_healthy
+    assert "ref_door_ajar" not in coordinator.data
+
+
+@pytest.mark.parametrize("opens", ["during-the-read", "as-the-read-finishes"])
+async def test_recovery_reads_again_when_the_channel_opens_around_its_read(fridge, opens):
+    coordinator, client = fridge
+    coordinator.async_transport_error(ApiError("Stream disconnected"))
+    reading, release = first_read_blocks(client)
+    coordinator.start_recovery()
+    recovery = coordinator._recovery_task
+    await asyncio.wait_for(reading.wait(), 1)
+    if opens == "during-the-read":
+        coordinator.on_channel_opened()
+    else:
+        coordinator._read_task.add_done_callback(lambda _: coordinator.on_channel_opened())
+    release.set()
+    await asyncio.wait_for(recovery, 1)
+    assert coordinator.transport_healthy
+    assert client.state.await_count == 2
+
+
+async def test_entities_are_told_when_the_channel_opens_again(fridge):
+    coordinator, _ = fridge
+    coordinator.async_transport_error(ApiError("Stream disconnected"))
+    assert not coordinator.receiving_live_updates
+    notified = []
+    coordinator.async_add_listener(lambda: notified.append(coordinator.receiving_live_updates))
+    coordinator.on_channel_opened(recover=False)
+    coordinator.on_channel_opened(recover=False)
+    assert notified == [True]
+
+
+async def test_recovery_runs_after_a_sign_in_failure_that_has_cleared(fridge):
+    from custom_components.subzero.auth import InvalidAuth
+
+    coordinator, client = fridge
+    client.state.side_effect = InvalidAuth("Sign-in expired")
+    await coordinator.async_refresh()
+    assert not coordinator.last_update_success
+    client.state.side_effect = None
+    await coordinator.async_read_status()
+    assert coordinator.transport_healthy
+    reads = client.state.await_count
+    coordinator.async_transport_error(ApiError("Stream disconnected"))
+    coordinator.on_channel_opened()
+    await coordinator._recovery_task
+    assert client.state.await_count == reads + 1
+    assert coordinator.transport_healthy
+
+
+async def test_read_without_a_usable_model_does_not_establish_live_updates(fridge):
+    coordinator, client = fridge
+    coordinator.async_transport_error(ApiError("Stream disconnected"))
+    coordinator.on_channel_opened(recover=False)
+    read_during(coordinator, client, partial(appliance_model=""))
+    with pytest.raises(HomeAssistantError, match="usable state"):
+        await coordinator.async_read_status()
+    assert not coordinator.transport_healthy
+
+
+async def test_snapshot_after_a_failed_initial_read_still_needs_a_confirming_read(hass, loaded):
+    entry, client, _, _, _ = loaded
+    coordinator = SubZeroCoordinator(hass, entry, client, "test-fridge", {"name": "Kitchen"})
+    client.state.side_effect = RateLimited(600)
+    with pytest.raises(ConfigEntryNotReady):
+        await coordinator.async_config_entry_first_refresh()
+    assert not coordinator.last_update_success
+    coordinator.apply_update(snapshot(INCOMPLETE))
+    assert coordinator.last_update_success
+    assert not coordinator.transport_healthy
+
+
+async def test_replacing_snapshot_keeps_the_type_pushed_before_it_over_the_reply(fridge):
+    coordinator, client = fridge
+    coordinator.async_transport_error(ApiError("Stream disconnected"))
+    coordinator.on_channel_opened(recover=False)
+    reply = {**client.state.return_value, "appliance_type": "1.2.6.1", "accent_light_level": 1}
+    # The snapshot omits the type, so the one pushed before it stays known, and the
+    # reply's own type does not bring back a property that type discards.
+    read_during(
+        coordinator,
+        client,
+        partial(appliance_type="17.1.1.0"),
+        snapshot(INCOMPLETE),
+        reply=reply,
+    )
+    await coordinator.async_read_status()
+    assert coordinator.data["appliance_type"] == "17.1.1.0"
+    assert "accent_light_level" not in coordinator.data
+
+
+async def test_read_that_started_before_the_channel_opened_does_not_end_the_reconnect_wait(
+    freezer, fridge
+):
     coordinator, client = fridge
     coordinator.async_transport_error(ApiError("Stream disconnected"))
     assert client.push_connected
     freezer.tick(1)
+    # The update shows the channel is open, which the read in flight began before.
     read_during(coordinator, client, partial(ref_door_ajar=True))
-    await read_conflicts(coordinator)
+    with pytest.raises(HomeAssistantError, match="push connection changed"):
+        await coordinator.async_read_status()
     assert coordinator.data["ref_door_ajar"] is True
+    assert not coordinator.transport_healthy
+    client.state.side_effect = None
+    client.state.return_value["ref_door_ajar"] = True
+    await coordinator.async_read_status()
     assert coordinator.transport_healthy
 
 
@@ -468,7 +559,7 @@ async def discarding_fridge(fridge):
 
 
 @pytest.mark.parametrize(
-    ("pushed", "other_model", "conflicts"),
+    ("pushed", "other_model", "kept"),
     [
         (partial(accent_light_level=2), False, False),
         (partial(appliance_type="17.1.1.1", accent_light_level=2), False, True),
@@ -476,8 +567,8 @@ async def discarding_fridge(fridge):
     ],
     ids=["discarded-by-the-published-type", "kept-by-the-pushed-type", "another-model-replies"],
 )
-async def test_a_discarded_property_conflicts_only_when_the_published_type_keeps_it(
-    discarding_fridge, pushed, other_model, conflicts
+async def test_a_pushed_property_is_published_only_when_the_published_type_keeps_it(
+    discarding_fridge, pushed, other_model, kept
 ):
     coordinator, client = discarding_fridge
     reply = dict(client.state.return_value)
@@ -486,11 +577,10 @@ async def test_a_discarded_property_conflicts_only_when_the_published_type_keeps
         del reply["appliance_type"]
         reply.update(appliance_model="OTHER-FRIDGE", accent_light_level=1)
     read_during(coordinator, client, pushed, reply=reply)
-    if conflicts:
-        await read_conflicts(coordinator)
+    await coordinator.async_read_status()
+    if kept:
         assert coordinator.data["accent_light_level"] == 2
     else:
-        await coordinator.async_read_status()
         assert "accent_light_level" not in coordinator.data
 
 
@@ -505,8 +595,7 @@ async def test_incomplete_snapshot_during_read_supersedes_the_reply(hass, freeze
     freezer.tick(1)
     # A snapshot is the appliance's own state publication, whatever keys it lacks.
     read_during(coordinator, client, snapshot(appliance_model=MODEL, ref_door_ajar=opened))
-    result = await read_confirms(coordinator)
-    assert not result.conflicted
+    await read_confirms(coordinator)
     assert coordinator.confirmed_at > confirmed
     assert hass.states.get(DOOR).state == ("on" if opened else "off")
 
@@ -556,31 +645,8 @@ async def test_failed_read_with_concurrent_snapshot_fails_without_marking_unavai
     client.open_channel.assert_not_awaited()
 
 
-async def test_incomplete_snapshot_during_read_keeps_reply_clock_for_ordering_later_snapshots(
-    fridge, freezer
-):
-    coordinator, client = fridge
-    coordinator.async_set_update_error(ApiError("Channel error"))
-    fresh = {
-        **client.state.return_value,
-        "ref_door_ajar": True,
-        "time": "2026-10-24T12:00:00+00:00",
-        "uptime": "13:00:00",
-    }
-    stale = {
-        **client.state.return_value,
-        "ref_door_ajar": False,
-        "time": "2026-10-24T11:00:00+00:00",
-        "uptime": "12:00:00",
-    }
-    freezer.tick(1)
-    read_during(coordinator, client, snapshot(INCOMPLETE), snapshot(stale), reply=fresh)
-    await read_confirms(coordinator)
-    assert coordinator.data["ref_door_ajar"] is True
-
-
 @pytest.mark.parametrize("reply_type", ["1.2.6.1", None, "bad"], ids=["same", "absent", "unusable"])
-async def test_replaced_snapshot_values_matching_the_reply_do_not_conflict(
+async def test_reply_without_a_usable_type_keeps_the_type_pushed_during_the_read(
     fridge, freezer, reply_type
 ):
     coordinator, client = fridge
@@ -604,25 +670,44 @@ async def test_replaced_snapshot_values_matching_the_reply_do_not_conflict(
     assert coordinator.data["ref_door_ajar"] is False
 
 
-async def test_reply_straddling_a_reconnect_publishes_without_confirming(
-    hass, freezer, loaded, fridge
-):
-    _, _, updates, _, _ = loaded
+@pytest.mark.parametrize("after", ["nothing", "snapshot", "channel-error"])
+async def test_reply_spanning_a_connection_change_is_not_published(hass, freezer, fridge, after):
     coordinator, client = fridge
-    confirmed_before = coordinator.confirmed_at
     reading, release = blocked_read(client, reply={**client.state.return_value, "ref_set_temp": 41})
     request = asyncio.create_task(coordinator.async_read_status())
     await asyncio.wait_for(reading.wait(), 1)
     freezer.tick(1)
-    await updates.put(ApiError("Stream disconnected"))
-    await hass.async_block_till_done()
-    freezer.tick(1)
+    coordinator.async_transport_error(ApiError("Stream disconnected"))
+    if after != "nothing":
+        coordinator.apply_update(snapshot(INCOMPLETE))
+    if after == "channel-error":
+        coordinator.on_channel_error(ApiError("Channel error"))
     release.set()
     with pytest.raises(HomeAssistantError, match="push connection changed"):
         await request
-    assert coordinator.confirmed_at == confirmed_before
-    assert coordinator.data["ref_set_temp"] == 41
+    # The reply may be older than what arrived on the new connection, and it cannot
+    # undo an error that followed it.
+    assert coordinator.data["ref_set_temp"] == 38
+    assert ("ref_door_ajar" in coordinator.data) is (after == "nothing")
+    assert coordinator.last_update_success is (after != "channel-error")
     assert not coordinator.transport_healthy
+
+
+async def test_reply_straddling_a_reconnect_still_delivers_the_events_in_its_history(fridge):
+    coordinator, client = fridge
+    client.state.return_value["notifs"] = []
+    await coordinator.async_read_status()
+    observed = []
+    coordinator.async_add_event_listener(observed.append)
+    client.state.return_value = {**client.state.return_value, "notifs": [alert(1)]}
+    reading, release = first_read_blocks(client, then=RateLimited(600))
+    read = asyncio.create_task(coordinator._async_read_result(report_error=False))
+    await asyncio.wait_for(reading.wait(), 1)
+    coordinator.async_transport_error(ApiError("Stream disconnected"))
+    coordinator.apply_update(snapshot(INCOMPLETE))
+    release.set()
+    await read
+    assert [event["sequence"] for event in observed] == [1]
 
 
 # Incomplete observations
@@ -672,16 +757,18 @@ async def test_incomplete_observations_revive_expired_transport_state(
     assert not coordinator.last_update_success
 
     # The snapshot restores what it carries. The door it lacks is unknown, not stale,
-    # and the follow-up read replaces it with what status reads report.
+    # and the status read that confirms state replaces it with what reads report.
     coordinator.apply_update(snapshot(appliance_model=complete["appliance_model"], ref_set_temp=39))
     await hass.async_block_till_done()
     assert coordinator.last_update_success
+    assert not coordinator.transport_healthy
     assert hass.states.get(DOOR).state == "unavailable"
-    assert hass.states.get(SETPOINT).state == "38"
+    assert hass.states.get(SETPOINT).state == "39"
     freezer.tick(1)
     await read_confirms(coordinator)
     assert coordinator.last_update_success
     assert hass.states.get(DOOR).state == "unavailable"
+    assert hass.states.get(SETPOINT).state == "38"
 
     freezer.tick(1)
     client.state.return_value = complete
@@ -989,7 +1076,7 @@ async def test_an_older_refresh_cannot_overwrite_a_newer_read_or_snapshot(
             await coordinator.async_read_status()
 
 
-async def test_verification_resumes_after_auth_failure_is_recovered_by_push(
+async def test_auth_failure_is_recovered_by_the_read_a_snapshot_prompts(
     hass, freezer, loaded, fridge
 ):
     from custom_components.subzero.auth import InvalidAuth
@@ -1003,16 +1090,23 @@ async def test_verification_resumes_after_auth_failure_is_recovered_by_push(
     await hass.async_block_till_done()
     await entry.runtime_data._verifications["test-fridge"]
     assert not coordinator.last_update_success
+    # A snapshot does not show that sign-in works. It prompts one read, which fails.
+    await updates.put(snapshot(client.state.return_value))
+    await hass.async_block_till_done()
+    assert not coordinator.last_update_success
+    assert client.state.await_count == 2
+
+    client.state.side_effect = None
     await updates.put(snapshot(client.state.return_value))
     await hass.async_block_till_done()
     assert coordinator.last_update_success
-
-    client.state.side_effect = None
+    assert coordinator.transport_healthy
+    assert client.state.await_count == 3
     freezer.tick(301)
     async_fire_time_changed(hass, dt_util.utcnow())
     await hass.async_block_till_done()
     await entry.runtime_data._verifications["test-fridge"]
-    assert client.state.await_count == 2
+    assert client.state.await_count == 4
     client.open_channel.assert_not_awaited()
     assert coordinator.verification_stats["checks"] == 2
     assert coordinator.verification_stats["status_reads"] == 2

@@ -5,11 +5,9 @@ from datetime import UTC, datetime, timedelta, tzinfo
 
 from homeassistant.util import dt as dt_util
 
-from .api import StateUpdate, notification_records
+from .api import notification_records
 from .const import MAX_EVENT_HISTORY, STATE_KEYS
 from .controls import appliance_datetime, appliance_type, excluded_properties, uptime_seconds
-
-CONFLICT_IGNORED_KEYS = frozenset({"notifs", "time", "uptime", "ap_rssi", "appliance_type"})
 
 
 @dataclass(frozen=True)
@@ -17,7 +15,6 @@ class StateRead:
     request: int
     confirmed_at: datetime | None
     error: Exception | None = None
-    conflicted: bool = False
     epoch: int = 0
 
 
@@ -67,71 +64,38 @@ def discard_excluded(data: dict, known: dict) -> dict:
 
 
 class PendingRead:
-    """Collect pushed updates arriving during a status read and merge them over the reply."""
+    """Collect the updates pushed during a status read."""
 
     def __init__(self, epoch: int) -> None:
         self.epoch = epoch
-        self.updates: list[StateUpdate] = []
+        self.pushed: dict = {}
         self.error: Exception | None = None
 
     def fail(self, error: Exception) -> None:
         self.error = error
 
-    def clear_error(self) -> None:
-        self.error = None
+    def record_update(self, properties: dict, *, replace: bool) -> None:
+        if replace:
+            # A snapshot that replaced state also replaces what was pushed before it.
+            self.pushed = {}
+        self.pushed.update(properties)
 
-    def record_update(self, properties: dict, *, full: bool) -> None:
-        self.error = None
-        self.updates.append(StateUpdate(properties, full=full))
+    def merge(self, reply: dict, known: dict) -> dict:
+        """Lay the updates pushed during the read over its reply.
 
-    def merge(self, reply: dict, known: dict, zone: tzinfo | None) -> tuple[dict, bool]:
-        """Merge pushes received during a read over its reply.
-
-        Returns (published_data, conflicted). Arrival during a GET does not
-        establish when a partial change happened, so it is published immediately
-        but marks the read conflicted when it disagrees with the reply.
+        Nothing orders a reply against an update that arrived while it was in flight,
+        so the update stands.
         """
-        pushed: dict = {}
-        partial_keys: set[str] = set()
-        reference = reply
-        for update in self.updates:
-            if update.full:
-                if snapshot_is_older(update.properties, reference, zone):
-                    continue
-                if update.properties.get("appliance_model") != reference.get("appliance_model"):
-                    pushed.clear()
-                    partial_keys.clear()
-                    reference = {}
-                else:
-                    partial_keys.difference_update(update.properties)
-            else:
-                partial_keys.update(update.properties)
-            pushed.update(update.properties)
-            reference = {**reference, **update.properties}
-
-        model = pushed.get("appliance_model")
-        other_model = bool(
-            isinstance(model, str) and model and model != reply.get("appliance_model")
-        )
-        base = {} if other_model else reply
-        published_for_type = with_known_type({**base, **pushed}, known)
-        conflicted = any(
-            key not in reply
-            or key not in pushed
-            or pushed[key] != reply[key]
-            or type(pushed[key]) is not type(reply[key])
-            for key in partial_keys
-            - CONFLICT_IGNORED_KEYS
-            - excluded_properties(published_for_type)
-        )
-        history = notification_records(base) if "notifs" in base else None
+        model = self.pushed.get("appliance_model")
+        # A reply for another model than the one pushed during the read is not used.
+        base = reply if not model or model == reply.get("appliance_model") else {}
         merged = {
             **{key: value for key, value in base.items() if key in STATE_KEYS},
-            **pushed,
+            **self.pushed,
         }
-        if history is not None:
-            merged["notifs"] = [*history, *pushed.get("notifs", [])]
-        return discard_excluded(merged, known), conflicted
+        if "notifs" in base:
+            merged["notifs"] = [*notification_records(base), *self.pushed.get("notifs", [])]
+        return discard_excluded(merged, known)
 
 
 class EventTracker:

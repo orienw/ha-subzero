@@ -370,7 +370,7 @@ class SubZeroSensor(SubZeroEntity, SensorEntity):
         if key == "live_reporting_mode":
             return (
                 "Cloud push"
-                if self.coordinator.client.push_connected and self.coordinator.last_update_success
+                if self.coordinator.receiving_live_updates and self.coordinator.last_update_success
                 else "Disconnected"
             )
         value = self.coordinator.data.get(key)

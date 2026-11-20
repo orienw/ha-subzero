@@ -21,6 +21,7 @@ def appliance_diagnostics(
         records.append(item)
     return {
         "available": coordinator.last_update_success,
+        "live_updates_established": coordinator.transport_healthy,
         "temperature_unit": coordinator.device.get("temperature_unit"),
         # The zone the appliance's times without an offset are read in; None means
         # Home Assistant's, until a push reports the appliance clock.
