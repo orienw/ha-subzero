@@ -547,14 +547,12 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         the next command reads state before deciding what to write.
         """
         async with self._command_lock:
-            if self._unsettled:
-                await self.async_refresh()
-                self._unsettled = False
-            if not self._push.healthy or not self.client.push_connected:
+            if self._unsettled or not self._push.healthy or not self.client.push_connected:
                 try:
                     await self.async_read_status()
                 except HomeAssistantError as error:
                     raise ServiceValidationError(str(error)) from error
+                self._unsettled = False
             self._command_generation = self._push.epoch
             try:
                 yield

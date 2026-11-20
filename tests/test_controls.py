@@ -674,6 +674,68 @@ async def test_every_command_reads_again_while_the_stream_is_down(hass, controls
     controls.client.set_property.assert_not_awaited()
 
 
+async def test_rate_limited_refresh_after_cancelled_command_refuses_and_stays_unsettled(
+    hass, controls
+):
+    coordinator = controls.entry.runtime_data.coordinators["test-fridge"]
+    entered = asyncio.Event()
+
+    async def pending_write(*_):
+        entered.set()
+        await asyncio.Event().wait()
+
+    original_write = controls.client.set_property.side_effect
+    controls.client.set_property.side_effect = pending_write
+    pending = asyncio.create_task(coordinator.async_set_properties({"air_filter_on": False}))
+    await entered.wait()
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    controls.client.set_property.reset_mock()
+    controls.client.set_property.side_effect = original_write
+
+    original_state = controls.client.state.side_effect
+    controls.states["test-fridge"]["max_ice_on"] = True
+    controls.client.state.side_effect = RateLimited(600)
+    with pytest.raises(ServiceValidationError):
+        await coordinator.async_set_properties({"frz_set_temp": 1})
+    controls.client.set_property.assert_not_awaited()
+
+    controls.client.state.side_effect = original_state
+    reads = controls.client.state.await_count
+    with pytest.raises(ServiceValidationError, match="Max ice"):
+        await coordinator.async_set_properties({"frz_set_temp": 1})
+    assert controls.client.state.await_count == reads + 1
+    controls.client.set_property.assert_not_awaited()
+
+
+async def test_cancelled_command_during_disconnect_reads_once_before_the_next_command(
+    hass, controls
+):
+    coordinator = controls.entry.runtime_data.coordinators["test-fridge"]
+    entered = asyncio.Event()
+
+    async def pending_write(*_):
+        entered.set()
+        await asyncio.Event().wait()
+
+    original_write = controls.client.set_property.side_effect
+    controls.client.set_property.side_effect = pending_write
+    pending = asyncio.create_task(coordinator.async_set_properties({"air_filter_on": False}))
+    await entered.wait()
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    controls.client.set_property.reset_mock()
+    controls.client.set_property.side_effect = original_write
+
+    await controls.updates.put(ApiError("Stream disconnected"))
+    await hass.async_block_till_done()
+    reads = controls.client.state.await_count
+    await coordinator.async_set_properties({"air_filter_on": True})
+    assert controls.client.state.await_count == reads + 1
+
+
 async def test_operating_mode_is_decided_from_the_state_read_for_the_command(hass, controls):
     coordinator = controls.entry.runtime_data.coordinators["test-fridge"]
     coordinator.async_transport_error(ApiError("Stream disconnected"))
