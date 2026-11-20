@@ -37,7 +37,7 @@ def tokens():
 
 @pytest.fixture(autouse=True)
 def fast_timeouts(monkeypatch):
-    monkeypatch.setattr("custom_components.subzero.coordinator.INITIAL_STATE_TIMEOUT", 0)
+    monkeypatch.setattr("custom_components.subzero.account.INITIAL_STATE_TIMEOUT", 0)
     monkeypatch.setattr("custom_components.subzero.coordinator.CONTROL_CONFIRM_TIMEOUT", 0.05)
     monkeypatch.setattr("custom_components.subzero.coordinator.CONTROL_PUSH_TIMEOUT", 0.01)
 

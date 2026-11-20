@@ -41,8 +41,9 @@ from .controls import (
     is_int,
     uptime_seconds,
 )
-from .coordinator import SubZeroCoordinator, SubZeroFaultsCoordinator
+from .coordinator import SubZeroCoordinator
 from .entity import SubZeroEntity, async_setup_entities
+from .faults import SubZeroFaultsCoordinator
 
 ENUM_VALUES = {
     "ice_maker_clean_stage": ICE_CLEAN_STAGES,

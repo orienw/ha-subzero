@@ -18,6 +18,7 @@ from homeassistant.helpers.selector import (
     TextSelectorType,
 )
 
+from .account import firebase_alerts_enabled, selected_devices, status_poll_interval
 from .api import ApiError, RateLimited, SubZeroClient
 from .app_config import SUBSCRIPTION_KEY
 from .auth import (
@@ -31,7 +32,6 @@ from .auth import (
     SubZeroLogin,
 )
 from .const import CONF_FIREBASE_ALERTS, DOMAIN, STATUS_POLL_INTERVALS
-from .coordinator import firebase_alerts_enabled, selected_devices, status_poll_interval
 
 
 def device_schema(devices: dict, selected: list[str]) -> vol.Schema:

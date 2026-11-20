@@ -19,6 +19,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_system import US_CUSTOMARY_SYSTEM
 
+from custom_components.subzero.account import SubZeroAccount
 from custom_components.subzero.api import (
     SEPARATOR,
     ApiError,
@@ -33,7 +34,6 @@ from custom_components.subzero.api import (
 )
 from custom_components.subzero.auth import InvalidAuth
 from custom_components.subzero.const import DOMAIN
-from custom_components.subzero.coordinator import SubZeroAccount
 from tests.common import (
     MockConfigEntry,
     async_capture_events,
@@ -308,7 +308,7 @@ async def test_verification_auth_failure_starts_reauthentication(hass, loaded):
 
 async def test_initial_push_can_load_without_a_status_read(hass, loaded, monkeypatch):
     entry, client, _, _, _ = loaded
-    monkeypatch.setattr("custom_components.subzero.coordinator.INITIAL_STATE_TIMEOUT", 16)
+    monkeypatch.setattr("custom_components.subzero.account.INITIAL_STATE_TIMEOUT", 16)
     closed = asyncio.Event()
 
     async def watch(device_ids):
@@ -635,7 +635,7 @@ async def test_an_appliance_push_restores_during_setup_is_not_reported(
             }
         },
     )
-    monkeypatch.setattr("custom_components.subzero.coordinator.INITIAL_STATE_TIMEOUT", 0)
+    monkeypatch.setattr("custom_components.subzero.account.INITIAL_STATE_TIMEOUT", 0)
     fridge = dict(client.state.return_value)
     reading, release = asyncio.Event(), asyncio.Event()
 
@@ -1400,7 +1400,7 @@ async def test_a_channel_refused_on_a_connection_that_closes_leaves_the_applianc
     app.router.add_get("/client/", websocket)
     origin = str((await aiohttp_server(app)).make_url("/")).rstrip("/")
     monkeypatch.setattr("custom_components.subzero.api.SIGNALR_ORIGIN", origin)
-    monkeypatch.setattr("custom_components.subzero.coordinator.RECONNECT_DELAY", 0.01)
+    monkeypatch.setattr("custom_components.subzero.account.RECONNECT_DELAY", 0.01)
     monkeypatch.setattr("custom_components.subzero.coordinator.random.uniform", lambda *_: 0)
     hass.config.units = US_CUSTOMARY_SYSTEM
     entry = MockConfigEntry(
@@ -1774,14 +1774,12 @@ async def test_reconnect_backoff_uses_lifetime_without_events(
 
     account = SubZeroAccount(hass, entry, SimpleNamespace(watch=watch))
     monkeypatch.setattr(
-        "custom_components.subzero.coordinator.time", SimpleNamespace(monotonic=lambda: now)
+        "custom_components.subzero.account.time", SimpleNamespace(monotonic=lambda: now)
     )
     monkeypatch.setattr(
-        "custom_components.subzero.coordinator.random", SimpleNamespace(uniform=lambda *_: 0)
+        "custom_components.subzero.account.random", SimpleNamespace(uniform=lambda *_: 0)
     )
-    monkeypatch.setattr(
-        "custom_components.subzero.coordinator.asyncio", SimpleNamespace(sleep=sleep)
-    )
+    monkeypatch.setattr("custom_components.subzero.account.asyncio", SimpleNamespace(sleep=sleep))
     with pytest.raises(asyncio.CancelledError):
         await account.listen()
     assert delays == [max(delay, 75) if rate_limited else delay for delay in expected]
@@ -2239,7 +2237,7 @@ async def test_v1_upgrade_enables_integration_disabled_entities(hass, tokens):
             new_callable=AsyncMock,
             return_value=[],
         ),
-        patch("custom_components.subzero.coordinator.SubZeroAccount.listen"),
+        patch("custom_components.subzero.account.SubZeroAccount.listen"),
     ):
         assert await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()

@@ -7,7 +7,8 @@ from homeassistant.helpers.device_registry import DeviceEntry
 from . import SubZeroConfigEntry
 from .api import fault_record
 from .const import DOMAIN, PRIVATE_KEYS
-from .coordinator import SubZeroCoordinator, SubZeroFaultsCoordinator
+from .coordinator import SubZeroCoordinator
+from .faults import SubZeroFaultsCoordinator
 
 
 def appliance_diagnostics(
