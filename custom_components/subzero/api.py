@@ -9,11 +9,12 @@ import random
 import time
 import uuid
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Collection
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Iterator
 from contextlib import AsyncExitStack, aclosing
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
+from typing import NoReturn
 from urllib.parse import quote
 
 import aiohttp
@@ -392,6 +393,218 @@ def _log_notification_frame(
     )
 
 
+async def _decode_command_response(response: aiohttp.ClientResponse) -> dict | None:
+    """Decode a direct-method command reply, handling Sub-Zero's plain and HTTP 500 OK forms."""
+    body = (await response.text(errors="replace")).strip()
+    if response.status < 300 and body in ("", "OK", '"OK"'):
+        return {}
+    try:
+        result = _object(body)
+    except ApiError:
+        result = None
+    if (
+        response.status == 500
+        and isinstance(result, dict)
+        and result.get("Message", result.get("message")) == "OK"
+    ):
+        return {}
+    if response.status < 300:
+        return _object(result)
+    return None
+
+
+async def _decode_json_response(
+    response: aiohttp.ClientResponse, *, list_response: bool, any_response: bool
+) -> dict | list:
+    if any_response:
+        # Alert endpoints return an ID, a boolean, a list, or no body.
+        body = (await response.text(errors="replace")).strip()
+        try:
+            return json.loads(body) if body else None
+        except ValueError:
+            raise ApiError("Sub-Zero returned an invalid API response.") from None
+    try:
+        payload = await response.json(content_type=None)
+        if list_response:
+            return _object(payload, expected=(dict, list))
+        if isinstance(payload, list):
+            raise ApiError("Sub-Zero returned an invalid API response.")
+        return _object(payload)
+    except ValueError:
+        raise ApiError("Sub-Zero returned an invalid API response.") from None
+
+
+class _SignalRWatch:
+    """Manage channel opens, periodic reopens, heartbeats, and SignalR framing."""
+
+    def __init__(
+        self,
+        client: SubZeroClient,
+        websocket: aiohttp.ClientWebSocketResponse,
+        device_ids: list[str],
+        pending: str,
+    ) -> None:
+        self._client = client
+        self._websocket = websocket
+        self._device_ids = device_ids
+        self._pending = pending
+        self._channel_events: deque[tuple[str, ApiError | ChannelOpened]] = deque()
+        self._pending_channels = set(device_ids)
+
+    async def _open_channels(self) -> None:
+        backoff = RECONNECT_DELAY
+        while self._pending_channels:
+            retry_after = 0.0
+            for index, device_id in enumerate(self._device_ids, 1):
+                if device_id not in self._pending_channels:
+                    continue
+                _LOGGER.debug("Opening update channel for appliance %d", index)
+                try:
+                    await self._client.open_channel(device_id)
+                except InvalidAuth as error:
+                    self._client._channel_failed(device_id, error, reopen=False)
+                    raise
+                except ApiError as error:
+                    self._client._channel_failed(device_id, error, reopen=False)
+                    # A rate limit keeps the connection, so appliances whose
+                    # channels opened keep updating while this one waits.
+                    if isinstance(error, RateLimited):
+                        retry_after = max(retry_after, error.retry_after)
+                    if device_id in self._pending_channels:
+                        self._channel_events.append((device_id, error))
+                else:
+                    _LOGGER.debug("Update channel accepted for appliance %d", index)
+                    self._channel_events.append((device_id, ChannelOpened()))
+                    self._pending_channels.discard(device_id)
+            if self._pending_channels:
+                await asyncio.sleep(max(backoff, retry_after) + random.uniform(0, 5))
+                backoff = min(backoff * 2, MAX_RECONNECT_DELAY)
+
+    async def _reopen_channels(self) -> None:
+        delay = CHANNEL_REOPEN_INTERVAL
+        while True:
+            await asyncio.sleep(delay)
+            delay = CHANNEL_REOPEN_INTERVAL
+            for index, device_id in enumerate(self._device_ids, 1):
+                if device_id in self._pending_channels:
+                    continue
+                _LOGGER.debug("Reopening update channel for appliance %d", index)
+                try:
+                    await self._client.open_channel(device_id)
+                except InvalidAuth as error:
+                    self._client._channel_failed(device_id, error, reopen=True)
+                    raise
+                except RateLimited as error:
+                    self._client._channel_failed(device_id, error, reopen=True)
+                    delay = max(delay, error.retry_after)
+                    _LOGGER.debug("Update channel reopen deferred: %s", error)
+                    break
+                except ApiError as error:
+                    self._client._channel_failed(device_id, error, reopen=True)
+                    _LOGGER.debug(
+                        "Could not reopen update channel for appliance %d: %s",
+                        index,
+                        error,
+                    )
+                else:
+                    _LOGGER.debug("Update channel reopen accepted for appliance %d", index)
+
+    def _parse_frame(self, frame: str) -> tuple[str, StateUpdate] | None:
+        try:
+            event = _object(frame)
+        except ApiError as error:
+            self._client.notification_stats["invalid"] += 1
+            _LOGGER.debug("Skipping invalid notification frame: %s", error)
+            return None
+        if event.get("type") == 7:
+            error = event.get("error")
+            reconnect = event.get("allowReconnect")
+            _LOGGER.debug(
+                "SignalR closed notification connection: error=%r allowReconnect=%s",
+                error[:256] if isinstance(error, str) else None,
+                reconnect if isinstance(reconnect, bool) else None,
+            )
+            raise ApiError("Sub-Zero closed the notification connection.")
+        if event.get("type") != 1 or event.get("target") != "ConnectedApplianceMessage":
+            return None
+        self._client.notification_stats["received"] += 1
+        self._client.notification_stats["last_received"] = datetime.now(UTC).isoformat()
+        try:
+            parsed = parse_notification(event, self._client.tokens["account_ids"], self._device_ids)
+        except ApiError as error:
+            self._client.notification_stats["invalid"] += 1
+            _LOGGER.debug("Skipping invalid appliance notification: %s", error)
+            return None
+        if parsed is not None:
+            self._client.last_messages[parsed[0]] = datetime.now(UTC).isoformat()
+        if parsed is None or parsed[1] is None:
+            self._client.notification_stats["ignored"] += 1
+            return None
+        device_id, update = parsed
+        if not update.properties.keys().isdisjoint(STATE_KEYS):
+            self._pending_channels.discard(device_id)
+        return device_id, update
+
+    def _drain_frames(self) -> Iterator[tuple[str, StateUpdate]]:
+        while SEPARATOR in self._pending:
+            frame, self._pending = self._pending.split(SEPARATOR, 1)
+            if not frame:
+                continue
+            if (parsed := self._parse_frame(frame)) is not None:
+                yield parsed
+
+    async def run(self) -> AsyncIterator[tuple[str, StateUpdate | ApiError | ChannelOpened]]:
+        opening = asyncio.create_task(self._open_channels())
+        reopening = asyncio.create_task(self._reopen_channels())
+        receiving = asyncio.create_task(self._websocket.receive())
+        tasks = {opening, reopening, receiving}
+        try:
+            next_ping = time.monotonic() + PING_INTERVAL
+            last_received = time.monotonic()
+            while True:
+                while self._channel_events:
+                    yield self._channel_events.popleft()
+                for item in self._drain_frames():
+                    yield item
+                now = time.monotonic()
+                if now - last_received > 60:
+                    raise ApiError("Sub-Zero's notification connection stopped responding.")
+                if now >= next_ping:
+                    await self._websocket.send_str('{"type":6}' + SEPARATOR)
+                    next_ping = now + PING_INTERVAL
+                await asyncio.wait(
+                    tasks,
+                    timeout=max(0.1, next_ping - time.monotonic()),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if opening.done():
+                    opening.result()
+                    tasks.discard(opening)
+                if reopening.done():
+                    reopening.result()
+                if not receiving.done():
+                    continue
+                message = receiving.result()
+                if message.type != aiohttp.WSMsgType.TEXT:
+                    _log_notification_frame(self._websocket, message, "disconnected")
+                    raise ApiError("Sub-Zero's notification connection disconnected.")
+                tasks.remove(receiving)
+                receiving = asyncio.create_task(self._websocket.receive())
+                tasks.add(receiving)
+                last_received = time.monotonic()
+                self._client.notification_stats["last_frame_received"] = datetime.now(
+                    UTC
+                ).isoformat()
+                self._pending += message.data
+                if len(self._pending) > 262144:
+                    raise ApiError("Sub-Zero sent an oversized notification.")
+        finally:
+            opening.cancel()
+            reopening.cancel()
+            receiving.cancel()
+            await asyncio.gather(opening, reopening, receiving, return_exceptions=True)
+
+
 class SubZeroClient:
     """One account's API token and connection; passwords are not needed."""
 
@@ -439,6 +652,43 @@ class SubZeroClient:
     def _api_token(self) -> str:
         return self.tokens.get("id_token", self.tokens["access_token"])
 
+    async def _handle_rate_limit(
+        self, response: aiohttp.ClientResponse, origin: URL, url: str | URL
+    ) -> NoReturn:
+        header = response.headers.get("Retry-After")
+        if (
+            header is None
+            and origin == URL(SIGNALR_ORIGIN)
+            and "Connection count reaches limit" in await response.text(errors="replace")
+        ):
+            # A connection frees up only when another client disconnects,
+            # so the wait does not grow; spread out the attempts.
+            error: RateLimited = ConnectionLimitReached(
+                random.uniform(CONNECTION_LIMIT_RETRY, 2 * CONNECTION_LIMIT_RETRY)
+            )
+        else:
+            error = RateLimited(retry_delay(header))
+        self._retry_at[origin] = time.monotonic() + error.retry_after
+        self.rate_limits.append(
+            {
+                "time": datetime.now(UTC).isoformat(),
+                "server": origin.host,
+                # The API's name only; later segments can hold appliance IDs.
+                "api": URL(url).path.strip("/").split("/", 1)[0],
+                "wait_seconds": round(error.retry_after),
+                "retry_after_sent": header is not None,
+                "service_full": isinstance(error, ConnectionLimitReached),
+            }
+        )
+        _LOGGER.debug(
+            "%s limited requests for %.0f s (Retry-After %s): %s",
+            origin.host,
+            error.retry_after,
+            "missing" if header is None else "sent",
+            error,
+        )
+        raise error
+
     async def _json(
         self,
         method: str,
@@ -464,78 +714,19 @@ class SubZeroClient:
                 **kwargs,
             ) as response:
                 if response.status == 429:
-                    header = response.headers.get("Retry-After")
-                    if (
-                        header is None
-                        and origin == URL(SIGNALR_ORIGIN)
-                        and "Connection count reaches limit"
-                        in await response.text(errors="replace")
-                    ):
-                        # A connection frees up only when another client disconnects,
-                        # so the wait does not grow; spread out the attempts.
-                        error = ConnectionLimitReached(
-                            random.uniform(CONNECTION_LIMIT_RETRY, 2 * CONNECTION_LIMIT_RETRY)
-                        )
-                    else:
-                        error = RateLimited(retry_delay(header))
-                    self._retry_at[origin] = time.monotonic() + error.retry_after
-                    self.rate_limits.append(
-                        {
-                            "time": datetime.now(UTC).isoformat(),
-                            "server": origin.host,
-                            # The API's name only; later segments can hold appliance IDs.
-                            "api": URL(url).path.strip("/").split("/", 1)[0],
-                            "wait_seconds": round(error.retry_after),
-                            "retry_after_sent": header is not None,
-                            "service_full": isinstance(error, ConnectionLimitReached),
-                        }
-                    )
-                    _LOGGER.debug(
-                        "%s limited requests for %.0f s (Retry-After %s): %s",
-                        origin.host,
-                        error.retry_after,
-                        "missing" if header is None else "sent",
-                        error,
-                    )
-                    raise error
+                    await self._handle_rate_limit(response, origin, url)
                 if response.status in (401, 403) or (token_request and response.status == 400):
                     raise InvalidAuth("Sub-Zero requires a new sign-in.")
                 if appliance_command and (200 <= response.status < 300 or response.status == 500):
-                    body = (await response.text(errors="replace")).strip()
-                    if response.status < 300 and body in ("", "OK", '"OK"'):
-                        return {}
-                    try:
-                        result = _object(body)
-                    except ApiError:
-                        result = None
-                    if (
-                        response.status == 500
-                        and isinstance(result, dict)
-                        and result.get("Message", result.get("message")) == "OK"
-                    ):
-                        return {}
-                    if response.status < 300:
-                        return _object(result)
+                    if (decoded := await _decode_command_response(response)) is not None:
+                        return decoded
                 if response.status != 200:
                     raise ApiError(
                         f"Sub-Zero returned HTTP {response.status}.", status=response.status
                     )
-                if any_response:
-                    # Alert endpoints return an ID, a boolean, a list, or no body.
-                    body = (await response.text(errors="replace")).strip()
-                    try:
-                        return json.loads(body) if body else None
-                    except ValueError:
-                        raise ApiError("Sub-Zero returned an invalid API response.") from None
-                try:
-                    payload = await response.json(content_type=None)
-                    if list_response:
-                        return _object(payload, expected=(dict, list))
-                    if isinstance(payload, list):
-                        raise ApiError("Sub-Zero returned an invalid API response.")
-                    return _object(payload)
-                except ValueError:
-                    raise ApiError("Sub-Zero returned an invalid API response.") from None
+                return await _decode_json_response(
+                    response, list_response=list_response, any_response=any_response
+                )
         except aiohttp.ClientError, TimeoutError:
             raise ApiError("Could not connect to Sub-Zero.") from None
 
@@ -927,159 +1118,9 @@ class SubZeroClient:
                 connected_at = datetime.now(UTC).isoformat()
                 self.notification_stats["connected_at"] = connected_at
                 self.notification_stats["last_frame_received"] = connected_at
-                channel_events: deque[tuple[str, ApiError | ChannelOpened]] = deque()
-                pending_channels = set(device_ids)
-
-                async def open_channels() -> None:
-                    backoff = RECONNECT_DELAY
-                    while pending_channels:
-                        retry_after = 0.0
-                        for index, device_id in enumerate(device_ids, 1):
-                            if device_id not in pending_channels:
-                                continue
-                            _LOGGER.debug("Opening update channel for appliance %d", index)
-                            try:
-                                await self.open_channel(device_id)
-                            except InvalidAuth as error:
-                                self._channel_failed(device_id, error, reopen=False)
-                                raise
-                            except ApiError as error:
-                                self._channel_failed(device_id, error, reopen=False)
-                                # A rate limit keeps the connection, so appliances whose
-                                # channels opened keep updating while this one waits.
-                                if isinstance(error, RateLimited):
-                                    retry_after = max(retry_after, error.retry_after)
-                                if device_id in pending_channels:
-                                    channel_events.append((device_id, error))
-                            else:
-                                _LOGGER.debug("Update channel accepted for appliance %d", index)
-                                channel_events.append((device_id, ChannelOpened()))
-                                pending_channels.discard(device_id)
-                        if pending_channels:
-                            await asyncio.sleep(max(backoff, retry_after) + random.uniform(0, 5))
-                            backoff = min(backoff * 2, MAX_RECONNECT_DELAY)
-
-                async def reopen_channels() -> None:
-                    delay = CHANNEL_REOPEN_INTERVAL
-                    while True:
-                        await asyncio.sleep(delay)
-                        delay = CHANNEL_REOPEN_INTERVAL
-                        for index, device_id in enumerate(device_ids, 1):
-                            if device_id in pending_channels:
-                                continue
-                            _LOGGER.debug("Reopening update channel for appliance %d", index)
-                            try:
-                                await self.open_channel(device_id)
-                            except InvalidAuth as error:
-                                self._channel_failed(device_id, error, reopen=True)
-                                raise
-                            except RateLimited as error:
-                                self._channel_failed(device_id, error, reopen=True)
-                                delay = max(delay, error.retry_after)
-                                _LOGGER.debug("Update channel reopen deferred: %s", error)
-                                break
-                            except ApiError as error:
-                                self._channel_failed(device_id, error, reopen=True)
-                                _LOGGER.debug(
-                                    "Could not reopen update channel for appliance %d: %s",
-                                    index,
-                                    error,
-                                )
-                            else:
-                                _LOGGER.debug(
-                                    "Update channel reopen accepted for appliance %d", index
-                                )
-
-                opening = asyncio.create_task(open_channels())
-                reopening = asyncio.create_task(reopen_channels())
-                receiving = asyncio.create_task(websocket.receive())
-                tasks = {opening, reopening, receiving}
-                try:
-                    next_ping = time.monotonic() + PING_INTERVAL
-                    last_received = time.monotonic()
-                    while True:
-                        while channel_events:
-                            yield channel_events.popleft()
-                        while SEPARATOR in pending:
-                            frame, pending = pending.split(SEPARATOR, 1)
-                            if not frame:
-                                continue
-                            try:
-                                event = _object(frame)
-                            except ApiError as error:
-                                self.notification_stats["invalid"] += 1
-                                _LOGGER.debug("Skipping invalid notification frame: %s", error)
-                                continue
-                            if event.get("type") == 7:
-                                error = event.get("error")
-                                reconnect = event.get("allowReconnect")
-                                _LOGGER.debug(
-                                    "SignalR closed notification connection: "
-                                    "error=%r allowReconnect=%s",
-                                    error[:256] if isinstance(error, str) else None,
-                                    reconnect if isinstance(reconnect, bool) else None,
-                                )
-                                raise ApiError("Sub-Zero closed the notification connection.")
-                            if (
-                                event.get("type") != 1
-                                or event.get("target") != "ConnectedApplianceMessage"
-                            ):
-                                continue
-                            self.notification_stats["received"] += 1
-                            self.notification_stats["last_received"] = datetime.now(UTC).isoformat()
-                            try:
-                                parsed = parse_notification(
-                                    event, self.tokens["account_ids"], device_ids
-                                )
-                            except ApiError as error:
-                                self.notification_stats["invalid"] += 1
-                                _LOGGER.debug("Skipping invalid appliance notification: %s", error)
-                                continue
-                            if parsed is not None:
-                                self.last_messages[parsed[0]] = datetime.now(UTC).isoformat()
-                            if parsed is None or parsed[1] is None:
-                                self.notification_stats["ignored"] += 1
-                                continue
-                            device_id, update = parsed
-                            if not update.properties.keys().isdisjoint(STATE_KEYS):
-                                pending_channels.discard(device_id)
-                            yield device_id, update
-                        now = time.monotonic()
-                        if now - last_received > 60:
-                            raise ApiError("Sub-Zero's notification connection stopped responding.")
-                        if now >= next_ping:
-                            await websocket.send_str('{"type":6}' + SEPARATOR)
-                            next_ping = now + PING_INTERVAL
-                        await asyncio.wait(
-                            tasks,
-                            timeout=max(0.1, next_ping - time.monotonic()),
-                            return_when=asyncio.FIRST_COMPLETED,
-                        )
-                        if opening.done():
-                            opening.result()
-                            tasks.discard(opening)
-                        if reopening.done():
-                            reopening.result()
-                        if not receiving.done():
-                            continue
-                        message = receiving.result()
-                        if message.type != aiohttp.WSMsgType.TEXT:
-                            _log_notification_frame(websocket, message, "disconnected")
-                            raise ApiError("Sub-Zero's notification connection disconnected.")
-                        tasks.remove(receiving)
-                        receiving = asyncio.create_task(websocket.receive())
-                        tasks.add(receiving)
-                        last_received = time.monotonic()
-                        self.notification_stats["last_frame_received"] = datetime.now(
-                            UTC
-                        ).isoformat()
-                        pending += message.data
-                        if len(pending) > 262144:
-                            raise ApiError("Sub-Zero sent an oversized notification.")
-                finally:
-                    opening.cancel()
-                    reopening.cancel()
-                    receiving.cancel()
-                    await asyncio.gather(opening, reopening, receiving, return_exceptions=True)
+                watch = _SignalRWatch(self, websocket, device_ids, pending)
+                async with aclosing(watch.run()) as events:
+                    async for event in events:
+                        yield event
         except (aiohttp.ClientError, TimeoutError) as error:
             raise _transport_error(error) from None
