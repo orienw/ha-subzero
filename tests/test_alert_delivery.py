@@ -8,7 +8,6 @@ from homeassistant.util import dt as dt_util
 
 from custom_components.subzero.api import StateUpdate
 from tests.common import async_fire_time_changed
-from tests.test_integration import loaded as loaded
 from tests.test_state_verification import _advance_followup
 
 pytestmark = pytest.mark.usefixtures("enable_custom_integrations")

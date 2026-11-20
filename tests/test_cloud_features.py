@@ -38,7 +38,6 @@ from tests.common import (
     async_capture_events,
     async_fire_time_changed,
 )
-from tests.test_integration import loaded as loaded
 
 pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
 

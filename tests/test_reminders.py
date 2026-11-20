@@ -14,7 +14,6 @@ from custom_components.subzero.api import ApiError, ChannelOpened, RateLimited, 
 from custom_components.subzero.fcm import FcmAlerts
 from tests.common import async_fire_time_changed
 from tests.test_fcm import message
-from tests.test_integration import loaded as loaded
 
 pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
 

@@ -17,7 +17,6 @@ from homeassistant.util import dt as dt_util
 from custom_components.subzero.api import ApiError, RateLimited, StateUpdate
 from custom_components.subzero.coordinator import SubZeroCoordinator
 from tests.common import async_fire_time_changed
-from tests.test_integration import loaded as loaded
 
 pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
 

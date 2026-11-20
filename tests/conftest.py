@@ -7,7 +7,9 @@ from unittest.mock import AsyncMock, patch
 
 import jwt
 import pytest
+from homeassistant.config_entries import ConfigEntryState
 from homeassistant.helpers import device_registry as dr
+from homeassistant.util.unit_system import US_CUSTOMARY_SYSTEM
 
 from custom_components.subzero.api import Appliance, StateUpdate, token_state
 from custom_components.subzero.const import DOMAIN
@@ -111,3 +113,77 @@ async def cloud_appliance(hass, tokens, request, enable_custom_integrations):
         )
         await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()
+
+
+@pytest.fixture
+async def loaded(hass, tokens, request, enable_custom_integrations):
+    hass.config.units = US_CUSTOMARY_SYSTEM
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Kitchen",
+        unique_id="test-fridge",
+        data={
+            "device_id": "test-fridge",
+            "temperature_unit": getattr(request, "param", "F"),
+            "tokens": token_state(tokens),
+        },
+        # Timing tests use five-minute checks explicitly.
+        options={"status_poll_interval": 300},
+    )
+    entry.add_to_hass(hass)
+    updates = asyncio.Queue()
+    connected = asyncio.Event()
+    disconnected = asyncio.Event()
+
+    async def watch(device_ids):
+        assert isinstance(device_ids, list)
+        client.watched.append(device_ids)
+        client.push_connected = True
+        connected.set()
+        try:
+            while True:
+                event = await updates.get()
+                if isinstance(event, Exception):
+                    raise event
+                yield event if isinstance(event, tuple) else ("test-fridge", event)
+        finally:
+            client.push_connected = False
+            disconnected.set()
+
+    with patch("custom_components.subzero.SubZeroClient") as factory:
+        client = factory.return_value
+        client.tokens = token_state(tokens)
+        client.notification_stats = {
+            "received": 0,
+            "ignored": 0,
+            "invalid": 0,
+            "last_received": None,
+        }
+        client.watched = []
+        client.open_channel = AsyncMock()
+        client.appliance_faults = AsyncMock(return_value=[])
+        client.fault_metadata = AsyncMock(return_value=None)
+        client.appliances = AsyncMock(
+            return_value=[
+                Appliance("test-fridge", "Kitchen", getattr(request, "param", "F")),
+                Appliance("test-oven", "Wall oven", "F"),
+            ]
+        )
+        client.state = AsyncMock(
+            return_value={
+                "appliance_model": "ANOTHER-MODEL",
+                "ref_set_temp": 38,
+                "ref_door_ajar": False,
+                "ap_ssid": "private-network",
+                "appliance_serial": "private-serial",
+                "version": {"fw": "1.0"},
+            }
+        )
+        client.watch = watch
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        await connected.wait()
+        yield entry, client, updates, disconnected, factory
+        if entry.state is ConfigEntryState.LOADED:
+            await hass.config_entries.async_unload(entry.entry_id)
+            await hass.async_block_till_done()
