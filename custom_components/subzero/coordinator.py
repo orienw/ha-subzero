@@ -6,9 +6,9 @@ import random
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta, tzinfo
+from datetime import datetime, timedelta, tzinfo
 from itertools import cycle
+from typing import override
 
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import HomeAssistant, callback
@@ -45,7 +45,6 @@ from .const import (
     FAULT_METADATA_APPLIES_TO_BY_SERIES,
     ICE_DELAY_KEYS,
     KITCHEN_TIMERS,
-    MAX_EVENT_HISTORY,
     MAX_RECONNECT_DELAY,
     PRIVATE_KEYS,
     RECONNECT_DELAY,
@@ -68,9 +67,17 @@ from .controls import (
     start_properties,
     start_temperature,
     supports_air_filter_reset,
-    uptime_seconds,
     validate_control_properties,
     wash_cancel_enabled,
+)
+from .state import (
+    EventTracker,
+    PendingRead,
+    StateConfirmation,
+    StateRead,
+    discard_excluded,
+    snapshot_is_older,
+    with_known_type,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -83,19 +90,6 @@ FOLLOWUP_KEYS = {key for key in BINARY_KEYS if key.endswith(("door_ajar", "timer
     "kitchen_timer2_active",
     "wash_cycle_on",
 }
-
-
-@dataclass(frozen=True)
-class StateRead:
-    request: int
-    confirmed_at: datetime | None
-    error: Exception | None = None
-    published: int = 0
-    conflicted: bool = False
-    # State keys status reads have reported that the published state lacks.
-    missing_keys: tuple[str, ...] = ()
-    # The reply was discarded for a snapshot that replaced state after a reconnect.
-    superseded: bool = False
 
 
 def status_poll_interval(entry: ConfigEntry) -> int:
@@ -171,11 +165,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self._pending_read_error_requests: set[int] = set()
         self._read_task: asyncio.Task[StateRead] | None = None
         self._completed_read: StateRead | None = None
-        # Updates during a status read, each with whether it was a confirming snapshot
-        # and whether it replaced cached state.
-        self._read_updates: list[tuple[StateUpdate, bool, bool]] | None = None
-        self._read_snapshot: dict | None = None
-        self._read_error: Exception | None = None
+        self._active_read: PendingRead | None = None
         self._channel_error: ApiError | None = None
         # Sign-in failed and no update has succeeded since. Kept apart from
         # last_exception, which a later transport error replaces.
@@ -183,32 +173,78 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self._transport_error: ApiError | None = None
         self._transport_generation = 0
         self._transport_grace_task: asyncio.Task | None = None
-        self._event_cutoff = dt_util.utcnow()
-        self._event_ids: dict[tuple[datetime, int, int], str] = {}
-        self._paired_events: set[tuple[datetime, int, int]] = set()
+        self._events = EventTracker(dt_util.utcnow())
         self._event_listeners: list[Callable[[dict], None]] = []
-        self._history_seen = False
         self._followup_task: asyncio.Task | None = None
         self._followup_alert = False
         self._last_followup = 0.0
-        self.confirmed_at: datetime | None = None
-        self._confirmation = 0
-        self._confirmation_transport_generation = 0
-        self._confirmation_model: str | None = None
-        # The state keys each source has reported for the model. Status reads and
-        # pushed snapshots can report different sets, so each is held to its own.
-        self._required_state_keys: dict[str, set[str]] = {"snapshot": set(), "read": set()}
+        self._state = StateConfirmation()
         self._published = 0
-        # What each source's latest observation lacked of the keys it is held to, and
-        # what the observation that last confirmed state lacked. Recorded, not enforced.
-        self.missing_state_keys: dict[str, list[str]] = {"snapshot": [], "read": []}
-        self.confirmed_missing_keys: list[str] = []
         self.verification_stats: dict[str, int | str | None] = {
             "checks": 0,
             "complete_snapshots": 0,
             "status_reads": 0,
             "last_success": None,
         }
+
+    @property
+    def confirmed_at(self) -> datetime | None:
+        return self._state.confirmed_at
+
+    @property
+    def missing_state_keys(self) -> dict[str, list[str]]:
+        return self._state.missing_keys
+
+    @property
+    def confirmed_missing_keys(self) -> list[str]:
+        return self._state.confirmed_missing_keys
+
+    @property
+    def transport_healthy(self) -> bool:
+        return self._transport_error is None
+
+    @property
+    def waiting_for_push(self) -> bool:
+        return self._transport_error is not None and self._channel_error is None
+
+    @property
+    def needs_recovery(self) -> bool:
+        return (
+            not self.last_update_success or self._transport_error is not None
+        ) and self._channel_error is None
+
+    @property
+    def can_verify_state(self) -> bool:
+        if self._sign_in_failed:
+            return False
+        return self.last_update_success or (
+            self._channel_error is None
+            and not isinstance(self.last_exception, ConfigEntryAuthFailed | InvalidAuth)
+        )
+
+    @callback
+    def on_channel_opened(self) -> None:
+        if self._active_read is not None:
+            self._active_read.error = None
+        self._channel_error = None
+
+    @callback
+    def on_channel_error(self, error: ApiError) -> None:
+        self._channel_error = error
+        self.async_set_update_error(error)
+
+    @callback
+    def on_account_error(self, error: Exception) -> None:
+        if isinstance(error, InvalidAuth) and self._active_read is not None:
+            self._active_read.error = error
+        self.async_set_update_error(error)
+
+    @callback
+    def cancel_followup(self) -> None:
+        self._followup_alert = False
+        if self._followup_task is not None:
+            self._followup_task.cancel()
+            self._followup_task = None
 
     async def async_verify_state(self) -> None:
         """Verify state without reopening a working update channel."""
@@ -281,53 +317,6 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         if isinstance(err, ConfigEntryAuthFailed | InvalidAuth):
             self._sign_in_failed = True
         super().async_set_update_error(err)
-
-    @callback
-    def _confirm_state(self, properties: dict, source: str, *, certify: bool = True) -> bool:
-        """Record what the source reports and lacks, and certify the state.
-
-        A key the observation lacks is noted in missing_state_keys, for diagnostics
-        and the State confirmed sensor; it does not keep the observation from
-        confirming state. Sources do omit keys the integration has seen (the fridge's
-        status reply lacks the notification history its snapshots carry, an oven's
-        snapshots vary in `cav_remote_ready`), and refusing to confirm left appliances
-        unavailable and controls refused for one missing key.
-        """
-        model = properties.get("appliance_model")
-        if not isinstance(model, str) or not model:
-            self.missing_state_keys[source] = ["appliance_model"]
-            return False
-        if model != self._confirmation_model:
-            if not certify:
-                # A reply that concurrent updates contradict does not switch models.
-                return False
-            self._confirmation_model = model
-            for reported in self._required_state_keys.values():
-                reported.clear()
-        # Like _discard_excluded, an observation without a usable type keeps the
-        # known one; properties the app discards for it are not state.
-        typed = properties if appliance_type(properties) is not None else self.data
-        excluded = excluded_properties(typed) if typed.get("appliance_model") == model else set()
-        # A read replaces state, so it is held to what reads report. A snapshot
-        # merges into that state, so also to what snapshots report. A key only
-        # ever pushed as a partial update is never expected, since no read or
-        # snapshot can refresh it.
-        required = set(self._required_state_keys["read"])
-        if source == "snapshot":
-            required |= self._required_state_keys["snapshot"]
-        missing = self.missing_state_keys[source] = sorted(required - properties.keys() - excluded)
-        reported = properties.keys() & (STATE_KEYS - {"notifs"} - excluded)
-        if appliance_type(properties) is None:
-            # An unusable type never reaches state.
-            reported.discard("appliance_type")
-        self._required_state_keys[source].update(reported)
-        if not certify:
-            return False
-        self.confirmed_at = dt_util.utcnow()
-        self.confirmed_missing_keys = missing
-        self._confirmation += 1
-        self._confirmation_transport_generation = self._transport_generation
-        return True
 
     def _active_conditions(self) -> set[str]:
         return {key for key in FOLLOWUP_KEYS if self.data.get(key) is True}
@@ -412,26 +401,12 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
 
     @callback
     def _process_events(self, properties: dict, *, history: bool) -> None:
-        # The first snapshot or status read sets the baseline, even without history.
-        # Later history still passes through the startup timestamp cutoff.
-        deliver = self._history_seen or not history
-        self._history_seen |= history
-        events = {}
-        for record in notification_records(properties):
-            timestamp = appliance_datetime(record["timestamp"], self.clock_zone)
-            if timestamp is not None:
-                # Identify by instant: a local time in a repeated hour never equals a UTC time.
-                identity = (timestamp.astimezone(UTC), record["notif_seq"], record["notif_type"])
-                events[identity] = timestamp
-        for identity in sorted(events):
-            _, sequence, code = identity
-            self.async_receive_event(
-                events[identity],
-                sequence,
-                code,
-                deliver=deliver,
-                source="history" if history else "channel",
-            )
+        deliver, records = self._events.extract_records(
+            properties, self.clock_zone, history=history
+        )
+        source = "history" if history else "channel"
+        for timestamp, sequence, code in records:
+            self.async_receive_event(timestamp, sequence, code, deliver=deliver, source=source)
 
     @callback
     def async_receive_event(
@@ -444,44 +419,9 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         source: str = "channel",
     ) -> bool:
         """Deliver an event once across state history, stream and Firebase copies."""
-        identity = (timestamp.astimezone(UTC), sequence, code)
-        if identity[0] < self._event_cutoff:
+        event = self._events.record(timestamp, sequence, code, deliver=deliver, source=source)
+        if event is None:
             return False
-        if (known := self._event_ids.get(identity)) is not None:
-            if (known == "firebase") != (source == "firebase"):
-                self._paired_events.add(identity)
-            return False
-        # Firebase rounds event time to whole seconds; stream and history keep
-        # milliseconds. Pair each event with at most one copy from the other path.
-        counterpart = min(
-            (
-                old
-                for old, origin in self._event_ids.items()
-                if (origin == "firebase") != (source == "firebase")
-                and old not in self._paired_events
-                and old[1:] == (sequence, code)
-                and abs(old[0] - identity[0]) < timedelta(seconds=1)
-            ),
-            key=lambda old: abs(old[0] - identity[0]),
-            default=None,
-        )
-        self._event_ids[identity] = source
-        if counterpart is not None:
-            self._paired_events.update((identity, counterpart))
-        if len(self._event_ids) > MAX_EVENT_HISTORY:
-            oldest = min(self._event_ids)
-            del self._event_ids[oldest]
-            self._paired_events.discard(oldest)
-            self._event_cutoff = max(self._event_cutoff, oldest[0] + timedelta(microseconds=1))
-        if counterpart is not None or not deliver:
-            return False
-        event = {
-            "code": code,
-            "sequence": sequence,
-            "appliance_timestamp": timestamp.isoformat(),
-            "received_at": dt_util.utcnow().isoformat(),
-            "source": source,
-        }
         for listener in self._event_listeners:
             listener(event)
         self.async_schedule_followup(alert=True)
@@ -526,7 +466,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             if (
                 self._transport_error is not None
                 or not self.client.push_connected
-                or self._missing_read_keys(self.data)
+                or self._state.missing_read_keys(self.data)
             ):
                 try:
                     await self._async_read_for_control()
@@ -538,10 +478,6 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             except asyncio.CancelledError:
                 self._unsettled = True
                 raise
-
-    def _missing_read_keys(self, data: dict) -> list[str]:
-        """The keys status reads have reported for the model that this state lacks."""
-        return sorted(self._required_state_keys["read"] - data.keys() - excluded_properties(data))
 
     async def _async_read_for_control(self) -> None:
         """Refresh state before a write that would otherwise check reduced state.
@@ -855,7 +791,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             raise HomeAssistantError(str(error)) from error
         if result.conflicted:
             raise HomeAssistantError("Appliance state changed during the status read; try again.")
-        if self._confirmation_transport_generation != self._transport_generation:
+        if self._state.transport_generation != self._transport_generation:
             raise HomeAssistantError(
                 "The push connection changed during the status read; try again."
             )
@@ -890,7 +826,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         request = self._read_requests
         report_error = bool(self._pending_read_error_requests)
         self._pending_read_error_requests.clear()
-        confirmation = self._confirmation
+        confirmation = self._state.count
         try:
             data, conflicted, missing, superseded = await self._async_fetch_state()
         except Exception as error:
@@ -913,8 +849,8 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         confirmed = (
             self.confirmed_at
             if not conflicted
-            and self._confirmation > confirmation
-            and self._confirmation_transport_generation == self._transport_generation
+            and self._state.count > confirmation
+            and self._state.transport_generation == self._transport_generation
             else None
         )
         result = self._completed_read = StateRead(
@@ -946,6 +882,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         else:
             self._read_failed(self)
 
+    @override
     @callback
     def _async_refresh_finished(self) -> None:
         if not self.last_update_success:
@@ -965,103 +902,13 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
 
     async def _async_fetch_state(self) -> tuple[dict, bool, list[str], bool]:
         async with self._state_lock:
-            transport_generation = self._transport_generation
-            self._read_updates = []
-            self._read_snapshot = None
-            self._read_error = None
+            pending = PendingRead(self._transport_generation)
+            self._active_read = pending
             try:
-                received = True
-                superseded = False
-                started = time.monotonic()
-                _LOGGER.debug("Reading status for %s", self.device["name"])
-                try:
-                    data = await self.client.state(self.device_id)
-                except ApiError as error:
-                    _LOGGER.debug(
-                        "%s status request failed after %.3fs: %s",
-                        self.device["name"],
-                        time.monotonic() - started,
-                        type(error).__name__,
-                    )
-                    updates, _, _, _ = self._pending_read_properties(self.data)
-                    model = updates.get("appliance_model")
-                    # Only a complete snapshot rescues a failed request: the rescue
-                    # merges into cached state, so a snapshot lacking a key would
-                    # confirm whatever that key last held.
-                    if not isinstance(model, str) or not model or self._read_snapshot is None:
-                        raise
-                    data = self.data
-                    received = False
-                else:
-                    _LOGGER.debug(
-                        "%s status response after %.3fs: %s",
-                        self.device["name"],
-                        time.monotonic() - started,
-                        _state_for_log(data),
-                    )
-                if error := self._read_error:
-                    raise error
-                updates, partial_keys, dropped, restarted = self._pending_read_properties(data)
-                current = transport_generation == self._transport_generation
-                if received and restarted and not current:
-                    # The reply predates a snapshot that replaced state after a reconnect.
-                    # Like the updates before that snapshot it does not survive, and the
-                    # snapshot rescues the read as if the request had failed.
-                    data, received, superseded = self.data, False, True
-                # Arrival during a GET does not establish when a partial change
-                # happened. Publish it immediately, but do not certify the merged
-                # state when it contradicts the status reply or a complete pushed
-                # snapshot that rescued a failed GET. Against a reply, dropped values
-                # stand in for keys it supplies; a rescue must keep every key.
-                reference = data if received else self._read_snapshot
-                observed_keys = partial_keys if received else updates.keys() | partial_keys
-                observed = {**dropped, **updates} if received else updates
-                model = updates.get("appliance_model")
-                other_model = (
-                    isinstance(model, str) and model and model != data.get("appliance_model")
-                )
-                # Clock and signal readings differ between any two observations, an
-                # observation without a usable type keeps the known one, and a
-                # property the app discards for the type the published state will
-                # carry never reaches it.
-                published = self._with_known_type({**({} if other_model else data), **updates})
-                conflicted = reference is not None and any(
-                    key not in reference
-                    or key not in observed
-                    or observed[key] != reference[key]
-                    or type(observed[key]) is not type(reference[key])
-                    for key in observed_keys
-                    - {"notifs", "time", "uptime", "ap_rssi", "appliance_type"}
-                    - excluded_properties(published)
-                )
-                if received and (not model or model == data.get("appliance_model")):
-                    # A reply published after a conflict or a reconnect still shows
-                    # what reads report, so it is recorded without certifying state.
-                    self._confirm_state(data, "read", certify=current and not conflicted)
-                    # The reply and newer updates replace cached state, so a current
-                    # reply ends the wait on reconnect whatever it lacks.
-                    if current:
-                        self._async_confirm_transport_state()
-                self.unrecognized_keys.update(data.keys() - STATE_KEYS)
-                if "notifs" in data:
-                    data = {**data, "notifs": notification_records(data)}
-                if other_model:
-                    data = {}
-                history = data.get("notifs")
-                data = {
-                    **{key: value for key, value in data.items() if key in STATE_KEYS},
-                    **updates,
-                }
-                if history is not None and received:
-                    # A rescued or superseded read starts from cached state, which
-                    # already holds the records pushed during the read.
-                    data["notifs"] = [*history, *updates.get("notifs", [])]
-                data = self._discard_excluded(data)
-                # What the published state lacks of the keys reads report, for the
-                # read_status response. A snapshot during the read may have confirmed
-                # state the result no longer carries.
-                missing = self._missing_read_keys(data)
-                return data, conflicted, missing, superseded
+                data, received = await self._async_request_state(pending)
+                if pending.error is not None:
+                    raise pending.error
+                return self._resolve_read(pending, data, received)
             except InvalidAuth as error:
                 raise ConfigEntryAuthFailed(str(error)) from error
             except RateLimited as error:
@@ -1069,87 +916,105 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             except ApiError as error:
                 raise UpdateFailed(str(error)) from error
             finally:
-                self._read_updates = None
-                self._read_snapshot = None
-                self._read_error = None
+                self._active_read = None
 
-    def _snapshot_is_older(self, properties: dict, reference: dict) -> bool:
-        if properties.get("appliance_model") != reference.get("appliance_model"):
-            return False
-        observed = appliance_datetime(properties.get("time"), self.clock_zone)
-        previous = appliance_datetime(reference.get("time"), self.clock_zone)
-        uptime = properties.get("uptime")
-        previous_uptime = reference.get("uptime")
-        if (
-            observed is None
-            or previous is None
-            or not isinstance(uptime, str)
-            or not isinstance(previous_uptime, str)
-        ):
-            return False
-        uptime = uptime_seconds(uptime)
-        previous_uptime = uptime_seconds(previous_uptime)
-        # Truncated appliance uptime can have minute precision. Requiring both
-        # clocks to regress also allows clock adjustments and ordinary reboots.
-        return (
-            uptime is not None
-            and previous_uptime is not None
-            and uptime <= previous_uptime - 60
-            and observed <= previous - timedelta(minutes=1)
+    async def _async_request_state(self, pending: PendingRead) -> tuple[dict, bool]:
+        started = time.monotonic()
+        _LOGGER.debug("Reading status for %s", self.device["name"])
+        try:
+            data = await self.client.state(self.device_id)
+        except ApiError as error:
+            _LOGGER.debug(
+                "%s status request failed after %.3fs: %s",
+                self.device["name"],
+                time.monotonic() - started,
+                type(error).__name__,
+            )
+            updates, _, _, _ = pending.replay(self.data, self.clock_zone)
+            model = updates.get("appliance_model")
+            # Only a complete snapshot rescues a failed request: the rescue
+            # merges into cached state, so a snapshot lacking a key would
+            # confirm whatever that key last held.
+            if not isinstance(model, str) or not model or pending.snapshot is None:
+                raise
+            return self.data, False
+        _LOGGER.debug(
+            "%s status response after %.3fs: %s",
+            self.device["name"],
+            time.monotonic() - started,
+            _state_for_log(data),
         )
+        return data, True
 
-    def _pending_read_properties(self, reference: dict) -> tuple[dict, set[str], dict, bool]:
-        """Replay the updates received during a read over its reference state.
-
-        Returns the properties to publish, the keys whose timing against the
-        reference is unknown, the values a replacing snapshot dropped, and whether
-        such a snapshot restarted the replay.
-        """
-        properties = {}
-        partial_keys = set()
-        dropped = {}
-        restarted = False
-        for update, confirmed_snapshot, replaced in self._read_updates or ():
-            if update.full:
-                if self._snapshot_is_older(update.properties, reference):
-                    continue
-                if update.properties["appliance_model"] != reference.get("appliance_model"):
-                    properties.clear()
-                    partial_keys.clear()
-                    dropped.clear()
-                    reference = {}
-                elif replaced:
-                    # The replay starts over from a snapshot that replaced state. What it
-                    # drops was still observed, so it stays recorded for the conflict
-                    # check, and the reference keeps its clocks to order later snapshots.
-                    partial_keys.update(properties)
-                    dropped.update(properties)
-                    properties.clear()
-                    restarted = True
-            if confirmed_snapshot:
-                partial_keys.difference_update(update.properties)
-            else:
-                partial_keys.update(update.properties)
-            properties.update(update.properties)
-            reference = {**reference, **update.properties}
-        return properties, partial_keys, dropped, restarted
-
-    def _with_known_type(self, data: dict) -> dict:
-        """Like the app, an observation without a usable type keeps the type already
-        known for the same appliance model."""
-        if (
-            appliance_type(data) is None
-            and appliance_type(self.data) is not None
-            and data.get("appliance_model") == self.data.get("appliance_model")
-        ):
-            return {**data, "appliance_type": self.data["appliance_type"]}
-        return data
-
-    def _discard_excluded(self, data: dict) -> dict:
-        """Drop the properties the app discards for the appliance type."""
-        data = self._with_known_type(data)
-        excluded = excluded_properties(data)
-        return {key: value for key, value in data.items() if key not in excluded}
+    def _resolve_read(
+        self, pending: PendingRead, data: dict, received: bool
+    ) -> tuple[dict, bool, list[str], bool]:
+        superseded = False
+        updates, partial_keys, dropped, restarted = pending.replay(data, self.clock_zone)
+        current = pending.transport_generation == self._transport_generation
+        if received and restarted and not current:
+            # The reply predates a snapshot that replaced state after a reconnect.
+            # Like the updates before that snapshot it does not survive, and the
+            # snapshot rescues the read as if the request had failed.
+            data, received, superseded = self.data, False, True
+        # Arrival during a GET does not establish when a partial change
+        # happened. Publish it immediately, but do not certify the merged
+        # state when it contradicts the status reply or a complete pushed
+        # snapshot that rescued a failed GET. Against a reply, dropped values
+        # stand in for keys it supplies; a rescue must keep every key.
+        reference = data if received else pending.snapshot
+        observed_keys = partial_keys if received else updates.keys() | partial_keys
+        observed = {**dropped, **updates} if received else updates
+        model = updates.get("appliance_model")
+        other_model = isinstance(model, str) and model and model != data.get("appliance_model")
+        # Clock and signal readings differ between any two observations, an
+        # observation without a usable type keeps the known one, and a
+        # property the app discards for the type the published state will
+        # carry never reaches it.
+        published = with_known_type({**({} if other_model else data), **updates}, self.data)
+        conflicted = reference is not None and any(
+            key not in reference
+            or key not in observed
+            or observed[key] != reference[key]
+            or type(observed[key]) is not type(reference[key])
+            for key in observed_keys
+            - {"notifs", "time", "uptime", "ap_rssi", "appliance_type"}
+            - excluded_properties(published)
+        )
+        if received and (not model or model == data.get("appliance_model")):
+            # A reply published after a conflict or a reconnect still shows
+            # what reads report, so it is recorded without certifying state.
+            self._state.confirm(
+                data,
+                self.data,
+                "read",
+                self._transport_generation,
+                certify=current and not conflicted,
+            )
+            # The reply and newer updates replace cached state, so a current
+            # reply ends the wait on reconnect whatever it lacks.
+            if current:
+                self._async_confirm_transport_state()
+        self.unrecognized_keys.update(data.keys() - STATE_KEYS)
+        if "notifs" in data:
+            data = {**data, "notifs": notification_records(data)}
+        if other_model:
+            data = {}
+        history = data.get("notifs")
+        data = {
+            **{key: value for key, value in data.items() if key in STATE_KEYS},
+            **updates,
+        }
+        if history is not None and received:
+            # A rescued or superseded read starts from cached state, which
+            # already holds the records pushed during the read.
+            data["notifs"] = [*history, *updates.get("notifs", [])]
+        data = discard_excluded(data, self.data)
+        # What the published state lacks of the keys reads report, for the
+        # read_status response. A snapshot during the read may have confirmed
+        # state the result no longer carries.
+        missing = self._state.missing_read_keys(data)
+        return data, conflicted, missing, superseded
 
     async def async_recover(self) -> None:
         """Restore unavailable state while the appliance is reporting again."""
@@ -1211,14 +1076,16 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
     def apply_update(self, update: StateUpdate) -> bool:
         self.push_stats["snapshots" if update.full else "updates"] += 1
         self.push_stats["last_received"] = dt_util.utcnow().isoformat()
-        if update.full and self._snapshot_is_older(update.properties, self.data):
+        if update.full and snapshot_is_older(update.properties, self.data, self.clock_zone):
             _LOGGER.debug("Ignoring an older snapshot from %s", self.device["name"])
             return False
         self.unrecognized_keys.update(update.properties.keys() - STATE_KEYS)
         if zone := clock_zone(update.properties.get("time")):
             self.clock_zone = zone
         properties = {key: value for key, value in update.properties.items() if key in STATE_KEYS}
-        confirmed_snapshot = update.full and self._confirm_state(properties, "snapshot")
+        confirmed_snapshot = update.full and self._state.confirm(
+            properties, self.data, "snapshot", self._transport_generation
+        )
         # Like a read, the snapshot that ends a push interruption replaces cached
         # state, so values only pushed as partial updates do not outlive it.
         replace = update.full and (
@@ -1235,7 +1102,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             confirmed_snapshot
             and replace
             and bool(self.missing_state_keys["snapshot"])
-            and self._read_updates is None
+            and self._active_read is None
         )
         if "appliance_type" in properties and appliance_type(properties) is None:
             # Like the app, an unusable type does not replace the known one.
@@ -1243,15 +1110,15 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         if "notifs" in properties:
             properties["notifs"] = notification_records(properties)
         if properties:
-            self._read_error = None
             self._channel_error = None
-            if self._read_updates is not None:
-                self._read_updates.append(
-                    (StateUpdate(properties, full=update.full), confirmed_snapshot, replace)
+            if self._active_read is not None:
+                self._active_read.record_update(
+                    properties,
+                    full=update.full,
+                    confirmed_snapshot=confirmed_snapshot,
+                    replace=replace,
+                    complete=not self.missing_state_keys["snapshot"],
                 )
-                if confirmed_snapshot and not self.missing_state_keys["snapshot"]:
-                    # The reference a failed request is rescued and checked against.
-                    self._read_snapshot = properties
         if confirmed_snapshot and not self.missing_state_keys["snapshot"]:
             self.verification_stats["complete_snapshots"] += 1
         _LOGGER.debug(
@@ -1261,7 +1128,9 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             _state_for_log(properties),
         )
         if self.last_update_success or update.full:
-            updated = self._discard_excluded(properties if replace else {**self.data, **properties})
+            updated = discard_excluded(
+                properties if replace else {**self.data, **properties}, self.data
+            )
             if update.full and not replace:
                 self._count_snapshot_flips(update, properties, updated)
             if (
@@ -1432,11 +1301,7 @@ class SubZeroAccount:
         finally:
             self._initial_states.clear()
         for coordinator in self.coordinators.values():
-            if (
-                (not coordinator.last_update_success or coordinator._transport_error is not None)
-                and coordinator._channel_error is None
-                and self.client.push_connected
-            ):
+            if coordinator.needs_recovery and self.client.push_connected:
                 self._start_recovery(coordinator)
         if metadata_error is not None:
             _LOGGER.warning(
@@ -1454,10 +1319,7 @@ class SubZeroAccount:
         """Apply the state-check interval without interrupting appliance updates."""
         if self.entry.pref_disable_polling:
             for coordinator in self.coordinators.values():
-                coordinator._followup_alert = False
-                if coordinator._followup_task is not None:
-                    coordinator._followup_task.cancel()
-                    coordinator._followup_task = None
+                coordinator.cancel_followup()
         interval = 0 if self.entry.pref_disable_polling else status_poll_interval(self.entry)
         self._outage_checks = not self.entry.pref_disable_polling and self._push_interrupted()
         if self._outage_checks:
@@ -1478,10 +1340,7 @@ class SubZeroAccount:
 
     def _push_interrupted(self) -> bool:
         """Whether a reachable appliance waits for push to return and reconfirm its state."""
-        return any(
-            coordinator._transport_error is not None and coordinator._channel_error is None
-            for coordinator in self.coordinators.values()
-        )
+        return any(coordinator.waiting_for_push for coordinator in self.coordinators.values())
 
     @callback
     def _async_cancel_state_checks(self) -> None:
@@ -1500,16 +1359,8 @@ class SubZeroAccount:
         if (
             self.entry.pref_disable_polling
             or not self._state_check_interval
-            or (
-                not coordinator.last_update_success
-                and (
-                    coordinator._channel_error is not None
-                    or isinstance(coordinator.last_exception, ConfigEntryAuthFailed | InvalidAuth)
-                )
-            )
-            or coordinator._sign_in_failed
-            or pending is not None
-            and not pending.done()
+            or not coordinator.can_verify_state
+            or (pending is not None and not pending.done())
         ):
             return
         self._verifications[coordinator.device_id] = self.entry.async_create_background_task(
@@ -1521,9 +1372,7 @@ class SubZeroAccount:
     @callback
     def set_error(self, error: Exception) -> None:
         for coordinator in self.coordinators.values():
-            if isinstance(error, InvalidAuth):
-                coordinator._read_error = error
-            coordinator.async_set_update_error(error)
+            coordinator.on_account_error(error)
         for ready in self._initial_states.values():
             ready.set()
 
@@ -1539,8 +1388,7 @@ class SubZeroAccount:
     def _read_failed(self, coordinator: SubZeroCoordinator) -> None:
         if (
             self.entry.state is ConfigEntryState.LOADED
-            and (not coordinator.last_update_success or coordinator._transport_error is not None)
-            and coordinator._channel_error is None
+            and coordinator.needs_recovery
             and self.client.push_connected
             and not isinstance(coordinator.last_exception, ConfigEntryAuthFailed)
         ):
@@ -1559,18 +1407,16 @@ class SubZeroAccount:
                     coordinator = self.coordinators[device_id]
                     accepted = True
                     if isinstance(update, ApiError):
-                        coordinator._channel_error = update
-                        coordinator.async_set_update_error(update)
+                        coordinator.on_channel_error(update)
                     elif isinstance(update, ChannelOpened):
-                        coordinator._read_error = None
-                        coordinator._channel_error = None
+                        coordinator.on_channel_opened()
                     else:
                         accepted = coordinator.apply_update(update)
                     if isinstance(update, ApiError) or (
                         isinstance(update, StateUpdate)
                         and update.full
                         and accepted
-                        and coordinator._transport_error is None
+                        and coordinator.transport_healthy
                     ):
                         if recovery := recoveries.pop(device_id, None):
                             canceled.add(recovery)
@@ -1579,16 +1425,15 @@ class SubZeroAccount:
                         if ready := self._initial_states.get(device_id):
                             ready.set()
                     if (
-                        (
-                            not coordinator.last_update_success
-                            or coordinator._transport_error is not None
-                        )
+                        (not coordinator.last_update_success or not coordinator.transport_healthy)
                         and device_id not in self._initial_states
                         and not isinstance(coordinator.last_exception, ConfigEntryAuthFailed)
                         and (
                             isinstance(update, ChannelOpened)
-                            or isinstance(update, StateUpdate)
-                            and not update.properties.keys().isdisjoint(STATE_KEYS)
+                            or (
+                                isinstance(update, StateUpdate)
+                                and not update.properties.keys().isdisjoint(STATE_KEYS)
+                            )
                         )
                     ):
                         self._start_recovery(coordinator)

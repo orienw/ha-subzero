@@ -249,7 +249,7 @@ async def test_verification_does_not_overlap_and_stops_on_unload(hass, loaded):
     await hass.async_block_till_done()
     assert disconnected.is_set()
     assert task.cancelled()
-    assert account.coordinators["test-fridge"]._read_updates is None
+    assert account.coordinators["test-fridge"]._active_read is None
     async_fire_time_changed(hass, started + timedelta(seconds=903))
     await hass.async_block_till_done()
     client.state.assert_awaited_once_with("test-fridge")

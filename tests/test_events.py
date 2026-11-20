@@ -188,7 +188,7 @@ async def test_bounded_history_does_not_replay_evicted_events(hass, cloud_applia
     await cloud_appliance.update({"notifs": history})
     count = len(event_changes(events))
     assert count == MAX_EVENT_HISTORY + 2
-    assert len(cloud_appliance.coordinator._event_ids) == MAX_EVENT_HISTORY
+    assert len(cloud_appliance.coordinator._events.seen) == MAX_EVENT_HISTORY
     await cloud_appliance.update({**cloud_appliance.state, "notifs": history}, full=True)
     assert len(event_changes(events)) == count
 
@@ -198,7 +198,7 @@ async def test_events_at_the_last_supported_instant_are_ignored(hass, cloud_appl
     # Evicting the oldest would move the cutoff past the last supported instant.
     history = [record(i, 201, last) for i in range(MAX_EVENT_HISTORY + 1)]
     await cloud_appliance.update({"notifs": history})
-    assert not cloud_appliance.coordinator._event_ids
+    assert not cloud_appliance.coordinator._events.seen
     assert hass.states.get("event.kitchen_appliance_event").state != "unavailable"
 
 

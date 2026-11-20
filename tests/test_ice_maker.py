@@ -302,7 +302,7 @@ async def test_schedule_service_tries_the_devices_own_account_then_the_others(
             # An appliance without delay settings never reported them in a status read,
             # so their absence is not a gap a control should read to fill.
             del coordinator.data["delay_duration"]
-            coordinator._required_state_keys["read"].discard("delay_duration")
+            coordinator._state.required_keys["read"].discard("delay_duration")
         original = coordinator.async_set_ice_delay
 
         async def attempt(*args, name=name, original=original):
