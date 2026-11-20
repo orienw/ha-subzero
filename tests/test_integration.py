@@ -579,6 +579,71 @@ async def test_setup_read_before_the_channel_opens_does_not_establish_live_updat
         assert client.state.await_count == 1
 
 
+@pytest.mark.parametrize("refused", [False, True], ids=["first-opening", "after-a-refusal"])
+async def test_setup_read_spanning_the_channel_opening_reads_again(hass, loaded, refused):
+    entry, client, _, _, _ = loaded
+    updates = asyncio.Queue()
+    opened = asyncio.Event()
+    fridge = dict(client.state.return_value)
+
+    async def watch(device_ids):
+        client.push_connected = True
+        while True:
+            event = await updates.get()
+            yield "test-fridge", event
+            if isinstance(event, ChannelOpened):
+                opened.set()
+
+    async def state(device_id):
+        if client.state.await_count > 1:
+            return {**fridge, "ref_door_ajar": True}
+        if refused:
+            await updates.put(ApiError("Channel rejected"))
+        # The door opens after the read sampled it, before the channel opened.
+        await updates.put(ChannelOpened())
+        await opened.wait()
+        return fridge
+
+    client.watch = watch
+    client.state.reset_mock()
+    client.state.side_effect = state
+    await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.LOADED
+    assert client.state.await_count == 2
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
+    assert entry.runtime_data.coordinators["test-fridge"].transport_healthy
+
+
+async def test_setup_read_survives_the_first_stream_attempt_failing(hass, loaded):
+    entry, client, _, _, _ = loaded
+    reading, failed = asyncio.Event(), asyncio.Event()
+
+    async def watch(device_ids):
+        if not failed.is_set():
+            await reading.wait()
+            failed.set()
+            raise ApiError("Handshake failed")
+        await asyncio.Event().wait()
+        yield
+
+    async def state(device_id):
+        if client.state.await_count == 1:
+            reading.set()
+            await failed.wait()
+        return client.state.return_value
+
+    client.watch = watch
+    client.state.reset_mock()
+    client.state.side_effect = state
+    await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.LOADED
+    assert client.state.await_count == 2
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
+    assert not entry.runtime_data.coordinators["test-fridge"].transport_healthy
+
+
 async def test_startup_stream_auth_failure_stops_before_status_reads(hass, loaded):
     entry, client, _, _, _ = loaded
 

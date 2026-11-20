@@ -164,7 +164,7 @@ async def test_confirm_on_an_established_link_changes_nothing():
     assert link.healthy
     assert not link.in_grace
     assert not link.expired
-    assert link.epoch == 0
+    assert link.epoch == 1
     assert tasks == []
     assert expired == []
 
@@ -260,11 +260,13 @@ async def test_read_on_a_returned_stream_needs_the_channel_open_to_confirm():
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
-async def test_channel_opening_without_an_interruption_changes_nothing():
+async def test_first_channel_opening_outdates_a_read_from_before_it():
     link, _, tasks = make_link()
-    link.channel_opened()
+    assert link.channel_opened()
     assert link.healthy
-    assert link.epoch == 0
+    assert link.epoch == 1
+    assert not link.channel_opened()
+    assert link.epoch == 1
     assert tasks == []
 
 
@@ -275,7 +277,7 @@ async def test_unconfirm_requires_a_read_without_changing_the_connection():
     link.unconfirm(first)
     link.unconfirm(later)
     assert link.error is first
-    assert link.epoch == 0
+    assert link.epoch == 1
     assert link.expired
     try:
         # Fresh state is kept available while a read has yet to confirm it.

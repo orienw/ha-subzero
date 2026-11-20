@@ -5,7 +5,7 @@ What the coordinator guarantees, and what it does not:
 - State is the latest observation. A status read replaces it, and live updates are
   laid over it as they arrive. Nothing orders a read against an update that arrives
   while the read is in flight, so the update stands. A reply that spans the stream
-  ending, or the appliance's channel opening after an interruption, is not published.
+  ending, or the appliance's channel opening, is not published.
 - Live updates are either established for an appliance or they are not. They stop
   being established when the stream is lost, the appliance's update channel is
   refused, or a status read completes before the channel has opened. They are
@@ -169,9 +169,8 @@ class PushLink:
         if self.channel_open:
             return False
         self.channel_open = True
-        if self.error is not None:
-            # A read from before the channel opened cannot confirm what it delivers.
-            self.epoch += 1
+        # A read from before the channel opened cannot confirm what it delivers.
+        self.epoch += 1
         return True
 
     def confirm(self, *, push_connected: bool) -> None:
@@ -882,6 +881,9 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
     async def async_config_entry_first_refresh(self) -> None:
         """Read initial state during setup, raising auth or not-ready errors."""
         result = await self._async_read_result()
+        if result.error is None and result.epoch != self._push.epoch:
+            # The connection changed around the read, so read again on it.
+            result = await self._async_read_result()
         if isinstance(result.error, ConfigEntryAuthFailed):
             raise result.error
         if self.last_update_success and self.confirmed_at is not None and not self._push.expired:
