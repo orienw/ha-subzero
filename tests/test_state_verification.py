@@ -414,7 +414,7 @@ async def test_conflicted_read_after_push_returns_ends_the_reconnect_wait(freeze
     read_during(coordinator, client, partial(ref_door_ajar=True))
     await read_conflicts(coordinator)
     assert coordinator.data["ref_door_ajar"] is True
-    assert coordinator._transport_error is None
+    assert coordinator.transport_healthy
 
 
 @pytest.mark.parametrize(

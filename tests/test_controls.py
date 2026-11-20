@@ -720,7 +720,7 @@ async def test_control_waits_for_reconnect_snapshot_followup_read_without_refusi
     await controls.updates.put(("test-fridge", StateUpdate(snapshot, full=True)))
     await asyncio.wait_for(reading.wait(), 1)
     assert coordinator.last_update_success
-    assert coordinator._transport_error is None
+    assert coordinator.transport_healthy
     assert "max_ice_on" not in coordinator.data
 
     command = asyncio.create_task(coordinator.async_set_properties({"frz_set_temp": 1}))

@@ -18,7 +18,7 @@ class StateRead:
     confirmed_at: datetime | None
     error: Exception | None = None
     conflicted: bool = False
-    transport_changed: bool = False
+    epoch: int = 0
 
 
 def snapshot_is_older(properties: dict, reference: dict, zone: tzinfo | None) -> bool:
@@ -69,8 +69,8 @@ def discard_excluded(data: dict, known: dict) -> dict:
 class PendingRead:
     """Collect pushed updates arriving during a status read and merge them over the reply."""
 
-    def __init__(self, transport_generation: int) -> None:
-        self.transport_generation = transport_generation
+    def __init__(self, epoch: int) -> None:
+        self.epoch = epoch
         self.updates: list[StateUpdate] = []
         self.error: Exception | None = None
 

@@ -575,7 +575,7 @@ async def test_full_service_at_startup_is_not_logged_as_an_error(hass, loaded, c
     assert entry.state is ConfigEntryState.LOADED
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
     # Status checks still run until push connects.
-    assert entry.runtime_data.coordinators["test-fridge"]._transport_error is not None
+    assert not entry.runtime_data.coordinators["test-fridge"].transport_healthy
 
 
 async def test_an_appliance_left_unread_by_setup_is_reported(hass, loaded, caplog):
@@ -1218,7 +1218,7 @@ async def test_incomplete_snapshot_ends_a_reconnect_wait_and_a_read_fills_what_i
     await hass.async_block_till_done()
     # The snapshot confirms state and ends the wait with what it carries.
     assert coordinator.confirmed_at > confirmed
-    assert coordinator._transport_error is None
+    assert coordinator.transport_healthy
     assert coordinator.last_update_success
     assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "40"
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "unavailable"
@@ -1301,7 +1301,7 @@ async def test_status_checks_keep_state_available_until_push_returns(
         async_fire_time_changed(hass, dt_util.utcnow())
         await hass.async_block_till_done()
     assert client.state.await_count == 4
-    assert coordinator._transport_error is not None
+    assert not coordinator.transport_healthy
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
 
     # Push returns and its snapshot reconfirms state, so the checks stop.
@@ -1311,7 +1311,7 @@ async def test_status_checks_keep_state_available_until_push_returns(
     assert len(client.watched) == 2
     await updates.put(StateUpdate(dict(client.state.return_value), full=True))
     await hass.async_block_till_done()
-    assert coordinator._transport_error is None
+    assert coordinator.transport_healthy
     reads_after_recovery = client.state.await_count
     for _ in range(3):
         freezer.tick(60)
