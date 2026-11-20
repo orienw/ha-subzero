@@ -10,7 +10,6 @@ from homeassistant.config_entries import RELOAD_AFTER_UPDATE_DELAY
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
-from homeassistant.helpers.update_coordinator import UpdateFailed
 from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 
@@ -581,8 +580,6 @@ async def test_failed_read_with_snapshot_then_conflicting_push_is_unconfirmed(
         assert coordinator.verification_stats["last_success"] is None
     else:
         await read_conflicts(coordinator)
-    # The cached result an older refresh adopts; nothing public exposes it.
-    assert coordinator._completed_read.confirmed_at is None
     assert coordinator.last_update_success
     assert coordinator.data["ref_door_ajar"] is True
 
@@ -1321,8 +1318,8 @@ async def test_an_older_refresh_cannot_overwrite_a_newer_read_or_snapshot(
         assert coordinator.confirmed_missing_keys == ["ref_door_ajar"]
     if newer == "rate_limited":
         client.state.side_effect = RateLimited(60)
-        with pytest.raises(UpdateFailed):
-            await coordinator._async_update_data()
+        with pytest.raises(HomeAssistantError):
+            await coordinator.async_read_status()
 
 
 async def test_verification_resumes_after_auth_failure_is_recovered_by_push(

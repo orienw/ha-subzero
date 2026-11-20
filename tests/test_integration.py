@@ -191,7 +191,6 @@ async def test_verification_failure_preserves_available_push_state(hass, loaded)
     await hass.async_block_till_done()
     state = hass.states.get("binary_sensor.kitchen_refrigerator_door")
     confirmed = coordinator.confirmed_at
-    completed = coordinator._completed_read
     client.state.side_effect = ApiError("Status unavailable")
     started = dt_util.utcnow()
     async_fire_time_changed(hass, started + timedelta(seconds=301))
@@ -202,7 +201,6 @@ async def test_verification_failure_preserves_available_push_state(hass, loaded)
     assert state.state == "on"
     assert coordinator.last_update_success
     assert coordinator.confirmed_at == confirmed
-    assert coordinator._completed_read is completed
     assert coordinator.verification_stats["last_success"] is None
     assert not entry.runtime_data._recoveries
     assert client.state.await_count == 2

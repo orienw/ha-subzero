@@ -15,7 +15,6 @@ class StateRead:
     request: int
     confirmed_at: datetime | None
     error: Exception | None = None
-    published: int = 0
     conflicted: bool = False
     # State keys status reads have reported that the published state lacks.
     missing_keys: tuple[str, ...] = ()

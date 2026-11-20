@@ -8,7 +8,6 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, tzinfo
 from itertools import cycle
-from typing import override
 
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import HomeAssistant, callback
@@ -164,7 +163,6 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self._read_requests = 0
         self._pending_read_error_requests: set[int] = set()
         self._read_task: asyncio.Task[StateRead] | None = None
-        self._completed_read: StateRead | None = None
         self._active_read: PendingRead | None = None
         self._channel_error: ApiError | None = None
         # Sign-in failed and no update has succeeded since. Kept apart from
@@ -179,7 +177,6 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self._followup_alert = False
         self._last_followup = 0.0
         self._confirmation = StateConfirmation()
-        self._published = 0
         self.verification_stats: dict[str, int | str | None] = {
             "checks": 0,
             "complete_snapshots": 0,
@@ -328,7 +325,6 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
 
     @callback
     def async_set_updated_data(self, data: dict) -> None:
-        self._published += 1
         # Kept only while the oven is seen to stay idle in Remote Ready, which state
         # published after a gap cannot show.
         self.start_settings = {
@@ -779,26 +775,57 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 raise HomeAssistantError(str(error)) from error
             await self.async_refresh()
 
+    @callback
+    def _notify_read_error(self, error: Exception | None) -> None:
+        if error is None:
+            return
+        if isinstance(error, ConfigEntryAuthFailed):
+            self.entry.async_start_reauth(self.hass)
+        else:
+            self._read_failed(self)
+
+    @callback
+    def _async_read_finished(self, task: asyncio.Task[StateRead]) -> None:
+        if task.cancelled() or task.exception() is not None:
+            return
+        self._notify_read_error(task.result().error)
+
     async def async_refresh(self) -> None:
-        """Finish reading status even if the caller is cancelled."""
-        await asyncio.shield(
-            self.entry.async_create_background_task(
-                self.hass, super().async_refresh(), "Sub-Zero status read"
-            )
-        )
+        """Read status once and publish its outcome."""
+        result = await self._async_read_result()
+        self._notify_read_error(result.error)
 
     async def async_request_refresh(self) -> None:
         """Wait for a completed read rather than a debounced request."""
         await self.async_read_status()
 
+    async def async_config_entry_first_refresh(self) -> None:
+        """Read initial state during setup, raising auth or not-ready errors."""
+        result = await self._async_read_result()
+        if isinstance(result.error, ConfigEntryAuthFailed):
+            raise result.error
+        if result.error is not None:
+            if self.last_update_success:
+                self.last_exception = result.error
+                self.last_update_success = False
+            error = ConfigEntryNotReady(str(result.error))
+            error.__cause__ = result.error
+            raise error
+        if not self.last_update_success or (
+            self._transport_error is not None and self._transport_grace_task is None
+        ):
+            cause = self.last_exception or UpdateFailed(
+                "The appliance state was not reconfirmed after reconnecting."
+            )
+            error = ConfigEntryNotReady(str(cause))
+            error.__cause__ = cause
+            raise error
+
     async def async_read_status(self) -> StateRead:
         """Confirm state with a read that starts after this call."""
         result = await self._async_read_result()
         if error := result.error:
-            if isinstance(error, ConfigEntryAuthFailed):
-                self.entry.async_start_reauth(self.hass)
-            else:
-                self._read_failed(self)
+            self._notify_read_error(error)
             raise HomeAssistantError(str(error)) from error
         if result.conflicted:
             raise HomeAssistantError("Appliance state changed during the status read; try again.")
@@ -841,7 +868,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         try:
             data, conflicted, missing, superseded = await self._async_fetch_state()
         except Exception as error:
-            result = StateRead(request, None, error, self._published)
+            result = StateRead(request, None, error)
             deferred = isinstance(error, UpdateFailed) and error.retry_after is not None
             background_failure = (
                 not report_error
@@ -850,9 +877,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 and (self.client.push_connected or self._transport_grace_task is not None)
                 and self._channel_error is None
             )
-            # Unpublished failures must not be adopted by an older refresh.
             if not deferred and not background_failure:
-                self._completed_read = result
                 self.async_set_update_error(error)
             return result
         self.async_set_updated_data(data)
@@ -864,10 +889,9 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             and self._confirmation.transport_generation == self._transport_generation
             else None
         )
-        result = self._completed_read = StateRead(
+        result = StateRead(
             request,
             confirmed,
-            published=self._published,
             conflicted=conflicted,
             missing_keys=tuple(missing),
             superseded=superseded,
@@ -879,37 +903,6 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 self.hass, self._async_read_result(report_error=False), "Sub-Zero gap read"
             )
         return result
-
-    @callback
-    def _async_read_finished(self, task: asyncio.Task[StateRead]) -> None:
-        if (
-            task.cancelled()
-            or task.exception() is not None
-            or (error := task.result().error) is None
-        ):
-            return
-        if isinstance(error, ConfigEntryAuthFailed):
-            self.entry.async_start_reauth(self.hass)
-        else:
-            self._read_failed(self)
-
-    @override
-    @callback
-    def _async_refresh_finished(self) -> None:
-        if not self.last_update_success:
-            self._read_failed(self)
-
-    async def _async_update_data(self) -> dict:
-        result = await self._async_read_result()
-        if (latest := self._completed_read) is not None and latest.request > result.request:
-            result = latest
-        if result.error is not None and (
-            isinstance(result.error, ConfigEntryAuthFailed) or self._published <= result.published
-        ):
-            raise result.error
-        if self._transport_error is not None and self._transport_grace_task is None:
-            raise UpdateFailed("The appliance state was not reconfirmed after reconnecting.")
-        return self.data
 
     async def _async_fetch_state(self) -> tuple[dict, bool, list[str], bool]:
         async with self._state_lock:
