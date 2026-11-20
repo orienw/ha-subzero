@@ -57,7 +57,7 @@
   "services": {
     "read_status": {
       "name": "Read appliance status",
-      "description": "Read and confirm current appliance state before continuing. Fails if the appliance cannot be read, or if its state changes or the live connection drops or reconnects during the read.",
+      "description": "Read and confirm current appliance state before continuing. Fails if the appliance cannot be read, if the live connection changes during the read, or if the reply carries no usable state.",
       "fields": {
         "device_id": {"name": "Appliance", "description": "The appliance to read."}
       }
