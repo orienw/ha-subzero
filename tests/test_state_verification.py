@@ -187,18 +187,17 @@ async def test_old_full_push_does_not_publish_confirm_or_clear_an_error(hass, fr
 
 
 async def test_queued_old_full_push_does_not_cancel_account_recovery(hass, loaded, dated):
-    entry, _, updates, _, _ = loaded
-    account = entry.runtime_data
+    _, _, updates, _, _ = loaded
     coordinator, client, fresh, older = dated
     reading, release = blocked_read(client, reply=fresh)
     coordinator.async_set_update_error(ApiError("Status request failed"))
-    account._start_recovery(coordinator)
+    coordinator.start_recovery()
     await asyncio.wait_for(reading.wait(), 1)
-    recovery = account._recoveries["test-fridge"]
+    recovery = coordinator._recovery_task
     try:
         await updates.put(snapshot(older))
         await hass.async_block_till_done()
-        assert account._recoveries["test-fridge"] is recovery
+        assert coordinator._recovery_task is recovery
         assert not recovery.done()
         assert not recovery.cancelling()
         assert not coordinator.last_update_success
@@ -217,9 +216,7 @@ async def test_initial_read_discards_old_full_push_but_keeps_later_partial(
 ):
     entry, client, _, _, _ = loaded
     fresh, older = dated_snapshots
-    coordinator = SubZeroCoordinator(
-        hass, entry, client, "test-fridge", {"name": "Kitchen"}, Mock()
-    )
+    coordinator = SubZeroCoordinator(hass, entry, client, "test-fridge", {"name": "Kitchen"})
     read_during(coordinator, client, snapshot(older), partial(ref_set_temp=39), reply=fresh)
     await read_conflicts(coordinator)
     assert coordinator.data["ref_door_ajar"] is True
@@ -726,7 +723,7 @@ async def test_calls_during_a_read_share_a_newer_followup(hass, fridge):
 async def test_manual_request_during_background_read_reports_its_own_failure(hass, fridge):
     coordinator, client = fridge
     client.push_connected = True
-    coordinator._read_failed = Mock()
+    coordinator.start_recovery = Mock()
     reading, release = first_read_blocks(client, then=ApiError("Manual read failed"))
     background = asyncio.create_task(coordinator.async_verify_state())
     await asyncio.wait_for(reading.wait(), 1)
@@ -748,7 +745,7 @@ async def test_cancelled_queued_manual_read_does_not_change_later_background_fai
 ):
     coordinator, client = fridge
     client.push_connected = True
-    coordinator._read_failed = Mock()
+    coordinator.start_recovery = Mock()
     reading, release = first_read_blocks(client, then=ApiError("Background read failed"))
     background = asyncio.create_task(coordinator.async_verify_state())
     await asyncio.wait_for(reading.wait(), 1)

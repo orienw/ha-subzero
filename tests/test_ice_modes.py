@@ -122,7 +122,7 @@ async def test_failed_confirmation_read_recovers_without_a_push(hass, cloud_appl
 
     client.set_property.assert_awaited_once_with("appliance", "night_ice_on", False)
     assert not cloud_appliance.coordinator.last_update_success
-    recovery = cloud_appliance.entry.runtime_data._recoveries["appliance"]
+    recovery = cloud_appliance.coordinator._recovery_task
     assert not recovery.done()
     responding.set()
     await recovery

@@ -202,7 +202,7 @@ async def test_verification_failure_preserves_available_push_state(hass, loaded)
     assert coordinator.last_update_success
     assert coordinator.confirmed_at == confirmed
     assert coordinator.verification_stats["last_success"] is None
-    assert not entry.runtime_data._recoveries
+    assert coordinator._recovery_task is None
     assert client.state.await_count == 2
     client.state.side_effect = None
     async_fire_time_changed(hass, started + timedelta(seconds=602))
@@ -223,7 +223,7 @@ async def test_verification_failure_without_push_marks_state_unavailable(hass, l
     await entry.runtime_data._verifications["test-fridge"]
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "unavailable"
     assert not entry.runtime_data.coordinators["test-fridge"].last_update_success
-    assert not entry.runtime_data._recoveries
+    assert entry.runtime_data.coordinators["test-fridge"]._recovery_task is None
     assert client.state.await_count == 2
     client.open_channel.assert_not_awaited()
 
@@ -1166,7 +1166,7 @@ async def test_reconnects_and_partial_pushes_do_not_extend_the_grace(
     await updates.put(StateUpdate({"ref_set_temp": 39}, full=False))
     await hass.async_block_till_done()
     assert coordinator.confirmed_at == confirmed
-    recovery = entry.runtime_data._recoveries["test-fridge"]
+    recovery = coordinator._recovery_task
     freezer.tick(30)
     async_fire_time_changed(hass, dt_util.utcnow())
     await hass.async_block_till_done()
@@ -1579,7 +1579,7 @@ async def test_offline_channel_waits_for_reopen_before_status_checks(hass, loade
     client.state.assert_not_awaited()
     client.open_channel.assert_not_awaited()
     assert not coordinator.last_update_success
-    assert not entry.runtime_data._recoveries
+    assert coordinator._recovery_task is None
     await updates.put(ChannelOpened())
     await hass.async_block_till_done()
     client.state.assert_awaited_once_with("test-fridge")
@@ -1695,7 +1695,7 @@ async def test_shared_recovery_read_survives_stream_changes_and_stops_on_unload(
     await updates.put(ChannelOpened())
     await hass.async_block_till_done()
     assert reading.is_set()
-    recovery = entry.runtime_data._recoveries["test-fridge"]
+    recovery = entry.runtime_data.coordinators["test-fridge"]._recovery_task
     if finish == "unload":
         await hass.config_entries.async_unload(entry.entry_id)
         assert recovery.cancelled()
