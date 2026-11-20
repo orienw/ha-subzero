@@ -485,7 +485,7 @@ def temperature_range(key: str, data: dict) -> tuple[int, int] | None:
             _, series, middle, _ = parts
             if series == 13 and middle in {3, 6}:
                 return 34, 55
-            return 34, (45 if series in {1, 2, 22} or series == 5 and middle == 2 else 42)
+            return 34, (45 if series in {1, 2, 22} or (series == 5 and middle == 2) else 42)
         model = data.get("appliance_model", "")
         legacy = isinstance(model, str) and model.startswith(("BI", "IT", "IC", "ID"))
         return 34, (45 if legacy else 42)
@@ -542,7 +542,7 @@ def _validate_fridge_enum(data: dict, key: str, value) -> None:
 
 def _validate_dishwasher_enum(data: dict, key: str, value) -> None:
     values = WASH_CYCLES if key == "wash_cycle" else DISHWASHER_MODES.values()
-    if not is_int(value) or value not in values or key == "wash_cycle" and value == 0:
+    if not is_int(value) or value not in values or (key == "wash_cycle" and value == 0):
         raise ServiceValidationError("Select a supported dishwasher option.")
     if not is_int(data[key]) or data[key] not in values:
         raise ServiceValidationError("The current dishwasher setting is unknown.")

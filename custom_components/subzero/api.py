@@ -171,7 +171,7 @@ def _object(value, expected=dict) -> dict | list:
             except json.JSONDecodeError:
                 decoded = json.loads(f'"{value}"')
                 if decoded == value:
-                    raise ValueError
+                    raise ValueError from None
                 value = decoded
         except ValueError, RecursionError:
             raise ApiError("Sub-Zero sent an invalid notification.") from None
@@ -847,10 +847,8 @@ class SubZeroClient:
 
     async def set_property(self, device_id: str, key: str, value: bool | int) -> None:
         if not (
-            key in WRITABLE_BOOLEAN_KEYS
-            and type(value) is bool
-            or key in WRITABLE_INTEGER_KEYS
-            and type(value) is int
+            (key in WRITABLE_BOOLEAN_KEYS and type(value) is bool)
+            or (key in WRITABLE_INTEGER_KEYS and type(value) is int)
         ):
             raise ValueError("Unsupported setting or value type")
         response = await self._command(device_id, "set", {key: value})

@@ -208,11 +208,8 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         }
         registry = er.async_get(hass)
         for entity in er.async_entries_for_config_entry(registry, entry.entry_id):
-            if (
-                entity.domain == "binary_sensor"
-                and entity.unique_id in removed_binary_ids
-                or entity.domain == "sensor"
-                and entity.unique_id in removed_sensor_ids
+            if (entity.domain == "binary_sensor" and entity.unique_id in removed_binary_ids) or (
+                entity.domain == "sensor" and entity.unique_id in removed_sensor_ids
             ):
                 registry.async_remove(entity.entity_id)
         hass.config_entries.async_update_entry(entry, minor_version=2)

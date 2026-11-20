@@ -668,65 +668,76 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             if ice_mode(self.data) != mode:
                 raise HomeAssistantError("The appliance did not confirm the requested ice mode.")
 
+    async def _async_attempt_set_property(
+        self, key: str, value: bool | int, *, resend: bool, pending: dict | None
+    ) -> tuple[datetime | None, ApiError | None]:
+        requested_at = dt_util.utcnow()
+        matched = control_matches(self.data, key, value, requested_at, self.clock_zone)
+        if not resend or not matched:
+            validate_control_properties(
+                self.data, self.device.get("temperature_unit"), {key: value}, pending
+            )
+        confirmed = asyncio.Event()
+        acknowledged = False
+        command_error: ApiError | None = None
+
+        @callback
+        def confirm() -> None:
+            if self.last_update_success and control_matches(
+                self.data, key, value, requested_at, self.clock_zone
+            ):
+                confirmed.set()
+            else:
+                confirmed.clear()
+
+        remove_listener = self.async_add_listener(confirm)
+        try:
+            try:
+                async with asyncio.timeout(CONTROL_CONFIRM_TIMEOUT):
+                    try:
+                        await self.client.set_property(self.device_id, key, value)
+                    except RateLimited:
+                        raise
+                    except ApiError as error:
+                        command_error = error
+                    else:
+                        acknowledged = True
+                        if key not in KITCHEN_TIMERS:
+                            confirm()
+                        await asyncio.wait_for(confirmed.wait(), CONTROL_PUSH_TIMEOUT)
+            except TimeoutError:
+                pass
+            await self._async_confirm_command_generation()
+            if matched and not acknowledged:
+                # A value that already matched cannot confirm a write that
+                # failed or went unanswered.
+                return None, command_error
+            if not confirmed.is_set():
+                # A status read cancelled by the deadline would leave the
+                # appliance marked as failed, so it runs afterwards.
+                await self.async_refresh()
+                confirm()
+            return (requested_at if confirmed.is_set() else None), command_error
+        finally:
+            remove_listener()
+
     async def _async_set_property(
         self, key: str, value: bool | int, *, resend: bool = False, pending: dict | None = None
     ) -> datetime:
-        last_error = None
+        last_error: ApiError | None = None
         for attempt in range(3):
             await self._async_confirm_command_generation()
             if not self.last_update_success:
                 if attempt:
                     break
                 raise ServiceValidationError("The appliance is unavailable.")
-            requested_at = dt_util.utcnow()
-            matched = control_matches(self.data, key, value, requested_at, self.clock_zone)
-            if not resend or not matched:
-                validate_control_properties(
-                    self.data, self.device.get("temperature_unit"), {key: value}, pending
-                )
-            confirmed = asyncio.Event()
-            acknowledged = False
-
-            @callback
-            def confirm() -> None:
-                if self.last_update_success and control_matches(
-                    self.data, key, value, requested_at, self.clock_zone
-                ):
-                    confirmed.set()
-                else:
-                    confirmed.clear()
-
-            remove_listener = self.async_add_listener(confirm)
-            try:
-                try:
-                    async with asyncio.timeout(CONTROL_CONFIRM_TIMEOUT):
-                        try:
-                            await self.client.set_property(self.device_id, key, value)
-                        except RateLimited:
-                            raise
-                        except ApiError as error:
-                            last_error = error
-                        else:
-                            acknowledged = True
-                            if key not in KITCHEN_TIMERS:
-                                confirm()
-                            await asyncio.wait_for(confirmed.wait(), CONTROL_PUSH_TIMEOUT)
-                except TimeoutError:
-                    pass
-                await self._async_confirm_command_generation()
-                if matched and not acknowledged:
-                    # A value that already matched cannot confirm a write that
-                    # failed or went unanswered.
-                    continue
-                if not confirmed.is_set():
-                    # A status read cancelled by the deadline would leave the
-                    # appliance marked as failed, so it runs afterwards.
-                    await self.async_refresh()
-                    confirm()
-                if confirmed.is_set():
-                    return requested_at
-            finally:
-                remove_listener()
+            confirmed_at, error = await self._async_attempt_set_property(
+                key, value, resend=resend, pending=pending
+            )
+            if error is not None:
+                last_error = error
+            if confirmed_at is not None:
+                return confirmed_at
         message = "The appliance did not confirm the requested setting."
         if last_error is not None:
             message += f" Last command error: {last_error}"

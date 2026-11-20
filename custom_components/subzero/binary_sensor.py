@@ -212,8 +212,7 @@ async def async_setup_entry(
         SubZeroBinarySensor,
         lambda coordinator, description: (
             description.key in coordinator.data
-            or description.key == "sabbath_on"
-            and "mode" in coordinator.data
+            or (description.key == "sabbath_on" and "mode" in coordinator.data)
         ),
     )
 
@@ -233,7 +232,7 @@ class SubZeroBinarySensor(SubZeroEntity, BinarySensorEntity):
         value = data.get(self.entity_description.key)
         if self.entity_description.key == "sabbath_on":
             mode = data.get("mode")
-            if value is True or is_int(mode) and mode == DISHWASHER_SABBATH_MODE:
+            if value is True or (is_int(mode) and mode == DISHWASHER_SABBATH_MODE):
                 return True
             if "mode" in data:
                 if not is_int(mode) or mode not in {0, 1}:
