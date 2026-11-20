@@ -488,15 +488,20 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             if self._unsettled:
                 await self.async_refresh()
                 self._unsettled = False
+            while (
+                self._push.healthy
+                and self.client.push_connected
+                and self._snapshot_read_task is not None
+                and not self._snapshot_read_task.done()
+            ):
+                # Wait for a reconnect snapshot's follow-up read, but proceed if it
+                # fails so a transient error or rate limit does not lock out controls.
+                await asyncio.shield(self._snapshot_read_task)
             if not self._push.healthy or not self.client.push_connected:
                 try:
                     await self.async_read_status()
                 except HomeAssistantError as error:
                     raise ServiceValidationError(str(error)) from error
-            elif self._snapshot_read_task is not None and not self._snapshot_read_task.done():
-                # Wait for a reconnect snapshot's follow-up read, but proceed if it
-                # fails so a transient error or rate limit does not lock out controls.
-                await asyncio.shield(self._snapshot_read_task)
             self._command_generation = self._push.epoch
             try:
                 yield
@@ -878,6 +883,8 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         try:
             data, conflicted, confirmed_read, epoch = await self._async_fetch_state()
         except Exception as error:
+            if not isinstance(error, UpdateFailed | ConfigEntryAuthFailed):
+                _LOGGER.exception("Unexpected error fetching %s data", self.name)
             result = StateRead(request, None, error)
             deferred = isinstance(error, UpdateFailed) and error.retry_after is not None
             snapshot_arrived = (
@@ -967,8 +974,6 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 except Exception as error:
                     if self.last_update_success and self._push.healthy:
                         return
-                    if not isinstance(error, UpdateFailed):
-                        _LOGGER.exception("Sub-Zero state recovery failed unexpectedly")
                     if not self._push.in_grace:
                         self.async_set_update_error(error)
                     retry_after = (error.retry_after or 0) if isinstance(error, UpdateFailed) else 0
@@ -1028,12 +1033,8 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         )
         # A replacing snapshot after an interruption restores availability with what
         # it carries; one follow-up read fills in properties only status reads report.
-        follow_up_read = (
-            confirmed_snapshot
-            and recovering
-            and not self._sign_in_failed
-            and bool(self.data)
-            and (self._active_read is None or self._active_read.epoch != self._push.epoch)
+        needs_follow_up = (
+            confirmed_snapshot and recovering and not self._sign_in_failed and bool(self.data)
         )
         if confirmed_snapshot:
             self._push.confirm(push_connected=self.client.push_connected)
@@ -1069,11 +1070,21 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 self.async_set_updated_data(updated)
         if update.full or "notifs" in properties:
             self._process_events(properties, history=update.full)
-        if follow_up_read:
-            # Started after the snapshot is published, so the read replaces it.
-            self._snapshot_read_task = self.entry.async_create_background_task(
-                self.hass, self._async_read_result(report_error=False), "Sub-Zero reconnect read"
-            )
+        if needs_follow_up:
+            if (
+                self._active_read is not None
+                and self._active_read.epoch == self._push.epoch
+                and self._read_task is not None
+                and not self._read_task.done()
+            ):
+                self._snapshot_read_task = self._read_task
+            else:
+                # Started after the snapshot is published, so the read replaces it.
+                self._snapshot_read_task = self.entry.async_create_background_task(
+                    self.hass,
+                    self._async_read_result(report_error=False),
+                    "Sub-Zero reconnect read",
+                )
         if update.full and self.transport_healthy:
             self.cancel_recovery()
         elif recover and properties:

@@ -13,6 +13,7 @@ from homeassistant.util.unit_system import METRIC_SYSTEM, US_CUSTOMARY_SYSTEM
 from custom_components.subzero.api import (
     ApiError,
     Appliance,
+    ChannelOpened,
     RateLimited,
     StateUpdate,
     token_state,
@@ -739,6 +740,73 @@ async def test_control_waits_for_reconnect_snapshot_followup_read_without_refusi
         await command
         controls.client.set_property.assert_awaited_once_with("test-fridge", "frz_set_temp", 1)
     assert controls.client.state.await_count == 1
+
+
+async def test_control_waits_for_in_flight_recovery_read_when_reconnect_snapshot_arrives_first(
+    hass, controls
+):
+    coordinator = controls.entry.runtime_data.coordinators["test-fridge"]
+    controls.states["test-fridge"]["max_ice_on"] = True
+    reading, release = asyncio.Event(), asyncio.Event()
+
+    async def read(device_id):
+        reading.set()
+        await release.wait()
+        return dict(controls.states[device_id])
+
+    controls.client.state.reset_mock()
+    controls.client.state.side_effect = read
+    coordinator.async_transport_error(ApiError("Stream disconnected"))
+    # ChannelOpened starts the recovery read before the replacing snapshot arrives.
+    await controls.updates.put(("test-fridge", ChannelOpened()))
+    await asyncio.wait_for(reading.wait(), 1)
+    snapshot = {
+        key: value for key, value in controls.states["test-fridge"].items() if key != "max_ice_on"
+    }
+    await controls.updates.put(("test-fridge", StateUpdate(snapshot, full=True)))
+    await hass.async_block_till_done()
+    assert coordinator.last_update_success
+    assert coordinator.transport_healthy
+    assert "max_ice_on" not in coordinator.data
+
+    command = asyncio.create_task(coordinator.async_set_properties({"frz_set_temp": 1}))
+    await asyncio.sleep(0)
+    controls.client.set_property.assert_not_awaited()
+    release.set()
+    with pytest.raises(ServiceValidationError, match="Max ice"):
+        await command
+    controls.client.set_property.assert_not_awaited()
+    assert controls.client.state.await_count == 1
+
+
+async def test_control_rechecks_push_health_if_stream_drops_during_followup_wait(hass, controls):
+    coordinator = controls.entry.runtime_data.coordinators["test-fridge"]
+    reading, release = asyncio.Event(), asyncio.Event()
+
+    async def read(_device_id):
+        reading.set()
+        await release.wait()
+        raise ApiError("Could not connect to Sub-Zero.")
+
+    controls.client.state.reset_mock()
+    controls.client.state.side_effect = read
+    coordinator.async_set_update_error(ApiError("Channel error"))
+    snapshot = {
+        key: value for key, value in controls.states["test-fridge"].items() if key != "max_ice_on"
+    }
+    await controls.updates.put(("test-fridge", StateUpdate(snapshot, full=True)))
+    await asyncio.wait_for(reading.wait(), 1)
+
+    command = asyncio.create_task(coordinator.async_set_properties({"frz_set_temp": 1}))
+    await asyncio.sleep(0)
+    controls.client.set_property.assert_not_awaited()
+    controls.client.push_connected = False
+    coordinator.async_transport_error(ApiError("Stream disconnected"))
+    release.set()
+    with pytest.raises(ServiceValidationError, match="Could not connect to Sub-Zero"):
+        await command
+    controls.client.set_property.assert_not_awaited()
+    assert controls.client.state.await_count == 2
 
 
 async def test_disconnect_between_ordered_writes_rechecks_the_next_setting(hass, controls):
