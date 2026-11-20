@@ -1051,10 +1051,13 @@ async def test_reconnect_waits_then_recovers_from_push_without_polling(
     async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=delay + 1))
     await hass.async_block_till_done()
     assert client.watched == [["test-fridge"], ["test-fridge"]]
-    await updates.put(StateUpdate({**client.state.return_value, "ref_set_temp": 39}, full=True))
+    client.state.assert_awaited_once()
+    fresh = {**client.state.return_value, "ref_set_temp": 39}
+    client.state.return_value = fresh
+    await updates.put(StateUpdate(fresh, full=True))
     await hass.async_block_till_done()
     assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "39"
-    client.state.assert_awaited_once()
+    assert client.state.await_count == 2
 
 
 @pytest.mark.parametrize("stream_error", [False, True])
@@ -1131,15 +1134,15 @@ async def test_reconnect_confirms_state_when_periodic_checks_are_disabled(
     await hass.async_block_till_done()
     assert client.watched == [["test-fridge"], ["test-fridge"]]
     fresh = {**client.state.return_value, "ref_door_ajar": True}
+    client.state.return_value = fresh
     if recovery == "read":
-        client.state.return_value = fresh
         await updates.put(ChannelOpened())
     else:
         await updates.put(StateUpdate(fresh, full=True))
     await hass.async_block_till_done()
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
     assert coordinator.confirmed_at > confirmed
-    assert client.state.await_count == reads + (recovery == "read")
+    assert client.state.await_count == reads + 1
     freezer.tick(91)
     async_fire_time_changed(hass, dt_util.utcnow())
     await hass.async_block_till_done()
@@ -1217,11 +1220,9 @@ async def test_incomplete_snapshot_ends_a_reconnect_wait_and_a_read_fills_what_i
     assert coordinator.confirmed_at > confirmed
     assert coordinator._transport_error is None
     assert coordinator.last_update_success
-    assert "ref_door_ajar" in coordinator.missing_state_keys["snapshot"]
-    assert coordinator.confirmed_missing_keys == coordinator.missing_state_keys["snapshot"]
     assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "40"
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "unavailable"
-    # A read fills in the keys the snapshot lacked.
+    # A follow-up read fills in any keys the snapshot lacked.
     await asyncio.wait_for(reading.wait(), 1)
     release.set()
     await coordinator._read_task
@@ -1247,9 +1248,9 @@ async def test_snapshot_ending_a_reconnect_drops_values_only_pushed_as_partials(
     reads = client.state.await_count
     await updates.put(StateUpdate(dict(client.state.return_value), full=True))
     await hass.async_block_till_done()
-    # The snapshot ends the interruption without a read, but a value only a partial
-    # update reported may have changed meanwhile, so it does not survive.
-    assert client.state.await_count == reads
+    # The snapshot ends the interruption and triggers one follow-up read; a value
+    # only a partial update reported may have changed meanwhile, so it does not survive.
+    assert client.state.await_count == reads + 1
     assert coordinator.confirmed_at == dt_util.utcnow()
     assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "38"
     assert hass.states.get("binary_sensor.kitchen_freezer_door").state == "unavailable"
@@ -1278,8 +1279,6 @@ async def test_reconnected_read_restores_state_without_a_key_it_lacks(
     async_fire_time_changed(hass, dt_util.utcnow())
     await hass.async_block_till_done()
     assert client.state.await_count > reads
-    # A key only ever pushed as a partial update is not required of a read.
-    assert coordinator.missing_state_keys["read"] == []
     assert coordinator.confirmed_at > confirmed
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
 
@@ -1313,11 +1312,12 @@ async def test_status_checks_keep_state_available_until_push_returns(
     await updates.put(StateUpdate(dict(client.state.return_value), full=True))
     await hass.async_block_till_done()
     assert coordinator._transport_error is None
+    reads_after_recovery = client.state.await_count
     for _ in range(3):
         freezer.tick(60)
         async_fire_time_changed(hass, dt_util.utcnow())
         await hass.async_block_till_done()
-    assert client.state.await_count == 5
+    assert client.state.await_count == reads_after_recovery
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
 
 

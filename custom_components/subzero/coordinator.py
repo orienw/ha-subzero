@@ -55,7 +55,6 @@ from .controls import (
     appliance_type,
     clock_zone,
     control_matches,
-    excluded_properties,
     held_for_start,
     ice_mode,
     ice_mode_properties,
@@ -72,11 +71,9 @@ from .controls import (
 from .state import (
     EventTracker,
     PendingRead,
-    StateConfirmation,
     StateRead,
     discard_excluded,
     snapshot_is_older,
-    with_known_type,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -163,6 +160,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self._read_requests = 0
         self._pending_read_error_requests: set[int] = set()
         self._read_task: asyncio.Task[StateRead] | None = None
+        self._snapshot_read_task: asyncio.Task[StateRead] | None = None
         self._active_read: PendingRead | None = None
         self._channel_error: ApiError | None = None
         # Sign-in failed and no update has succeeded since. Kept apart from
@@ -176,25 +174,22 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self._followup_task: asyncio.Task | None = None
         self._followup_alert = False
         self._last_followup = 0.0
-        self._confirmation = StateConfirmation()
+        self.confirmed_at: datetime | None = None
+        self._confirmed_transport_generation = 0
         self.verification_stats: dict[str, int | str | None] = {
             "checks": 0,
-            "complete_snapshots": 0,
             "status_reads": 0,
             "last_success": None,
         }
 
-    @property
-    def confirmed_at(self) -> datetime | None:
-        return self._confirmation.confirmed_at
-
-    @property
-    def missing_state_keys(self) -> dict[str, list[str]]:
-        return self._confirmation.missing_keys
-
-    @property
-    def confirmed_missing_keys(self) -> list[str]:
-        return self._confirmation.confirmed_missing_keys
+    @callback
+    def _certify_state(self, properties: dict) -> bool:
+        model = properties.get("appliance_model")
+        if not isinstance(model, str) or not model:
+            return False
+        self.confirmed_at = dt_util.utcnow()
+        self._confirmed_transport_generation = self._transport_generation
+        return True
 
     @property
     def transport_healthy(self) -> bool:
@@ -459,15 +454,15 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             if self._unsettled:
                 await self.async_refresh()
                 self._unsettled = False
-            if (
-                self._transport_error is not None
-                or not self.client.push_connected
-                or self._confirmation.missing_read_keys(self.data)
-            ):
+            if self._transport_error is not None or not self.client.push_connected:
                 try:
-                    await self._async_read_for_control()
+                    await self.async_read_status()
                 except HomeAssistantError as error:
                     raise ServiceValidationError(str(error)) from error
+            elif self._snapshot_read_task is not None and not self._snapshot_read_task.done():
+                # Wait for a reconnect snapshot's follow-up read, but proceed if it
+                # fails so a transient error or rate limit does not lock out controls.
+                await asyncio.shield(self._snapshot_read_task)
             self._command_generation = self._transport_generation
             try:
                 yield
@@ -475,32 +470,9 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 self._unsettled = True
                 raise
 
-    async def _async_read_for_control(self) -> None:
-        """Refresh state before a write that would otherwise check reduced state.
-
-        A write's interlock checks skip keys the state does not carry, so when the
-        state lacks a key status reads have reported, whether a reduced reply or a
-        reduced snapshot that replaced state left it that way, a read restores it
-        first. The write then proceeds on what the read returned: a reply that still
-        lacks the key does not block it, since the appliance enforces its own
-        interlocks and refusing would refuse every control for as long as replies
-        lack that key. A reply discarded for a snapshot that replaced state is
-        another matter: the snapshot may lack what the reply carried, so the write
-        waits for a read that stands.
-        """
-        result = await self.async_read_status()
-        for _ in range(2):
-            if not (result.superseded and result.missing_keys):
-                return
-            result = await self.async_read_status()
-        if result.superseded and result.missing_keys:
-            raise HomeAssistantError(
-                "The push connection kept changing during the status read; try again."
-            )
-
     async def _async_confirm_command_generation(self) -> None:
         if self._command_generation != self._transport_generation:
-            await self._async_read_for_control()
+            await self.async_read_status()
             self._command_generation = self._transport_generation
 
     async def async_set_properties(self, properties: dict, *, force: bool = False) -> None:
@@ -804,6 +776,12 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         result = await self._async_read_result()
         if isinstance(result.error, ConfigEntryAuthFailed):
             raise result.error
+        if (
+            self.last_update_success
+            and self.data.get("appliance_model")
+            and not (self._transport_error is not None and self._transport_grace_task is None)
+        ):
+            return
         if result.error is not None:
             if self.last_update_success:
                 self.last_exception = result.error
@@ -811,15 +789,12 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             error = ConfigEntryNotReady(str(result.error))
             error.__cause__ = result.error
             raise error
-        if not self.last_update_success or (
-            self._transport_error is not None and self._transport_grace_task is None
-        ):
-            cause = self.last_exception or UpdateFailed(
-                "The appliance state was not reconfirmed after reconnecting."
-            )
-            error = ConfigEntryNotReady(str(cause))
-            error.__cause__ = cause
-            raise error
+        cause = self.last_exception or UpdateFailed(
+            "The appliance state was not reconfirmed after reconnecting."
+        )
+        error = ConfigEntryNotReady(str(cause))
+        error.__cause__ = cause
+        raise error
 
     async def async_read_status(self) -> StateRead:
         """Confirm state with a read that starts after this call."""
@@ -829,7 +804,10 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             raise HomeAssistantError(str(error)) from error
         if result.conflicted:
             raise HomeAssistantError("Appliance state changed during the status read; try again.")
-        if self._confirmation.transport_generation != self._transport_generation:
+        if (
+            result.transport_changed
+            or self._confirmed_transport_generation != self._transport_generation
+        ):
             raise HomeAssistantError(
                 "The push connection changed during the status read; try again."
             )
@@ -864,12 +842,17 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         request = self._read_requests
         report_error = bool(self._pending_read_error_requests)
         self._pending_read_error_requests.clear()
-        confirmation = self._confirmation.count
+        confirmed_before = self.confirmed_at
         try:
-            data, conflicted, missing, superseded = await self._async_fetch_state()
+            data, conflicted, confirmed_read, transport_changed = await self._async_fetch_state()
         except Exception as error:
             result = StateRead(request, None, error)
             deferred = isinstance(error, UpdateFailed) and error.retry_after is not None
+            snapshot_arrived = (
+                isinstance(error, UpdateFailed)
+                and self.last_update_success
+                and self.confirmed_at != confirmed_before
+            )
             background_failure = (
                 not report_error
                 and isinstance(error, UpdateFailed)
@@ -877,42 +860,45 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 and (self.client.push_connected or self._transport_grace_task is not None)
                 and self._channel_error is None
             )
-            if not deferred and not background_failure:
+            if not deferred and not background_failure and not snapshot_arrived:
                 self.async_set_update_error(error)
             return result
         self.async_set_updated_data(data)
         self._process_events(data, history=True)
-        confirmed = (
-            self.confirmed_at
-            if not conflicted
-            and self._confirmation.count > confirmation
-            and self._confirmation.transport_generation == self._transport_generation
-            else None
-        )
-        result = StateRead(
+        confirmed = self.confirmed_at if confirmed_read else None
+        return StateRead(
             request,
             confirmed,
             conflicted=conflicted,
-            missing_keys=tuple(missing),
-            superseded=superseded,
+            transport_changed=transport_changed,
         )
-        if superseded and missing:
-            # The snapshot that replaced state superseded the reply, and lacks keys
-            # the reply would have supplied, so a fresh read fills them in.
-            self.entry.async_create_background_task(
-                self.hass, self._async_read_result(report_error=False), "Sub-Zero gap read"
-            )
-        return result
 
-    async def _async_fetch_state(self) -> tuple[dict, bool, list[str], bool]:
+    async def _async_fetch_state(self) -> tuple[dict, bool, bool, bool]:
         async with self._state_lock:
             pending = PendingRead(self._transport_generation)
             self._active_read = pending
             try:
-                data, received = await self._async_request_state(pending)
+                started = time.monotonic()
+                _LOGGER.debug("Reading status for %s", self.device["name"])
+                try:
+                    reply = await self.client.state(self.device_id)
+                except ApiError as error:
+                    _LOGGER.debug(
+                        "%s status request failed after %.3fs: %s",
+                        self.device["name"],
+                        time.monotonic() - started,
+                        type(error).__name__,
+                    )
+                    raise
+                _LOGGER.debug(
+                    "%s status response after %.3fs: %s",
+                    self.device["name"],
+                    time.monotonic() - started,
+                    _state_for_log(reply),
+                )
                 if pending.error is not None:
                     raise pending.error
-                return self._resolve_read(pending, data, received)
+                return self._resolve_read(pending, reply)
             except InvalidAuth as error:
                 raise ConfigEntryAuthFailed(str(error)) from error
             except RateLimited as error:
@@ -922,103 +908,16 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             finally:
                 self._active_read = None
 
-    async def _async_request_state(self, pending: PendingRead) -> tuple[dict, bool]:
-        started = time.monotonic()
-        _LOGGER.debug("Reading status for %s", self.device["name"])
-        try:
-            data = await self.client.state(self.device_id)
-        except ApiError as error:
-            _LOGGER.debug(
-                "%s status request failed after %.3fs: %s",
-                self.device["name"],
-                time.monotonic() - started,
-                type(error).__name__,
-            )
-            updates, _, _, _ = pending.replay(self.data, self.clock_zone)
-            model = updates.get("appliance_model")
-            # Only a complete snapshot rescues a failed request: the rescue
-            # merges into cached state, so a snapshot lacking a key would
-            # confirm whatever that key last held.
-            if not isinstance(model, str) or not model or pending.snapshot is None:
-                raise
-            return self.data, False
-        _LOGGER.debug(
-            "%s status response after %.3fs: %s",
-            self.device["name"],
-            time.monotonic() - started,
-            _state_for_log(data),
-        )
-        return data, True
-
-    def _resolve_read(
-        self, pending: PendingRead, data: dict, received: bool
-    ) -> tuple[dict, bool, list[str], bool]:
-        superseded = False
-        updates, partial_keys, dropped, restarted = pending.replay(data, self.clock_zone)
+    def _resolve_read(self, pending: PendingRead, reply: dict) -> tuple[dict, bool, bool, bool]:
         current = pending.transport_generation == self._transport_generation
-        if received and restarted and not current:
-            # The reply predates a snapshot that replaced state after a reconnect.
-            # Like the updates before that snapshot it does not survive, and the
-            # snapshot rescues the read as if the request had failed.
-            data, received, superseded = self.data, False, True
-        # Arrival during a GET does not establish when a partial change
-        # happened. Publish it immediately, but do not certify the merged
-        # state when it contradicts the status reply or a complete pushed
-        # snapshot that rescued a failed GET. Against a reply, dropped values
-        # stand in for keys it supplies; a rescue must keep every key.
-        reference = data if received else pending.snapshot
-        observed_keys = partial_keys if received else updates.keys() | partial_keys
-        observed = {**dropped, **updates} if received else updates
-        model = updates.get("appliance_model")
-        other_model = isinstance(model, str) and model and model != data.get("appliance_model")
-        # Clock and signal readings differ between any two observations, an
-        # observation without a usable type keeps the known one, and a
-        # property the app discards for the type the published state will
-        # carry never reaches it.
-        published = with_known_type({**({} if other_model else data), **updates}, self.data)
-        conflicted = reference is not None and any(
-            key not in reference
-            or key not in observed
-            or observed[key] != reference[key]
-            or type(observed[key]) is not type(reference[key])
-            for key in observed_keys
-            - {"notifs", "time", "uptime", "ap_rssi", "appliance_type"}
-            - excluded_properties(published)
-        )
-        if received and (not model or model == data.get("appliance_model")):
-            # A reply published after a conflict or a reconnect still shows
-            # what reads report, so it is recorded without certifying state.
-            self._confirmation.confirm(
-                data,
-                self.data,
-                "read",
-                self._transport_generation,
-                certify=current and not conflicted,
-            )
-            # The reply and newer updates replace cached state, so a current
-            # reply ends the wait on reconnect whatever it lacks.
-            if current:
-                self._async_confirm_transport_state()
-        self.unrecognized_keys.update(data.keys() - STATE_KEYS)
-        if "notifs" in data:
-            data = {**data, "notifs": notification_records(data)}
-        if other_model:
-            data = {}
-        history = data.get("notifs")
-        data = {
-            **{key: value for key, value in data.items() if key in STATE_KEYS},
-            **updates,
-        }
-        if history is not None and received:
-            # A rescued or superseded read starts from cached state, which
-            # already holds the records pushed during the read.
-            data["notifs"] = [*history, *updates.get("notifs", [])]
-        data = discard_excluded(data, self.data)
-        # What the published state lacks of the keys reads report, for the
-        # read_status response. A snapshot during the read may have confirmed
-        # state the result no longer carries.
-        missing = self._confirmation.missing_read_keys(data)
-        return data, conflicted, missing, superseded
+        data, conflicted = pending.merge(reply, self.data, self.clock_zone)
+        self.unrecognized_keys.update(reply.keys() - STATE_KEYS)
+        confirmed = False
+        if current:
+            if not conflicted:
+                confirmed = self._certify_state(data)
+            self._async_confirm_transport_state()
+        return data, conflicted, confirmed, not current
 
     async def async_recover(self) -> None:
         """Restore unavailable state while the appliance is reporting again."""
@@ -1087,9 +986,8 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         if zone := clock_zone(update.properties.get("time")):
             self.clock_zone = zone
         properties = {key: value for key, value in update.properties.items() if key in STATE_KEYS}
-        confirmed_snapshot = update.full and self._confirmation.confirm(
-            properties, self.data, "snapshot", self._transport_generation
-        )
+        confirmed_snapshot = update.full and self._certify_state(properties)
+        recovering = not self.last_update_success or self._transport_error is not None
         # Like a read, the snapshot that ends a push interruption replaces cached
         # state, so values only pushed as partial updates do not outlive it.
         replace = update.full and (
@@ -1097,17 +995,20 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             or properties.get("appliance_model") != self.data.get("appliance_model")
             or (confirmed_snapshot and self._transport_error is not None)
         )
+        # A replacing snapshot after an interruption restores availability with what
+        # it carries; one follow-up read fills in properties only status reads report.
+        follow_up_read = (
+            confirmed_snapshot
+            and recovering
+            and not self._sign_in_failed
+            and bool(self.data)
+            and (
+                self._active_read is None
+                or self._active_read.transport_generation != self._transport_generation
+            )
+        )
         if confirmed_snapshot:
             self._async_confirm_transport_state()
-        # The snapshot restores availability with what it carries; a read fills in
-        # the keys it lacked instead of holding the appliance back. A read already
-        # running publishes its own view of the state.
-        fill_gaps = (
-            confirmed_snapshot
-            and replace
-            and bool(self.missing_state_keys["snapshot"])
-            and self._active_read is None
-        )
         if "appliance_type" in properties and appliance_type(properties) is None:
             # Like the app, an unusable type does not replace the known one.
             del properties["appliance_type"]
@@ -1116,15 +1017,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         if properties:
             self._channel_error = None
             if self._active_read is not None:
-                self._active_read.record_update(
-                    properties,
-                    full=update.full,
-                    confirmed_snapshot=confirmed_snapshot,
-                    replace=replace,
-                    complete=not self.missing_state_keys["snapshot"],
-                )
-        if confirmed_snapshot and not self.missing_state_keys["snapshot"]:
-            self.verification_stats["complete_snapshots"] += 1
+                self._active_read.record_update(properties, full=update.full)
         _LOGGER.debug(
             "%s %s: %s",
             self.device["name"],
@@ -1148,10 +1041,10 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 self.async_set_updated_data(updated)
         if update.full or "notifs" in properties:
             self._process_events(properties, history=update.full)
-        if fill_gaps:
+        if follow_up_read:
             # Started after the snapshot is published, so the read replaces it.
-            self.entry.async_create_background_task(
-                self.hass, self._async_read_result(report_error=False), "Sub-Zero gap read"
+            self._snapshot_read_task = self.entry.async_create_background_task(
+                self.hass, self._async_read_result(report_error=False), "Sub-Zero reconnect read"
             )
         return True
 

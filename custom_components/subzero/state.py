@@ -1,4 +1,4 @@
-"""Appliance state confirmation, concurrent read replay, and event deduplication."""
+"""Appliance state filtering, concurrent read merging, and event deduplication."""
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, tzinfo
@@ -9,6 +9,8 @@ from .api import StateUpdate, notification_records
 from .const import MAX_EVENT_HISTORY, STATE_KEYS
 from .controls import appliance_datetime, appliance_type, excluded_properties, uptime_seconds
 
+CONFLICT_IGNORED_KEYS = frozenset({"notifs", "time", "uptime", "ap_rssi", "appliance_type"})
+
 
 @dataclass(frozen=True)
 class StateRead:
@@ -16,10 +18,7 @@ class StateRead:
     confirmed_at: datetime | None
     error: Exception | None = None
     conflicted: bool = False
-    # State keys status reads have reported that the published state lacks.
-    missing_keys: tuple[str, ...] = ()
-    # The reply was discarded for a snapshot that replaced state after a reconnect.
-    superseded: bool = False
+    transport_changed: bool = False
 
 
 def snapshot_is_older(properties: dict, reference: dict, zone: tzinfo | None) -> bool:
@@ -68,14 +67,11 @@ def discard_excluded(data: dict, known: dict) -> dict:
 
 
 class PendingRead:
-    """Track pushed updates, complete snapshots, and auth errors during a status read."""
+    """Collect pushed updates arriving during a status read and merge them over the reply."""
 
     def __init__(self, transport_generation: int) -> None:
         self.transport_generation = transport_generation
-        # Updates during a status read, each with whether it was a confirming snapshot
-        # and whether it replaced cached state.
-        self.updates: list[tuple[StateUpdate, bool, bool]] = []
-        self.snapshot: dict | None = None
+        self.updates: list[StateUpdate] = []
         self.error: Exception | None = None
 
     def fail(self, error: Exception) -> None:
@@ -84,131 +80,58 @@ class PendingRead:
     def clear_error(self) -> None:
         self.error = None
 
-    def record_update(
-        self,
-        properties: dict,
-        *,
-        full: bool,
-        confirmed_snapshot: bool,
-        replace: bool,
-        complete: bool,
-    ) -> None:
+    def record_update(self, properties: dict, *, full: bool) -> None:
         self.error = None
-        self.updates.append((StateUpdate(properties, full=full), confirmed_snapshot, replace))
-        if confirmed_snapshot and complete:
-            # The reference a failed request is rescued and checked against.
-            self.snapshot = properties
+        self.updates.append(StateUpdate(properties, full=full))
 
-    def replay(self, reference: dict, zone: tzinfo | None) -> tuple[dict, set[str], dict, bool]:
-        """Replay the updates received during a read over its reference state.
+    def merge(self, reply: dict, known: dict, zone: tzinfo | None) -> tuple[dict, bool]:
+        """Merge pushes received during a read over its reply.
 
-        Returns the properties to publish, the keys whose timing against the
-        reference is unknown, the values a replacing snapshot dropped, and whether
-        such a snapshot restarted the replay.
+        Returns (published_data, conflicted). Arrival during a GET does not
+        establish when a partial change happened, so it is published immediately
+        but marks the read conflicted when it disagrees with the reply.
         """
-        properties = {}
+        pushed: dict = {}
         partial_keys: set[str] = set()
-        dropped = {}
-        restarted = False
-        for update, confirmed_snapshot, replaced in self.updates:
+        reference = reply
+        for update in self.updates:
             if update.full:
                 if snapshot_is_older(update.properties, reference, zone):
                     continue
-                if update.properties["appliance_model"] != reference.get("appliance_model"):
-                    properties.clear()
+                if update.properties.get("appliance_model") != reference.get("appliance_model"):
+                    pushed.clear()
                     partial_keys.clear()
-                    dropped.clear()
                     reference = {}
-                elif replaced:
-                    # The replay starts over from a snapshot that replaced state. What it
-                    # drops was still observed, so it stays recorded for the conflict
-                    # check, and the reference keeps its clocks to order later snapshots.
-                    partial_keys.update(properties)
-                    dropped.update(properties)
-                    properties.clear()
-                    restarted = True
-            if confirmed_snapshot:
-                partial_keys.difference_update(update.properties)
+                else:
+                    partial_keys.difference_update(update.properties)
             else:
                 partial_keys.update(update.properties)
-            properties.update(update.properties)
+            pushed.update(update.properties)
             reference = {**reference, **update.properties}
-        return properties, partial_keys, dropped, restarted
 
-
-class StateConfirmation:
-    """Track per-source reported state keys and state confirmation metadata."""
-
-    def __init__(self) -> None:
-        self.confirmed_at: datetime | None = None
-        self.count = 0
-        self.transport_generation = 0
-        self._model: str | None = None
-        # The state keys each source has reported for the model. Status reads and
-        # pushed snapshots can report different sets, so each is held to its own.
-        self.required_keys: dict[str, set[str]] = {"snapshot": set(), "read": set()}
-        # What each source's latest observation lacked of the keys it is held to, and
-        # what the observation that last confirmed state lacked. Recorded, not enforced.
-        self.missing_keys: dict[str, list[str]] = {"snapshot": [], "read": []}
-        self.confirmed_missing_keys: list[str] = []
-
-    def confirm(
-        self,
-        properties: dict,
-        current: dict,
-        source: str,
-        transport_generation: int,
-        *,
-        certify: bool = True,
-    ) -> bool:
-        """Record what the source reports and lacks, and certify the state.
-
-        A key the observation lacks is noted in missing_keys, for diagnostics
-        and the State confirmed sensor; it does not keep the observation from
-        confirming state. Sources do omit keys the integration has seen (the fridge's
-        status reply lacks the notification history its snapshots carry, an oven's
-        snapshots vary in `cav_remote_ready`), and refusing to confirm left appliances
-        unavailable and controls refused for one missing key.
-        """
-        model = properties.get("appliance_model")
-        if not isinstance(model, str) or not model:
-            self.missing_keys[source] = ["appliance_model"]
-            return False
-        if model != self._model:
-            if not certify:
-                # A reply that concurrent updates contradict does not switch models.
-                return False
-            self._model = model
-            for reported in self.required_keys.values():
-                reported.clear()
-        # Like discard_excluded, an observation without a usable type keeps the
-        # known one; properties the app discards for it are not state.
-        typed = properties if appliance_type(properties) is not None else current
-        excluded = excluded_properties(typed) if typed.get("appliance_model") == model else set()
-        # A read replaces state, so it is held to what reads report. A snapshot
-        # merges into that state, so also to what snapshots report. A key only
-        # ever pushed as a partial update is never expected, since no read or
-        # snapshot can refresh it.
-        required = set(self.required_keys["read"])
-        if source == "snapshot":
-            required |= self.required_keys["snapshot"]
-        missing = self.missing_keys[source] = sorted(required - properties.keys() - excluded)
-        reported = properties.keys() & (STATE_KEYS - {"notifs"} - excluded)
-        if appliance_type(properties) is None:
-            # An unusable type never reaches state.
-            reported.discard("appliance_type")
-        self.required_keys[source].update(reported)
-        if not certify:
-            return False
-        self.confirmed_at = dt_util.utcnow()
-        self.confirmed_missing_keys = missing
-        self.count += 1
-        self.transport_generation = transport_generation
-        return True
-
-    def missing_read_keys(self, data: dict) -> list[str]:
-        """The keys status reads have reported for the model that this state lacks."""
-        return sorted(self.required_keys["read"] - data.keys() - excluded_properties(data))
+        model = pushed.get("appliance_model")
+        other_model = bool(
+            isinstance(model, str) and model and model != reply.get("appliance_model")
+        )
+        base = {} if other_model else reply
+        published_for_type = with_known_type({**base, **pushed}, known)
+        conflicted = any(
+            key not in reply
+            or key not in pushed
+            or pushed[key] != reply[key]
+            or type(pushed[key]) is not type(reply[key])
+            for key in partial_keys
+            - CONFLICT_IGNORED_KEYS
+            - excluded_properties(published_for_type)
+        )
+        history = notification_records(base) if "notifs" in base else None
+        merged = {
+            **{key: value for key, value in base.items() if key in STATE_KEYS},
+            **pushed,
+        }
+        if history is not None:
+            merged["notifs"] = [*history, *pushed.get("notifs", [])]
+        return discard_excluded(merged, known), conflicted
 
 
 class EventTracker:

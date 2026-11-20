@@ -33,7 +33,6 @@ def appliance_diagnostics(
         },
         "state_verification": dict(coordinator.verification_stats),
         "confirmed_at": coordinator.confirmed_at.isoformat() if coordinator.confirmed_at else None,
-        "missing_state_keys": dict(coordinator.missing_state_keys),
         "unrecognized_state_keys": sorted(coordinator.unrecognized_keys),
         "state": async_redact_data(coordinator.data, PRIVATE_KEYS),
         "faults": records,

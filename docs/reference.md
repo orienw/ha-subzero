@@ -245,7 +245,6 @@ Home Assistant raises a repair warning when Firebase appliance alerts fail three
 **Optional response data:**
 
 - `confirmed_at`: ISO timestamp when the state was confirmed.
-- `missing_keys`: list of state keys previously seen in status reads for that appliance model that were absent from the published state.
 
 Concurrent callers share reads, and canceling one caller does not interrupt a read needed by others. The action fails (stopping an automation unless `continue_on_error` is enabled) if the read fails, a conflicting concurrent update arrives during the read, or the live connection drops or reconnects during the read. A status reply that omits an optional key does not fail the action.
 
@@ -291,7 +290,7 @@ Control commands wait for confirmation from appliance state before succeeding:
 
 - **Confirmation and retries:** Property changes wait for the appliance to report the requested state, retrying briefly and reading status if confirmation does not arrive in time. Authentication and rate-limit errors fail immediately without retrying. If confirmation fails after a command error, the error message includes the last command error.
 - **Command ordering:** Commands to the same appliance run one at a time, each checking the state left by earlier commands. If a command is canceled in flight, the next command refreshes appliance state before deciding what to send. Multi-step controls (such as ice modes or remote starts) stop immediately if a required write fails.
-- **Verified state before writing:** Cached availability during a reconnect grace window does not allow controls to write against unverified interlocks. While live updates are disconnected, recovering, or missing expected properties for the model, a control reads status first and validates against that fresh state. Settings the appliance does not report are rejected as unsupported.
+- **Verified state before writing:** Cached availability during a reconnect grace window does not allow controls to write against unverified interlocks. While live updates are disconnected or recovering, a control reads status first and validates against that fresh state. After a full live update restores state from an interruption, a control waits for the follow-up status read before writing, proceeding on the snapshot's state if that read fails. Settings the appliance does not report are rejected as unsupported.
 - **Kitchen timers:** Starting or restarting a kitchen timer requires the reported end time to match the requested duration so an earlier timer state cannot falsely confirm a restart.
 
 ## Diagnostics
@@ -305,7 +304,7 @@ Enabled by default:
 
 Disabled by default (enable in entity settings when needed):
 
-- **State confirmed:** timestamp of the last full status read or full live update that was not contradicted by a concurrent change. Its `missing_keys` attribute lists properties normally seen for that appliance that were absent from that observation. Disabling this sensor does not disable checks or recovery; individual partial updates and cached state kept after failed reads do not advance it.
+- **State confirmed:** timestamp of the last full status read or full live update that was not contradicted by a concurrent change. Disabling this sensor does not disable checks or recovery; individual partial updates and cached state kept after failed reads do not advance it.
 - **Live reporting mode:** shows `Cloud push` when live updates are connected and the appliance is available, and `Disconnected` otherwise.
 - **Uptime:** appliance uptime. Appliances truncate uptime to eight characters, giving 10-second precision from 100 hours and 1-minute precision from 1,000 hours.
 - **IP address** and **MAC address** (created when reported).
@@ -322,7 +321,7 @@ Diagnostics downloads use cached state without contacting Sub-Zero. They omit ac
 | Rate limits | Up to the last 10 times requests were rate-limited, with timestamps, target, and wait duration. |
 | Firebase | When active: listener connection state, subscription health, alert count, last alert time, last error, and last sync time. |
 | Per-appliance push and channel errors | Snapshot and partial-update counts, last message time, unexpected state flips in snapshots, and up to the last 10 channel errors. |
-| State verification and missing keys | Check counts, complete snapshots, status reads, last confirmation time, and keys absent from the latest status read or snapshot. |
+| State verification | Check counts, status reads, and last confirmation time. |
 | Cached state and faults | Redacted appliance state, saved temperature unit, inferred clock zone, unrecognized state key names, and all reported faults (active and inactive). |
 
 Healthy connection status and message counts do not by themselves prove that every state change was delivered or applied.
