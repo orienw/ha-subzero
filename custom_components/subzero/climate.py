@@ -13,7 +13,12 @@ from homeassistant.helpers.entity import EntityDescription
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import SubZeroConfigEntry
-from .controls import is_finite_number, supports_control, temperature_range
+from .controls import (
+    freezer_setpoint_enabled,
+    is_finite_number,
+    supports_control,
+    temperature_range,
+)
 from .entity import SubZeroEntity, async_setup_entities
 
 DESCRIPTIONS = tuple(
@@ -78,7 +83,7 @@ class SubZeroClimate(SubZeroEntity, ClimateEntity):
             super().available
             and is_finite_number(data.get(key))
             and supports_control(data, key)
-            and (key != "frz_set_temp" or "max_ice_on" not in data or data["max_ice_on"] is False)
+            and (key != "frz_set_temp" or freezer_setpoint_enabled(data))
             and (not self._oven or type(data.get(f"{self._prefix}_unit_on")) is bool)
         )
 

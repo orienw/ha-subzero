@@ -9,6 +9,8 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import SubZeroConfigEntry
+from .const import DISHWASHER_SABBATH_MODE
+from .controls import is_int
 from .entity import SubZeroEntity, async_setup_entities
 
 # Entities write state in this order within one update, and automations can observe it.
@@ -231,10 +233,10 @@ class SubZeroBinarySensor(SubZeroEntity, BinarySensorEntity):
         value = data.get(self.entity_description.key)
         if self.entity_description.key == "sabbath_on":
             mode = data.get("mode")
-            if value is True or type(mode) is int and mode == 2:
+            if value is True or is_int(mode) and mode == DISHWASHER_SABBATH_MODE:
                 return True
             if "mode" in data:
-                if type(mode) is not int or mode not in {0, 1}:
+                if not is_int(mode) or mode not in {0, 1}:
                     return None
                 if "sabbath_on" not in data:
                     return False

@@ -11,23 +11,31 @@ from .const import (
     BROIL,
     BROIL_LEVELS,
     COOK_MODES,
+    CRISP_MANUAL_MODE,
     DEPENDENT_ENTITY_KEYS,
+    DISHWASHER_CANCELLABLE_STATUSES,
+    DISHWASHER_EDITABLE_STATUSES,
     DISHWASHER_MODES,
+    DISHWASHER_SABBATH_MODE,
     DISHWASHER_SWITCHES,
     DOOR_AJAR_TIMEOUTS,
     EXCLUDED_PROPERTIES,
     FRIDGE_ENUM_OPTIONS,
     FRIDGE_MODE_KEYS,
+    HALO_ON_PERCENT,
     HOOD_BOOLEAN_KEYS,
     HOOD_INTEGER_RANGES,
+    HOOD_SERIES,
     HUMIDITY_LABELS,
     ICE_KEYS,
+    ICE_MAKER_SERIES,
     ICE_MODES,
     KITCHEN_TIMERS,
     KNOB_OVEN_TYPES,
     LEGACY_ACCENT_LIGHT_OPTIONS,
     LEGACY_START_SERIES,
     MANUAL_COOK_MODES,
+    NON_TEMP_COOK_MODES,
     OVEN_PREFIXES,
     OVEN_TEMPERATURE_RANGES,
     RANGE_SERIES,
@@ -38,6 +46,11 @@ from .const import (
     WRITABLE_BOOLEAN_KEYS,
     WRITABLE_INTEGER_KEYS,
 )
+
+
+def is_int(value) -> bool:
+    """Return whether value is an int, excluding bool."""
+    return type(value) is int
 
 
 def is_finite_number(value) -> bool:
@@ -83,12 +96,12 @@ def is_fridge(data: dict) -> bool:
 
 def is_ice_maker(data: dict) -> bool:
     parts = appliance_type(data)
-    return parts is not None and parts[1] == 21
+    return parts is not None and parts[1] == ICE_MAKER_SERIES
 
 
 def is_hood(data: dict) -> bool:
     parts = appliance_type(data)
-    return parts is not None and parts[1] == 23
+    return parts is not None and parts[1] == HOOD_SERIES
 
 
 def excluded_properties(data: dict) -> set[str]:
@@ -147,13 +160,31 @@ def supports_air_filter_reset(data: dict) -> bool:
 
 
 def wash_settings_enabled(data: dict) -> bool:
-    return type(data.get("wash_status")) is int and data["wash_status"] in {0, 1}
+    return is_int(data.get("wash_status")) and data["wash_status"] in DISHWASHER_EDITABLE_STATUSES
 
 
 def wash_cancel_enabled(data: dict) -> bool:
     # The app offers cancel while a cycle runs, dries, or waits for a delayed start.
     status = data.get("wash_status")
-    return data.get("wash_cycle_on") is True or (type(status) is int and status in {2, 5, 7})
+    return data.get("wash_cycle_on") is True or (
+        is_int(status) and status in DISHWASHER_CANCELLABLE_STATUSES
+    )
+
+
+def freezer_setpoint_enabled(data: dict) -> bool:
+    return "max_ice_on" not in data or data["max_ice_on"] is False
+
+
+def crisper_manual_enabled(data: dict) -> bool:
+    return is_int(data.get("crisp_temp_mode")) and data["crisp_temp_mode"] == CRISP_MANUAL_MODE
+
+
+def oven_ready_for_settings(data: dict, prefix: str) -> bool:
+    return data.get(f"{prefix}_unit_on") is True or data.get(f"{prefix}_remote_ready") is True
+
+
+def probe_setpoint_enabled(data: dict, prefix: str) -> bool:
+    return data.get(f"{prefix}_probe_on") is True and oven_ready_for_settings(data, prefix)
 
 
 def broil_level(data: dict, prefix: str) -> str | None:
@@ -384,9 +415,9 @@ def validate_remote_start(data: dict, key: str) -> None:
         if "door_ajar" in data and data["door_ajar"] is not False:
             raise ServiceValidationError("Close the dishwasher door before starting it.")
         if "mode" in data:
-            if type(data["mode"]) is not int or data["mode"] not in DISHWASHER_MODES.values():
+            if not is_int(data["mode"]) or data["mode"] not in DISHWASHER_MODES.values():
                 raise ServiceValidationError("The dishwasher mode is unknown.")
-            if data["mode"] == 2:
+            if data["mode"] == DISHWASHER_SABBATH_MODE:
                 raise ServiceValidationError(
                     "Turn off Sabbath mode before starting the dishwasher."
                 )
@@ -397,7 +428,7 @@ def validate_remote_start(data: dict, key: str) -> None:
     if f"{prefix}_door_ajar" in data and data[f"{prefix}_door_ajar"] is not False:
         raise ServiceValidationError("Close the oven door before starting it.")
     mode = data.get(f"{prefix}_cook_mode")
-    if type(mode) is not int or mode not in COOK_MODES.values() or mode == 0:
+    if not is_int(mode) or mode not in COOK_MODES.values() or mode == 0:
         raise ServiceValidationError("Select a supported cooking mode before starting the oven.")
     if mode in MANUAL_COOK_MODES or data.get(f"{prefix}_gourmet_mode_on") is True:
         raise ServiceValidationError("Start this cooking mode at the oven's control panel.")
@@ -434,7 +465,7 @@ def temperature_range(key: str, data: dict) -> tuple[int, int] | None:
         return 120, 210
     if key in {f"{prefix}_set_temp" for prefix in OVEN_PREFIXES}:
         mode = data.get(key.replace("set_temp", "cook_mode"))
-        if type(mode) is not int or mode not in COOK_MODES.values() or mode in {0, 3, 7, 11}:
+        if not is_int(mode) or mode not in COOK_MODES.values() or mode in NON_TEMP_COOK_MODES:
             return None
         parts = appliance_type(data)
         if parts is not None and parts[1] in OVEN_TEMPERATURE_RANGES:
@@ -482,6 +513,112 @@ def start_temperature(data: dict, key: str, kept: int | None) -> int | None:
     return min(max(usual, bounds[0]), bounds[1])
 
 
+def _validate_boolean(data: dict, key: str, value) -> None:
+    if type(value) is not bool or type(data[key]) is not bool:
+        raise ServiceValidationError("The setting requires an on/off value.")
+
+
+def _validate_hood_integer(data: dict, key: str, value) -> None:
+    lower, upper = HOOD_INTEGER_RANGES[key]
+    if not is_int(value) or not lower <= value <= upper:
+        raise ServiceValidationError("The setting is outside the hood's range.")
+    if not is_int(data[key]):
+        raise ServiceValidationError("The current hood setting is unknown.")
+    if key == "halo_max_percent" and value not in {0, HALO_ON_PERCENT}:
+        raise ServiceValidationError("Halo lighting supports only on or off.")
+    if key == "delay_off_duration" and value % 60000:
+        raise ServiceValidationError("Enter a whole number of minutes.")
+
+
+def _validate_fridge_enum(data: dict, key: str, value) -> None:
+    options = (
+        accent_light_options(data) if key == "accent_light_level" else FRIDGE_ENUM_OPTIONS[key]
+    )
+    if not is_int(value) or value not in options.values():
+        raise ServiceValidationError("Select a supported appliance option.")
+    if not is_int(data[key]) or data[key] not in enum_labels(key):
+        raise ServiceValidationError("The current appliance setting is unknown.")
+
+
+def _validate_dishwasher_enum(data: dict, key: str, value) -> None:
+    values = WASH_CYCLES if key == "wash_cycle" else DISHWASHER_MODES.values()
+    if not is_int(value) or value not in values or key == "wash_cycle" and value == 0:
+        raise ServiceValidationError("Select a supported dishwasher option.")
+    if not is_int(data[key]) or data[key] not in values:
+        raise ServiceValidationError("The current dishwasher setting is unknown.")
+    if not wash_settings_enabled(data):
+        raise ServiceValidationError("The dishwasher must be idle or waiting to start.")
+
+
+def _validate_kitchen_timer(data: dict, key: str, value) -> None:
+    prefix = KITCHEN_TIMERS[key]
+    if not is_int(value) or not 0 <= value <= 719:
+        raise ServiceValidationError("Enter a timer duration from 0 to 719 minutes.")
+    if type(data.get(f"{prefix}_active")) is not bool:
+        raise ServiceValidationError("The timer state is unknown.")
+
+
+def _validate_delay_start(data: dict, key: str, value) -> None:
+    if not is_int(value) or not 0 <= value <= 12:
+        raise ServiceValidationError("The setting is outside the appliance's range.")
+    if not is_int(data[key]):
+        raise ServiceValidationError("The current appliance setting is unknown.")
+
+
+def _validate_door_ajar_timeout(data: dict, key: str, value) -> None:
+    if not is_int(value) or value not in DOOR_AJAR_TIMEOUTS.values():
+        raise ServiceValidationError("Select a supported door open delay.")
+    if not is_int(data[key]) or data[key] not in DOOR_AJAR_TIMEOUTS.values():
+        raise ServiceValidationError("The current appliance setting is unknown.")
+
+
+def _validate_cook_mode(data: dict, key: str, value) -> None:
+    if not is_int(value) or value not in COOK_MODES.values():
+        raise ServiceValidationError("Select a supported cooking mode.")
+    if not is_int(data[key]) or data[key] not in COOK_MODES.values():
+        raise ServiceValidationError("The current cooking mode is unknown.")
+    if value in MANUAL_COOK_MODES and data[key] != value:
+        raise ServiceValidationError("Start this cooking mode at the oven's control panel.")
+    if value != data[key] and not cook_mode_offered(data, key, value):
+        raise ServiceValidationError("Select a supported cooking mode.")
+
+
+def _validate_temperature(data: dict, temperature_unit: str | None, key: str, value) -> None:
+    if temperature_unit not in ("F", "C"):
+        raise ServiceValidationError("The appliance's temperature unit is unknown.")
+    if not is_finite_number(data[key]):
+        raise ServiceValidationError("The current appliance temperature is unknown.")
+    bounds = temperature_range(key, data)
+    if not is_int(value) or bounds is None or not bounds[0] <= value <= bounds[1]:
+        raise ServiceValidationError("The temperature is outside the appliance's range.")
+    if key == "frz_set_temp" and "max_ice_on" in data:
+        if type(data["max_ice_on"]) is not bool:
+            raise ServiceValidationError("The ice maker mode is unknown.")
+        if data["max_ice_on"]:
+            raise ServiceValidationError("Turn off Max ice before changing the freezer setpoint.")
+    if key == "crisp_set_temp" and not crisper_manual_enabled(data):
+        raise ServiceValidationError("Select Manual crisper temperature before setting it.")
+    if key.endswith("_probe_set_temp"):
+        if data.get(key.replace("probe_set_temp", "probe_on")) is not True:
+            raise ServiceValidationError("Connect the probe before setting its target.")
+
+
+def _validate_interlocks(data: dict, key: str, value) -> None:
+    if key.endswith("_unit_on") or key == "wash_cycle_on":
+        if value is True and data[key] is not True:
+            validate_remote_start(data, key)
+    if key.startswith(("cav_", "cav2_")) and key.endswith(("_set_temp", "_cook_mode")):
+        prefix = key.split("_", 1)[0]
+        if not oven_ready_for_settings(data, prefix):
+            raise ServiceValidationError("The oven must be running or in Remote Ready.")
+        if key.endswith("_cook_mode") and data[key] != value:
+            flag = f"{prefix}_mode_change_enabled"
+            parts = appliance_type(data)
+            knobs = parts is not None and parts[1:] in KNOB_OVEN_TYPES
+            if knobs and flag in data and data[flag] is not True:
+                raise ServiceValidationError("The oven does not currently allow mode changes.")
+
+
 def validate_control_properties(
     data: dict, temperature_unit: str | None, properties: dict, pending: dict | None = None
 ) -> None:
@@ -493,101 +630,26 @@ def validate_control_properties(
     """
     if not properties:
         raise ServiceValidationError("No settings supplied.")
-    reported = data
     for key, value in properties.items():
-        if pending:
-            data = {**reported, **{k: v for k, v in pending.items() if k != key}}
-        if not supports_control(data, key):
+        state = {**data, **{k: v for k, v in pending.items() if k != key}} if pending else data
+        if not supports_control(state, key):
             raise ServiceValidationError("The appliance does not report this setting.")
         if key in WRITABLE_BOOLEAN_KEYS:
-            if type(value) is not bool or type(data[key]) is not bool:
-                raise ServiceValidationError("The setting requires an on/off value.")
+            _validate_boolean(state, key, value)
         elif key in HOOD_INTEGER_RANGES:
-            lower, upper = HOOD_INTEGER_RANGES[key]
-            if type(value) is not int or not lower <= value <= upper:
-                raise ServiceValidationError("The setting is outside the hood's range.")
-            if type(data[key]) is not int:
-                raise ServiceValidationError("The current hood setting is unknown.")
-            if key == "halo_max_percent" and value not in {0, 30}:
-                raise ServiceValidationError("Halo lighting supports only on or off.")
-            if key == "delay_off_duration" and value % 60000:
-                raise ServiceValidationError("Enter a whole number of minutes.")
+            _validate_hood_integer(state, key, value)
         elif key in FRIDGE_ENUM_OPTIONS:
-            accent = key == "accent_light_level"
-            values = (accent_light_options(data) if accent else FRIDGE_ENUM_OPTIONS[key]).values()
-            if type(value) is not int or value not in values:
-                raise ServiceValidationError("Select a supported appliance option.")
-            if type(data[key]) is not int or data[key] not in enum_labels(key):
-                raise ServiceValidationError("The current appliance setting is unknown.")
+            _validate_fridge_enum(state, key, value)
         elif key in {"wash_cycle", "mode"}:
-            values = WASH_CYCLES if key == "wash_cycle" else DISHWASHER_MODES.values()
-            if type(value) is not int or value not in values or key == "wash_cycle" and value == 0:
-                raise ServiceValidationError("Select a supported dishwasher option.")
-            if type(data[key]) is not int or data[key] not in values:
-                raise ServiceValidationError("The current dishwasher setting is unknown.")
-            if not wash_settings_enabled(data):
-                raise ServiceValidationError("The dishwasher must be idle or waiting to start.")
+            _validate_dishwasher_enum(state, key, value)
         elif key in KITCHEN_TIMERS:
-            prefix = KITCHEN_TIMERS[key]
-            if type(value) is not int or not 0 <= value <= 719:
-                raise ServiceValidationError("Enter a timer duration from 0 to 719 minutes.")
-            if type(data.get(f"{prefix}_active")) is not bool:
-                raise ServiceValidationError("The timer state is unknown.")
+            _validate_kitchen_timer(state, key, value)
         elif key == "delay_start_timer_duration":
-            if type(value) is not int or not 0 <= value <= 12:
-                raise ServiceValidationError("The setting is outside the appliance's range.")
-            if type(data[key]) is not int:
-                raise ServiceValidationError("The current appliance setting is unknown.")
+            _validate_delay_start(state, key, value)
         elif key == "door_ajar_timeout":
-            if type(value) is not int or value not in DOOR_AJAR_TIMEOUTS.values():
-                raise ServiceValidationError("Select a supported door open delay.")
-            if type(data[key]) is not int or data[key] not in DOOR_AJAR_TIMEOUTS.values():
-                raise ServiceValidationError("The current appliance setting is unknown.")
+            _validate_door_ajar_timeout(state, key, value)
         elif key.endswith("_cook_mode"):
-            if type(value) is not int or value not in COOK_MODES.values():
-                raise ServiceValidationError("Select a supported cooking mode.")
-            if type(data[key]) is not int or data[key] not in COOK_MODES.values():
-                raise ServiceValidationError("The current cooking mode is unknown.")
-            if value in MANUAL_COOK_MODES and data[key] != value:
-                raise ServiceValidationError("Start this cooking mode at the oven's control panel.")
-            if value != data[key] and not cook_mode_offered(data, key, value):
-                raise ServiceValidationError("Select a supported cooking mode.")
+            _validate_cook_mode(state, key, value)
         else:
-            if temperature_unit not in ("F", "C"):
-                raise ServiceValidationError("The appliance's temperature unit is unknown.")
-            if not is_finite_number(data[key]):
-                raise ServiceValidationError("The current appliance temperature is unknown.")
-            bounds = temperature_range(key, data)
-            if type(value) is not int or bounds is None or not bounds[0] <= value <= bounds[1]:
-                raise ServiceValidationError("The temperature is outside the appliance's range.")
-            if key == "frz_set_temp" and "max_ice_on" in data:
-                if type(data["max_ice_on"]) is not bool:
-                    raise ServiceValidationError("The ice maker mode is unknown.")
-                if data["max_ice_on"]:
-                    raise ServiceValidationError(
-                        "Turn off Max ice before changing the freezer setpoint."
-                    )
-            if key == "crisp_set_temp":
-                if type(data.get("crisp_temp_mode")) is not int or data["crisp_temp_mode"] != 0:
-                    raise ServiceValidationError(
-                        "Select Manual crisper temperature before setting it."
-                    )
-            if key.endswith("_probe_set_temp"):
-                if data.get(key.replace("probe_set_temp", "probe_on")) is not True:
-                    raise ServiceValidationError("Connect the probe before setting its target.")
-        if key.endswith("_unit_on") or key == "wash_cycle_on":
-            if value is True and data[key] is not True:
-                validate_remote_start(data, key)
-        if key.startswith(("cav_", "cav2_")) and key.endswith(("_set_temp", "_cook_mode")):
-            prefix = key.split("_", 1)[0]
-            if (
-                data.get(f"{prefix}_unit_on") is not True
-                and data.get(f"{prefix}_remote_ready") is not True
-            ):
-                raise ServiceValidationError("The oven must be running or in Remote Ready.")
-            if key.endswith("_cook_mode") and data[key] != value:
-                flag = f"{prefix}_mode_change_enabled"
-                parts = appliance_type(data)
-                knobs = parts is not None and parts[1:] in KNOB_OVEN_TYPES
-                if knobs and flag in data and data[flag] is not True:
-                    raise ServiceValidationError("The oven does not currently allow mode changes.")
+            _validate_temperature(state, temperature_unit, key, value)
+        _validate_interlocks(state, key, value)

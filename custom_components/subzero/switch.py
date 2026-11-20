@@ -5,8 +5,8 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import SubZeroConfigEntry
-from .const import DISHWASHER_SWITCHES, HOOD_SWITCHES
-from .controls import supports_control
+from .const import DISHWASHER_SWITCHES, HALO_ON_PERCENT, HOOD_SWITCHES
+from .controls import is_int, supports_control
 from .entity import SubZeroEntity, async_setup_entities
 
 DESCRIPTIONS = (
@@ -69,10 +69,10 @@ class SubZeroHaloSwitch(SubZeroSwitch):
     @property
     def is_on(self) -> bool | None:
         value = self.coordinator.data.get("halo_max_percent")
-        return value != 0 if type(value) is int else None
+        return value != 0 if is_int(value) else None
 
     async def async_turn_on(self, **kwargs) -> None:
-        await self.coordinator.async_set_properties({"halo_max_percent": 30})
+        await self.coordinator.async_set_properties({"halo_max_percent": HALO_ON_PERCENT})
 
     async def async_turn_off(self, **kwargs) -> None:
         await self.coordinator.async_set_properties({"halo_max_percent": 0})

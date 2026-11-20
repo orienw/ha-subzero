@@ -148,6 +148,10 @@ HOOD_INTEGER_RANGES = {
     "delay_off_duration": (0, 719 * 60000),
 }
 HOOD_SENSITIVITY = {"Off": -1, "Low": 0, "Medium": 1, "High": 2}
+HALO_ON_PERCENT = 30
+ICE_MAKER_SERIES = 21
+HOOD_SERIES = 23
+CRISP_MANUAL_MODE = 0
 ICE_CLEAN_STAGES = {
     0: "Off",
     50: "Not cleaning",
@@ -283,6 +287,8 @@ GOURMET_RECIPES = {
 }
 # Wolf requires these modes to be started at the appliance.
 MANUAL_COOK_MODES = {3, 7, 9, 11}
+# Modes without a configurable oven temperature range (Off, Broil, Convection broil, Self clean).
+NON_TEMP_COOK_MODES = {0, 3, 7, 11}
 BROIL = 3
 # The app's broil level for a Broil setpoint below each bound, in °F.
 BROIL_LEVELS = ((400, "Low"), (500, "Medium"), (math.inf, "High"))
@@ -346,6 +352,9 @@ DISHWASHER_SWITCHES = {
     "top_rack_only_on": "Top rack only",
 }
 DISHWASHER_MODES = {"Normal": 0, "Child lock": 1, "Sabbath": 2}
+DISHWASHER_SABBATH_MODE = 2
+DISHWASHER_EDITABLE_STATUSES = {0, 1}
+DISHWASHER_CANCELLABLE_STATUSES = {2, 5, 7}
 WASH_CYCLES = {
     0: "None",
     1: "Auto",
