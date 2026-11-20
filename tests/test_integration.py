@@ -538,6 +538,47 @@ async def test_startup_status_can_restore_state_despite_a_rejected_channel(hass,
     assert not closed.is_set()
 
 
+@pytest.mark.parametrize("opens", [True, False], ids=["channel-opens", "channel-never-opens"])
+async def test_setup_read_before_the_channel_opens_does_not_establish_live_updates(
+    hass, freezer, loaded, opens
+):
+    entry, client, _, _, _ = loaded
+    updates = asyncio.Queue()
+
+    async def watch(device_ids):
+        client.push_connected = True
+        while True:
+            yield "test-fridge", await updates.get()
+
+    # Outage checks would keep the state from expiring.
+    hass.config_entries.async_update_entry(entry, pref_disable_polling=True)
+    client.watch = watch
+    client.state.reset_mock()
+    await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    # Setup read the appliance, but its channel has not opened.
+    client.state.assert_awaited_once()
+    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
+    assert not coordinator.transport_healthy
+    assert not coordinator.receiving_live_updates
+    if opens:
+        # The read that follows the channel opening confirms state.
+        client.state.return_value = {**client.state.return_value, "ref_door_ajar": True}
+        await updates.put(ChannelOpened())
+        await hass.async_block_till_done()
+        assert client.state.await_count == 2
+        assert coordinator.transport_healthy
+        assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
+    else:
+        # Like any interruption, the reading ages out when nothing confirms it.
+        freezer.tick(121)
+        async_fire_time_changed(hass, dt_util.utcnow())
+        await hass.async_block_till_done()
+        assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "unavailable"
+        assert client.state.await_count == 1
+
+
 async def test_startup_stream_auth_failure_stops_before_status_reads(hass, loaded):
     entry, client, _, _, _ = loaded
 

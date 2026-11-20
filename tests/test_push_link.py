@@ -137,9 +137,30 @@ async def test_cancel_grace_marks_expired_without_firing_callback():
 
 
 @pytest.mark.parametrize("push_connected", [False, True])
-async def test_confirm_while_healthy_is_noop(push_connected):
+async def test_confirm_before_the_channel_opens_leaves_the_link_in_grace(push_connected):
+    link, expired, tasks = make_link(grace_seconds=10)
+    try:
+        # A read that setup makes before the appliance's channel has opened.
+        link.confirm(push_connected=push_connected)
+        assert not link.healthy
+        assert link.in_grace
+        assert link.epoch == 0
+        # The channel opening makes that read stale, and a later read confirms.
+        assert link.channel_opened()
+        assert link.epoch == 1
+        link.confirm(push_connected=True)
+        assert link.healthy
+        assert not link.in_grace
+    finally:
+        link.cancel_grace()
+        await asyncio.gather(*tasks, return_exceptions=True)
+    assert expired == []
+
+
+async def test_confirm_on_an_established_link_changes_nothing():
     link, expired, tasks = make_link()
-    link.confirm(push_connected=push_connected)
+    link.channel_opened()
+    link.confirm(push_connected=True)
     assert link.healthy
     assert not link.in_grace
     assert not link.expired
@@ -249,6 +270,7 @@ async def test_channel_opening_without_an_interruption_changes_nothing():
 
 async def test_unconfirm_requires_a_read_without_changing_the_connection():
     link, _, tasks = make_link(grace_seconds=10)
+    link.channel_opened()
     first, later = ApiError("Read failed"), ApiError("Read failed again")
     link.unconfirm(first)
     link.unconfirm(later)

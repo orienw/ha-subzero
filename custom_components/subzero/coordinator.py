@@ -6,11 +6,12 @@ What the coordinator guarantees, and what it does not:
   laid over it as they arrive. Nothing orders a read against an update that arrives
   while the read is in flight, so the update stands. A reply that spans the stream
   ending, or the appliance's channel opening after an interruption, is not published.
-- Live updates are either established for an appliance or they are not. After the
-  stream is lost or the appliance's update channel is refused, they are established
-  again only once the channel is open and a status read that started after it
-  opened succeeds. A full update keeps the appliance available meanwhile, but does
-  not establish them.
+- Live updates are either established for an appliance or they are not. They stop
+  being established when the stream is lost, the appliance's update channel is
+  refused, or a status read completes before the channel has opened. They are
+  established again only once the channel is open and a status read that started
+  after it opened succeeds. A full update keeps the appliance available meanwhile,
+  but does not establish them.
 - While live updates are not established, a control reads status first. While they
   are, a control acts on cached state.
 - The checks before a write explain a refusal early. They are not a lock: the
@@ -122,9 +123,8 @@ class PushLink:
         self._grace_seconds = grace_seconds
         self.error: Exception | None = None
         self.epoch = 0
-        # The appliance's update channel is open on the current connection. Assumed
-        # until the stream is lost, since setup establishes state on its own.
-        self.channel_open = True
+        # The appliance's update channel is open on the current connection.
+        self.channel_open = False
         # The channel was refused on a working stream.
         self.channel_refused = False
         self._grace_task: asyncio.Task | None = None
@@ -175,15 +175,16 @@ class PushLink:
         return True
 
     def confirm(self, *, push_connected: bool) -> None:
-        """Confirm state with a status read after live updates were interrupted."""
-        if self.error is None:
-            return
+        """Confirm state with a status read on the current connection."""
         if push_connected and self.channel_open:
             self.error = None
             self.cancel_grace()
-        else:
-            # A current read is useful without live updates, but its values still age.
-            self._start_grace()
+            return
+        if self.error is None:
+            # A read before the channel has opened, as setup can make.
+            self.error = ApiError("Sub-Zero's live updates have not started.")
+        # A current read is useful without live updates, but its values still age.
+        self._start_grace()
 
     def unconfirm(self, error: Exception) -> None:
         """Require a status read to confirm state again on the same connection."""
