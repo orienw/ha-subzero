@@ -644,6 +644,29 @@ async def test_setup_read_survives_the_first_stream_attempt_failing(hass, loaded
     assert not entry.runtime_data.coordinators["test-fridge"].transport_healthy
 
 
+async def test_setup_reads_status_after_only_a_partial_update(hass, loaded, monkeypatch):
+    entry, client, _, _, _ = loaded
+    monkeypatch.setattr("custom_components.subzero.account.INITIAL_STATE_TIMEOUT", 0.05)
+    model = client.state.return_value["appliance_model"]
+
+    async def watch(device_ids):
+        client.push_connected = True
+        yield (
+            "test-fridge",
+            StateUpdate({"appliance_model": model, "ref_door_ajar": True}, full=False),
+        )
+        await asyncio.Event().wait()
+
+    client.watch = watch
+    client.state.reset_mock()
+    await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.LOADED
+    client.state.assert_awaited_once()
+    assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "38"
+    assert entry.runtime_data.coordinators["test-fridge"].confirmed_at is not None
+
+
 async def test_startup_stream_auth_failure_stops_before_status_reads(hass, loaded):
     entry, client, _, _, _ = loaded
 

@@ -126,7 +126,7 @@ class SubZeroAccount:
                 pass
             errors = []
             for coordinator in self.coordinators.values():
-                if coordinator.last_update_success and coordinator.data.get("appliance_model"):
+                if coordinator.last_update_success and coordinator.confirmed_at is not None:
                     continue
                 if isinstance(coordinator.last_exception, InvalidAuth):
                     raise ConfigEntryAuthFailed(str(coordinator.last_exception))
@@ -139,7 +139,7 @@ class SubZeroAccount:
                 (coordinator, error)
                 for coordinator, error in errors
                 # Push may have delivered its state while setup read the others.
-                if not (coordinator.last_update_success and coordinator.data.get("appliance_model"))
+                if not (coordinator.last_update_success and coordinator.confirmed_at is not None)
             ]
             if errors and len(errors) == len(self.coordinators):
                 raise errors[0][1]
