@@ -14,7 +14,7 @@ from contextlib import AsyncExitStack, aclosing
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
-from typing import NoReturn
+from typing import Any, NoReturn
 from urllib.parse import quote
 
 import aiohttp
@@ -415,7 +415,7 @@ async def _decode_command_response(response: aiohttp.ClientResponse) -> dict | N
 
 async def _decode_json_response(
     response: aiohttp.ClientResponse, *, list_response: bool, any_response: bool
-) -> dict | list:
+) -> Any:
     if any_response:
         # Alert endpoints return an ID, a boolean, a list, or no body.
         body = (await response.text(errors="replace")).strip()

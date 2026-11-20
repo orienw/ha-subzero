@@ -118,7 +118,19 @@ async def async_setup_entry(
     )
 
 
-class SubZeroDelayOffNumber(SubZeroEntity, NumberEntity):
+class _SubZeroNumber(SubZeroEntity, NumberEntity):
+    def _encode_value(self, value: float) -> int:
+        return round(value)
+
+    async def async_set_native_value(self, value: float) -> None:
+        if not is_finite_number(value):
+            raise ServiceValidationError("Enter a valid number.")
+        await self.coordinator.async_set_properties(
+            {self.entity_description.key: self._encode_value(value)}
+        )
+
+
+class SubZeroDelayOffNumber(_SubZeroNumber):
     @property
     def native_value(self) -> float | None:
         value = self.coordinator.data.get(self.entity_description.key)
@@ -135,15 +147,11 @@ class SubZeroDelayOffNumber(SubZeroEntity, NumberEntity):
             and 0 <= data[key] <= 719 * 60000
         )
 
-    async def async_set_native_value(self, value: float) -> None:
-        if not is_finite_number(value):
-            raise ServiceValidationError("Enter a valid number.")
-        await self.coordinator.async_set_properties(
-            {self.entity_description.key: round(value) * 60000}
-        )
+    def _encode_value(self, value: float) -> int:
+        return round(value) * 60000
 
 
-class SubZeroTemperatureNumber(SubZeroEntity, NumberEntity):
+class SubZeroTemperatureNumber(_SubZeroNumber):
     @property
     def native_value(self) -> int | float | None:
         key = self.entity_description.key
@@ -181,13 +189,8 @@ class SubZeroTemperatureNumber(SubZeroEntity, NumberEntity):
             return probe_setpoint_enabled(data, key.split("_", 1)[0])
         return key != "frz_set_temp" or freezer_setpoint_enabled(data)
 
-    async def async_set_native_value(self, value: float) -> None:
-        if not is_finite_number(value):
-            raise ServiceValidationError("Enter a valid number.")
-        await self.coordinator.async_set_properties({self.entity_description.key: round(value)})
 
-
-class SubZeroKitchenTimerNumber(SubZeroEntity, NumberEntity):
+class SubZeroKitchenTimerNumber(_SubZeroNumber):
     _cancel_countdown: CALLBACK_TYPE | None = None
 
     async def async_added_to_hass(self) -> None:
@@ -243,8 +246,3 @@ class SubZeroKitchenTimerNumber(SubZeroEntity, NumberEntity):
             and supports_control(data, key)
             and type(data.get(f"{KITCHEN_TIMERS[key]}_active")) is bool
         )
-
-    async def async_set_native_value(self, value: float) -> None:
-        if not is_finite_number(value):
-            raise ServiceValidationError("Enter a valid number.")
-        await self.coordinator.async_set_properties({self.entity_description.key: round(value)})

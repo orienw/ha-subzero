@@ -1,5 +1,7 @@
 """Fridge modes, accent lighting, oven cooking modes, and dishwasher delay start."""
 
+from collections.abc import Collection
+
 from homeassistant.components.select import SelectEntity, SelectEntityDescription
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
@@ -52,6 +54,17 @@ ENUM_OPTIONS = {
     },
 }
 
+AUTO_SENSITIVITY_DESCRIPTIONS = (
+    SelectEntityDescription(
+        key="auto_sensivity", name="Automatic fan sensitivity", icon="mdi:fan-auto"
+    ),
+)
+ICE_MAKER_DESCRIPTIONS = (
+    SelectEntityDescription(key="ice_maker_mode", name="Ice maker", icon="mdi:ice-pop"),
+)
+OPERATING_MODE_DESCRIPTIONS = (
+    SelectEntityDescription(key="operating_mode", name="Mode", icon="mdi:fridge-outline"),
+)
 FRIDGE_ENUM_DESCRIPTIONS = (
     SelectEntityDescription(
         key="crisp_temp_mode", name="Crisper temperature mode", icon="mdi:thermometer-auto"
@@ -62,6 +75,14 @@ FRIDGE_ENUM_DESCRIPTIONS = (
         key="accent_light_level", name="Accent light", icon="mdi:lightbulb-outline"
     ),
 )
+DOOR_DELAY_DESCRIPTIONS = (
+    SelectEntityDescription(
+        key="door_ajar_timeout",
+        name="Door open delay",
+        icon="mdi:door-open",
+        entity_category=EntityCategory.CONFIG,
+    ),
+)
 COOK_MODE_DESCRIPTIONS = (
     SelectEntityDescription(key="cav_cook_mode", name="Cooking mode", icon="mdi:stove"),
     SelectEntityDescription(key="cav2_cook_mode", name="Lower oven cooking mode", icon="mdi:stove"),
@@ -70,16 +91,7 @@ DISHWASHER_DESCRIPTIONS = (
     SelectEntityDescription(key="wash_cycle", name="Wash cycle", icon="mdi:dishwasher"),
     SelectEntityDescription(key="mode", name="Mode", icon="mdi:dishwasher"),
 )
-SIMPLE_ENUM_DESCRIPTIONS = (
-    SelectEntityDescription(
-        key="auto_sensivity", name="Automatic fan sensitivity", icon="mdi:fan-auto"
-    ),
-    SelectEntityDescription(
-        key="door_ajar_timeout",
-        name="Door open delay",
-        icon="mdi:door-open",
-        entity_category=EntityCategory.CONFIG,
-    ),
+DELAY_START_DESCRIPTIONS = (
     SelectEntityDescription(
         key="delay_start_timer_duration", name="Delay start", icon="mdi:timer-sand"
     ),
@@ -105,36 +117,38 @@ def _operating_mode_keys(data: dict) -> tuple[str, ...]:
 async def async_setup_entry(
     hass: HomeAssistant, entry: SubZeroConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    async_setup_entities(
-        entry,
-        async_add_entities,
-        (SelectEntityDescription(key="ice_maker_mode", name="Ice maker", icon="mdi:ice-pop"),),
-        SubZeroIceMakerSelect,
-        lambda coordinator, description: bool(_ice_maker_keys(coordinator.data)),
-    )
-    async_setup_entities(
-        entry,
-        async_add_entities,
-        (SelectEntityDescription(key="operating_mode", name="Mode", icon="mdi:fridge-outline"),),
-        SubZeroOperatingModeSelect,
-        lambda coordinator, description: bool(_operating_mode_keys(coordinator.data)),
-    )
-    for descriptions, entity_class in (
-        (SIMPLE_ENUM_DESCRIPTIONS, SubZeroEnumSelect),
-        (FRIDGE_ENUM_DESCRIPTIONS, SubZeroFridgeEnumSelect),
-        (COOK_MODE_DESCRIPTIONS, SubZeroCookModeSelect),
-        (DISHWASHER_DESCRIPTIONS, SubZeroDishwasherSelect),
+    def control_supported(coordinator, description) -> bool:
+        return supports_control(coordinator.data, description.key)
+
+    # Keep entity registration order aligned with the original DESCRIPTIONS order.
+    for descriptions, entity_class, supported in (
+        (AUTO_SENSITIVITY_DESCRIPTIONS, SubZeroEnumSelect, control_supported),
+        (
+            ICE_MAKER_DESCRIPTIONS,
+            SubZeroIceMakerSelect,
+            lambda coordinator, _: bool(_ice_maker_keys(coordinator.data)),
+        ),
+        (
+            OPERATING_MODE_DESCRIPTIONS,
+            SubZeroOperatingModeSelect,
+            lambda coordinator, _: bool(_operating_mode_keys(coordinator.data)),
+        ),
+        (FRIDGE_ENUM_DESCRIPTIONS, SubZeroFridgeEnumSelect, control_supported),
+        (DOOR_DELAY_DESCRIPTIONS, SubZeroEnumSelect, control_supported),
+        (COOK_MODE_DESCRIPTIONS, SubZeroCookModeSelect, control_supported),
+        (DISHWASHER_DESCRIPTIONS, SubZeroDishwasherSelect, control_supported),
+        (DELAY_START_DESCRIPTIONS, SubZeroEnumSelect, control_supported),
     ):
-        async_setup_entities(
-            entry,
-            async_add_entities,
-            descriptions,
-            entity_class,
-            lambda coordinator, description: supports_control(coordinator.data, description.key),
-        )
+        async_setup_entities(entry, async_add_entities, descriptions, entity_class, supported)
 
 
-class SubZeroIceMakerSelect(SubZeroEntity, SelectEntity):
+class _SubZeroSelect(SubZeroEntity, SelectEntity):
+    def _validate_option(self, option: str) -> None:
+        if option not in self.options:
+            raise ServiceValidationError("The appliance does not support that option.")
+
+
+class SubZeroIceMakerSelect(_SubZeroSelect):
     @property
     def options(self) -> list[str]:
         keys = _ice_maker_keys(self.coordinator.data)
@@ -155,12 +169,11 @@ class SubZeroIceMakerSelect(SubZeroEntity, SelectEntity):
         return ice_mode(self.coordinator.data) if self.available else None
 
     async def async_select_option(self, option: str) -> None:
-        if option not in self.options:
-            raise ServiceValidationError("The appliance does not support that option.")
+        self._validate_option(option)
         await self.coordinator.async_set_ice_mode(option)
 
 
-class SubZeroOperatingModeSelect(SubZeroEntity, SelectEntity):
+class SubZeroOperatingModeSelect(_SubZeroSelect):
     @property
     def options(self) -> list[str]:
         keys = _operating_mode_keys(self.coordinator.data)
@@ -185,8 +198,7 @@ class SubZeroOperatingModeSelect(SubZeroEntity, SelectEntity):
         return active[0] if len(active) == 1 else "Normal" if not active else None
 
     async def async_select_option(self, option: str) -> None:
-        if option not in self.options:
-            raise ServiceValidationError("The appliance does not support that option.")
+        self._validate_option(option)
         selected = MODES.get(option)
         properties = {
             key: False for key in _operating_mode_keys(self.coordinator.data) if key != selected
@@ -196,10 +208,26 @@ class SubZeroOperatingModeSelect(SubZeroEntity, SelectEntity):
         await self.coordinator.async_set_properties(properties)
 
 
-class SubZeroEnumSelect(SubZeroEntity, SelectEntity):
+class SubZeroEnumSelect(_SubZeroSelect):
     @property
     def _options_map(self) -> dict[str, int]:
         return ENUM_OPTIONS[self.entity_description.key]
+
+    @property
+    def _reported_values(self) -> Collection[int]:
+        return self._options_map.values()
+
+    @property
+    def _state_data(self) -> dict:
+        return self.coordinator.data
+
+    def _option_label(self, value: int) -> str | None:
+        return next(
+            (name for name, candidate in self._options_map.items() if value == candidate), None
+        )
+
+    def _option_properties(self, option: str) -> dict[str, bool | int]:
+        return {self.entity_description.key: self._options_map[option]}
 
     @property
     def options(self) -> list[str]:
@@ -213,55 +241,29 @@ class SubZeroEnumSelect(SubZeroEntity, SelectEntity):
             self.coordinator.last_update_success
             and supports_control(data, key)
             and is_int(data[key])
-            and data[key] in self._options_map.values()
+            and data[key] in self._reported_values
         )
 
     @property
     def current_option(self) -> str | None:
         if not self.available:
             return None
-        value = self.coordinator.data[self.entity_description.key]
-        return next(
-            (name for name, candidate in self._options_map.items() if value == candidate), None
-        )
+        return self._option_label(self._state_data[self.entity_description.key])
 
     async def async_select_option(self, option: str) -> None:
-        if option not in self.options:
-            raise ServiceValidationError("The appliance does not support that option.")
-        await self.coordinator.async_set_properties(
-            {self.entity_description.key: self._options_map[option]}
-        )
+        self._validate_option(option)
+        await self.coordinator.async_set_properties(self._option_properties(option))
 
 
 class SubZeroFridgeEnumSelect(SubZeroEnumSelect):
     @property
-    def options(self) -> list[str]:
-        key = self.entity_description.key
-        names = list(self._options_map)
-        reported = enum_labels(key).get(self.coordinator.data.get(key))
-        return names if reported is None or reported in names else [*names, reported]
+    def _reported_values(self) -> Collection[int]:
+        return enum_labels(self.entity_description.key)
 
-    @property
-    def available(self) -> bool:
-        data = self.coordinator.data
-        key = self.entity_description.key
-        return (
-            self.coordinator.last_update_success
-            and supports_control(data, key)
-            and is_int(data[key])
-            and data[key] in enum_labels(key)
-        )
+    def _option_label(self, value: int) -> str | None:
+        return enum_labels(self.entity_description.key)[value]
 
-    @property
-    def current_option(self) -> str | None:
-        if not self.available:
-            return None
-        key = self.entity_description.key
-        return enum_labels(key)[self.coordinator.data[key]]
-
-    async def async_select_option(self, option: str) -> None:
-        if option not in self.options:
-            raise ServiceValidationError("The appliance does not support that option.")
+    def _option_properties(self, option: str) -> dict[str, bool | int]:
         key = self.entity_description.key
         if option not in self._options_map:
             raise ServiceValidationError("This setting can only be chosen at the appliance.")
@@ -270,10 +272,27 @@ class SubZeroFridgeEnumSelect(SubZeroEnumSelect):
             if key == "accent_light_level"
             else self._options_map
         )
-        await self.coordinator.async_set_properties({key: options[option]})
+        return {key: options[option]}
+
+    @property
+    def options(self) -> list[str]:
+        key = self.entity_description.key
+        names = list(self._options_map)
+        reported = enum_labels(key).get(self.coordinator.data.get(key))
+        return names if reported is None or reported in names else [*names, reported]
 
 
 class SubZeroCookModeSelect(SubZeroEnumSelect):
+    @property
+    def _state_data(self) -> dict:
+        return self.coordinator.start_state
+
+    def _option_properties(self, option: str) -> dict[str, bool | int]:
+        key = self.entity_description.key
+        if option == "Off":
+            return {key.replace("cook_mode", "unit_on"): False}
+        return {key: COOK_MODES[option]}
+
     @property
     def options(self) -> list[str]:
         data = self.coordinator.data
@@ -285,34 +304,14 @@ class SubZeroCookModeSelect(SubZeroEnumSelect):
             or (value not in MANUAL_COOK_MODES and cook_mode_offered(data, key, value))
         ]
 
-    @property
-    def current_option(self) -> str | None:
-        if not self.available:
-            return None
-        value = self.coordinator.start_state[self.entity_description.key]
-        return next((name for name, candidate in COOK_MODES.items() if value == candidate), None)
-
-    async def async_select_option(self, option: str) -> None:
-        if option not in self.options:
-            raise ServiceValidationError("The appliance does not support that option.")
-        key = self.entity_description.key
-        if option == "Off":
-            properties = {key.replace("cook_mode", "unit_on"): False}
-        else:
-            properties = {key: COOK_MODES[option]}
-        await self.coordinator.async_set_properties(properties)
-
 
 class SubZeroDishwasherSelect(SubZeroEnumSelect):
     @property
+    def _reported_values(self) -> Collection[int]:
+        if self.entity_description.key == "wash_cycle":
+            return WASH_CYCLES
+        return DISHWASHER_MODES.values()
+
+    @property
     def available(self) -> bool:
-        data = self.coordinator.data
-        key = self.entity_description.key
-        values = WASH_CYCLES if key == "wash_cycle" else DISHWASHER_MODES.values()
-        return (
-            self.coordinator.last_update_success
-            and supports_control(data, key)
-            and is_int(data[key])
-            and data[key] in values
-            and wash_settings_enabled(data)
-        )
+        return super().available and wash_settings_enabled(self.coordinator.data)

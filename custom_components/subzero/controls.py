@@ -323,7 +323,7 @@ def timer_minutes(data: dict, key: str, zone: tzinfo | None = None) -> float | N
         # that reach 0 only at the end.
         return max(0, math.ceil((end - dt_util.utcnow()).total_seconds() / 60))
     duration = data.get(key)
-    return duration if type(duration) is int and duration >= 0 else None
+    return duration if is_int(duration) and duration >= 0 else None
 
 
 def control_matches(
@@ -339,13 +339,13 @@ def control_matches(
     """
     if key == "accent_light_level":
         return (
-            type(data.get(key)) is int
+            is_int(data.get(key))
             and value in ACCENT_LIGHT_LABELS
             and ACCENT_LIGHT_LABELS.get(data[key]) == ACCENT_LIGHT_LABELS[value]
         )
     if key == "halo_max_percent" and value:
         # The app treats any nonzero halo level as on.
-        return type(data.get(key)) is int and data[key] != 0
+        return is_int(data.get(key)) and data[key] != 0
     if key not in KITCHEN_TIMERS:
         if key.endswith("_unit_on") and value is False:
             ready = key.replace("unit_on", "remote_ready")

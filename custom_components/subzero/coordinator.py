@@ -178,7 +178,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self._followup_task: asyncio.Task | None = None
         self._followup_alert = False
         self._last_followup = 0.0
-        self._state = StateConfirmation()
+        self._confirmation = StateConfirmation()
         self._published = 0
         self.verification_stats: dict[str, int | str | None] = {
             "checks": 0,
@@ -189,15 +189,15 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
 
     @property
     def confirmed_at(self) -> datetime | None:
-        return self._state.confirmed_at
+        return self._confirmation.confirmed_at
 
     @property
     def missing_state_keys(self) -> dict[str, list[str]]:
-        return self._state.missing_keys
+        return self._confirmation.missing_keys
 
     @property
     def confirmed_missing_keys(self) -> list[str]:
-        return self._state.confirmed_missing_keys
+        return self._confirmation.confirmed_missing_keys
 
     @property
     def transport_healthy(self) -> bool:
@@ -225,7 +225,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
     @callback
     def on_channel_opened(self) -> None:
         if self._active_read is not None:
-            self._active_read.error = None
+            self._active_read.clear_error()
         self._channel_error = None
 
     @callback
@@ -236,7 +236,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
     @callback
     def on_account_error(self, error: Exception) -> None:
         if isinstance(error, InvalidAuth) and self._active_read is not None:
-            self._active_read.error = error
+            self._active_read.fail(error)
         self.async_set_update_error(error)
 
     @callback
@@ -466,7 +466,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             if (
                 self._transport_error is not None
                 or not self.client.push_connected
-                or self._state.missing_read_keys(self.data)
+                or self._confirmation.missing_read_keys(self.data)
             ):
                 try:
                     await self._async_read_for_control()
@@ -802,7 +802,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             raise HomeAssistantError(str(error)) from error
         if result.conflicted:
             raise HomeAssistantError("Appliance state changed during the status read; try again.")
-        if self._state.transport_generation != self._transport_generation:
+        if self._confirmation.transport_generation != self._transport_generation:
             raise HomeAssistantError(
                 "The push connection changed during the status read; try again."
             )
@@ -837,7 +837,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         request = self._read_requests
         report_error = bool(self._pending_read_error_requests)
         self._pending_read_error_requests.clear()
-        confirmation = self._state.count
+        confirmation = self._confirmation.count
         try:
             data, conflicted, missing, superseded = await self._async_fetch_state()
         except Exception as error:
@@ -860,8 +860,8 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         confirmed = (
             self.confirmed_at
             if not conflicted
-            and self._state.count > confirmation
-            and self._state.transport_generation == self._transport_generation
+            and self._confirmation.count > confirmation
+            and self._confirmation.transport_generation == self._transport_generation
             else None
         )
         result = self._completed_read = StateRead(
@@ -995,7 +995,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         if received and (not model or model == data.get("appliance_model")):
             # A reply published after a conflict or a reconnect still shows
             # what reads report, so it is recorded without certifying state.
-            self._state.confirm(
+            self._confirmation.confirm(
                 data,
                 self.data,
                 "read",
@@ -1024,7 +1024,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         # What the published state lacks of the keys reads report, for the
         # read_status response. A snapshot during the read may have confirmed
         # state the result no longer carries.
-        missing = self._state.missing_read_keys(data)
+        missing = self._confirmation.missing_read_keys(data)
         return data, conflicted, missing, superseded
 
     async def async_recover(self) -> None:
@@ -1094,7 +1094,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         if zone := clock_zone(update.properties.get("time")):
             self.clock_zone = zone
         properties = {key: value for key, value in update.properties.items() if key in STATE_KEYS}
-        confirmed_snapshot = update.full and self._state.confirm(
+        confirmed_snapshot = update.full and self._confirmation.confirm(
             properties, self.data, "snapshot", self._transport_generation
         )
         # Like a read, the snapshot that ends a push interruption replaces cached

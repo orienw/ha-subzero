@@ -79,6 +79,12 @@ class PendingRead:
         self.snapshot: dict | None = None
         self.error: Exception | None = None
 
+    def fail(self, error: Exception) -> None:
+        self.error = error
+
+    def clear_error(self) -> None:
+        self.error = None
+
     def record_update(
         self,
         properties: dict,
