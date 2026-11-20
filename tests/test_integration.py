@@ -314,6 +314,7 @@ async def test_initial_push_can_load_without_a_status_read(hass, loaded, monkeyp
     closed = asyncio.Event()
 
     async def watch(device_ids):
+        client.push_connected = True
         try:
             yield (
                 "test-fridge",
@@ -342,6 +343,7 @@ async def test_startup_read_keeps_newer_push_state(hass, loaded):
     updates = asyncio.Queue()
 
     async def watch(device_ids):
+        client.push_connected = True
         connected.set()
         while True:
             yield "test-fridge", await updates.get()
@@ -369,6 +371,7 @@ async def test_serial_follows_newer_push_state(hass, loaded):
     updates = asyncio.Queue()
 
     async def watch(device_ids):
+        client.push_connected = True
         connected.set()
         while True:
             yield "test-fridge", await updates.get()
@@ -406,6 +409,7 @@ async def test_startup_push_survives_a_pending_status_read_failure(hass, loaded)
     delivered = asyncio.Event()
 
     async def watch(device_ids):
+        client.push_connected = True
         while True:
             yield "test-fridge", await updates.get()
             delivered.set()
@@ -512,6 +516,7 @@ async def test_startup_status_can_restore_state_despite_a_rejected_channel(hass,
     closed = asyncio.Event()
 
     async def watch(device_ids):
+        client.push_connected = True
         try:
             while True:
                 yield "test-fridge", await updates.get()

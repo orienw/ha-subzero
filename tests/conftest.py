@@ -13,7 +13,7 @@ from homeassistant.util.unit_system import US_CUSTOMARY_SYSTEM
 
 from custom_components.subzero.api import Appliance, StateUpdate, token_state
 from custom_components.subzero.const import DOMAIN
-from tests.common import MockConfigEntry
+from tests.common import MockConfigEntry, setup_channel_events
 
 
 def make_tokens(user_id="test-owner", *, expires_in=3600, refresh_token="test-refresh"):
@@ -61,6 +61,8 @@ async def cloud_appliance(hass, tokens, request, enable_custom_integrations):
     updates = asyncio.Queue()
 
     async def watch(device_ids):
+        for event in setup_channel_events(hass, device_ids):
+            yield event
         while True:
             yield await updates.get()
 
@@ -141,6 +143,8 @@ async def loaded(hass, tokens, request, enable_custom_integrations):
         client.push_connected = True
         connected.set()
         try:
+            for event in setup_channel_events(hass, device_ids):
+                yield event
             while True:
                 event = await updates.get()
                 if isinstance(event, Exception):

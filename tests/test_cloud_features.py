@@ -37,6 +37,7 @@ from tests.common import (
     MockConfigEntry,
     async_capture_events,
     async_fire_time_changed,
+    setup_channel_events,
 )
 
 pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
@@ -160,6 +161,8 @@ async def appliances(hass, tokens, request, unit_system):
         await hass.async_block_till_done()
 
     async def watch(device_ids):
+        for event in setup_channel_events(hass, device_ids):
+            yield event
         while True:
             yield await updates.get()
 

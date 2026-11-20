@@ -21,7 +21,7 @@ from custom_components.subzero.api import (
 from custom_components.subzero.auth import InvalidAuth
 from custom_components.subzero.const import DOMAIN
 from custom_components.subzero.controls import is_wine, supports_control, temperature_range
-from tests.common import MockConfigEntry, async_fire_time_changed
+from tests.common import MockConfigEntry, async_fire_time_changed, setup_channel_events
 
 pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
 
@@ -74,6 +74,8 @@ async def controls(hass, tokens, request):
     async def watch(device_ids):
         client.push_connected = True
         try:
+            for event in setup_channel_events(hass, device_ids):
+                yield event
             while True:
                 update = await updates.get()
                 if isinstance(update, Exception):
