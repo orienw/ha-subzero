@@ -433,6 +433,7 @@ class SubZeroBroilLevelSensor(SubZeroEntity, SensorEntity):
 
 
 class SubZeroActiveFaultsSensor(CoordinatorEntity[SubZeroFaultsCoordinator], SensorEntity):
+    _unrecorded_attributes = frozenset({"faults"})
     _attr_has_entity_name = True
     _attr_name = "Active faults"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
