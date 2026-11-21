@@ -104,6 +104,28 @@ async def test_state_checks_default_off_and_preserve_saved_interval(hass, loaded
     assert client.watched == connections
 
 
+async def test_an_update_that_cannot_be_applied_is_skipped_without_dropping_the_stream(
+    hass, loaded, monkeypatch, caplog
+):
+    entry, client, updates, disconnected, _ = loaded
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    apply_update = coordinator.apply_update
+
+    def fail_once(update, **kwargs):
+        monkeypatch.setattr(coordinator, "apply_update", apply_update)
+        raise RuntimeError("Unexpected update")
+
+    monkeypatch.setattr(coordinator, "apply_update", fail_once)
+    await updates.put(StateUpdate({"ref_set_temp": 40}, full=False))
+    await hass.async_block_till_done()
+    assert "Skipped an update for Kitchen that could not be applied" in caplog.text
+    await updates.put(StateUpdate({"ref_set_temp": 39}, full=False))
+    await hass.async_block_till_done()
+    assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "39"
+    assert not disconnected.is_set()
+    assert len(client.watched) == 1
+
+
 @pytest.mark.parametrize("system_option", [False, True])
 async def test_disabled_state_checks_do_not_request_periodic_status(hass, loaded, system_option):
     entry, client, _, _, _ = loaded

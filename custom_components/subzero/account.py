@@ -246,7 +246,14 @@ class SubZeroAccount:
                     elif isinstance(update, ChannelOpened):
                         coordinator.on_channel_opened(recover=recover)
                     else:
-                        accepted = coordinator.apply_update(update, recover=recover)
+                        try:
+                            accepted = coordinator.apply_update(update, recover=recover)
+                        except Exception:
+                            _LOGGER.exception(
+                                "Skipped an update for %s that could not be applied",
+                                coordinator.device["name"],
+                            )
+                            continue
                         if update.full and accepted and coordinator.transport_healthy:
                             if ready := self._initial_states.get(device_id):
                                 ready.set()
