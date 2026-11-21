@@ -482,9 +482,18 @@ class _SignalRWatch:
 
     async def _reopen_channels(self) -> None:
         delay = CHANNEL_REOPEN_INTERVAL
+        # Appliance messages received when the last accepted reopen started, and how
+        # many accepted reopens in a row the connection has left unanswered.
+        reopened_at: int | None = None
+        unanswered = 0
         while True:
             await asyncio.sleep(delay)
             delay = CHANNEL_REOPEN_INTERVAL
+            received = self._client.notification_stats["received"]
+            unanswered = unanswered + 1 if received == reopened_at else 0
+            if unanswered >= 2:
+                raise ApiError("Sub-Zero's notification connection stopped delivering updates.")
+            reopened_at = None
             for index, device_id in enumerate(self._device_ids, 1):
                 if device_id in self._pending_channels:
                     continue
@@ -508,6 +517,7 @@ class _SignalRWatch:
                     )
                 else:
                     _LOGGER.debug("Update channel reopen accepted for appliance %d", index)
+                    reopened_at = received
 
     def _parse_frame(self, frame: str) -> tuple[str, StateUpdate] | None:
         try:

@@ -1273,6 +1273,39 @@ async def test_appliance_channels_reopen_without_reconnecting(
     assert resume.cancelled()
 
 
+async def test_a_connection_that_answers_no_reopens_is_replaced(
+    notification_stream, channel_reopen_waits
+):
+    client, _, _, sockets = notification_stream
+    stream = client.watch(["test-fridge", "test-oven"])
+    try:
+        async with asyncio.timeout(5):
+            assert await anext(stream) == ("test-fridge", api.ChannelOpened())
+            assert await anext(stream) == ("test-oven", api.ChannelOpened())
+            _, resume = await channel_reopen_waits.get()
+            resume.set_result(None)
+            _, resume = await channel_reopen_waits.get()
+            # A message after a reopen shows the connection still delivers.
+            await sockets[0].send_str(
+                json.dumps(notification({"ref_door_ajar": True})) + api.SEPARATOR
+            )
+            assert await anext(stream) == (
+                "test-fridge",
+                api.StateUpdate({"ref_door_ajar": True}, full=False),
+            )
+            resume.set_result(None)
+            _, resume = await channel_reopen_waits.get()
+            resume.set_result(None)
+            _, resume = await channel_reopen_waits.get()
+            assert client.open_channel.await_count == 8
+            resume.set_result(None)
+            with pytest.raises(api.ApiError, match="stopped delivering updates"):
+                await anext(stream)
+            assert client.open_channel.await_count == 8
+    finally:
+        await stream.aclose()
+
+
 async def test_channel_reopen_skips_pending_initial_channels(
     notification_stream, channel_reopen_waits
 ):
