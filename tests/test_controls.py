@@ -518,6 +518,9 @@ async def test_invalid_temperatures_do_not_reach_the_api(hass, controls, entity,
         ("refrigerator", "ref_set_temp", 4, 39),
         ("refrigerator", "ref_set_temp", 5.5, 42),
         ("freezer", "frz_set_temp", -20, -4),
+        # Home Assistant widens the slider to whole degrees and clamps its ends.
+        ("refrigerator", "ref_set_temp", 6, 42),
+        ("freezer", "frz_set_temp", -21, -5),
     ],
 )
 async def test_celsius_display_converts_to_a_whole_fahrenheit_setpoint(
