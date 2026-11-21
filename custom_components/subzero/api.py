@@ -1076,11 +1076,12 @@ class SubZeroClient:
         # Azure SignalR refuses a connection made more than 5 s after its negotiate.
         stack = AsyncExitStack()
         try:
-            websocket = await stack.enter_async_context(
-                self.session.ws_connect(
-                    ws_url, headers={**APP_HEADERS, **headers}, max_msg_size=262144
+            async with asyncio.timeout(30):
+                websocket = await stack.enter_async_context(
+                    self.session.ws_connect(
+                        ws_url, headers={**APP_HEADERS, **headers}, max_msg_size=262144
+                    )
                 )
-            )
             await websocket.send_str('{"protocol":"json","version":1}' + SEPARATOR)
             first = await websocket.receive(timeout=20)
             if first.type != aiohttp.WSMsgType.TEXT or SEPARATOR not in first.data:
