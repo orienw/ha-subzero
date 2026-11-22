@@ -60,10 +60,10 @@ Open **Configure** on the Sub-Zero integration at any time to adjust your setup:
 <img src="docs/images/configure.png" alt="Sub-Zero Configure dialog with appliance selection, Firebase alerts, and state check interval" width="480">
 
 - **Appliances:** Add newly connected appliances or remove existing ones. Deselecting an appliance removes its Home Assistant device and entities.
-- **State check interval:** Updates normally arrive live via cloud push, so periodic checks default to **No periodic checks**. You can choose a 1-, 2-, 5-, or 10-minute interval as a safety net to catch missed updates. If live updates are interrupted, the integration automatically checks each appliance every minute until live updates recover, regardless of this setting.
+- **State check interval:** Updates normally arrive live via cloud push, so periodic checks default to **No periodic checks**. You can choose a 1-, 2-, 5-, or 10-minute interval as a safety net to catch missed updates. While live updates are unavailable or waiting to start, the integration automatically checks reachable appliances every minute until live updates are confirmed, regardless of this setting.
 - **Firebase appliance alerts:** Optional and off by default. Turn this on to receive appliance alerts over a separate Firebase notification channel into the same **Appliance event** entity. It delivers alerts only; sensor values still come from appliance status updates.
 
-If you turn off Home Assistant's built-in **Enable polling for updates** system option for this integration, scheduled state checks (including checks during a push interruption), alert follow-up reads, and 30-minute **Active faults** refreshes are all paused.
+If you turn off Home Assistant's built-in **Enable polling for updates** system option for this integration, scheduled state checks (including automatic one-minute checks while live updates are unavailable), alert follow-up reads, and 30-minute **Active faults** refreshes are all paused.
 
 ## Using the controls
 
@@ -99,14 +99,14 @@ Because cloud updates can occasionally be missed, call **Sub-Zero: Read applianc
 
 Select your appliance in Home Assistant's action editor to fill in `device_id`, and replace the door entity ID with your own.
 
-The action waits for a fresh status read and for the updated state to reach Home Assistant. The action errors (stopping the automation unless you enable `continue_on_error`) if the read fails, the state changes, or the live connection drops or reconnects during the read.
+The action waits for a fresh status read and for the updated state to reach Home Assistant. Live updates that arrive during the read are kept over the reply, so concurrent changes do not cause the action to fail. The action errors (stopping the automation unless you enable `continue_on_error`) if the read fails, the live connection changes during the read, or the reply carries no usable state.
 
 ## Troubleshooting
 
 ### Common issues
 
-- **An appliance is unavailable or its state looks stale:** During a cloud push interruption, established readings stay available for up to two minutes and turn unavailable only if neither a live update nor a status read reconfirms state in time. While Home Assistant polling is enabled, automatic one-minute checks run during push outages and extend that window as long as status reads succeed, though values can be up to a minute old and brief changes between checks will not be seen. Run **Sub-Zero: Read appliance status** to request fresh state, verify the appliance is online in the Sub-Zero Group Owner's App, and consider enabling a **State check interval** in **Configure** if updates are frequently missed. You can also enable the disabled **State confirmed** diagnostic sensor to see when state was last confirmed.
-- **A control is unavailable or refuses changes:** Check the appliance interlocks in [Using the controls](#using-the-controls), such as **Remote Ready** on ovens and dishwashers, **Max ice** on freezers, and **Manual** crisper temperature mode.
+- **An appliance is unavailable or its state looks stale:** While live updates are not established, readings stay available for up to two minutes and turn unavailable if neither a status read nor a full live update refreshes state in time. While Home Assistant polling is enabled, automatic one-minute checks keep reachable appliances available as long as status reads succeed, though values can be up to a minute old and brief changes between checks will not be seen. Run **Sub-Zero: Read appliance status** to request fresh state, verify the appliance is online in the Sub-Zero Group Owner's App, and consider enabling a **State check interval** in **Configure** if updates are frequently missed. You can also enable the disabled **State confirmed** diagnostic sensor to see when state was last confirmed.
+- **A control is unavailable or refuses changes:** Check the appliance interlocks in [Using the controls](#using-the-controls), such as **Remote Ready** on ovens and dishwashers, **Max ice** on freezers, and **Manual** crisper temperature mode. While live updates are not established for an appliance, controls also read status first and refuse changes if that read fails.
 - **An appliance is missing:** Confirm the model is cloud-connected (see [What it supports](#what-it-supports)), and open **Configure** to make sure it is checked.
 - **Repair says "Firebase appliance alerts aren't working":** This appears after three consecutive failures. Firebase alerts use a separate channel from regular appliance updates, and the repair clears automatically once alerts succeed again. To stop trying, turn off **Firebase appliance alerts** in **Configure**.
 - **Home Assistant asks you to sign in again:** Your renewable account tokens expired or were rejected. Follow Home Assistant's re-authentication prompt to sign in again.
