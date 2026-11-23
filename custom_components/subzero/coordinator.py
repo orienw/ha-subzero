@@ -130,7 +130,7 @@ class PushLink:
         self._grace_task: asyncio.Task | None = None
 
     @property
-    def healthy(self) -> bool:
+    def established(self) -> bool:
         return self.error is None
 
     @property
@@ -276,7 +276,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         }
 
     @callback
-    def _certify_state(self, properties: dict) -> bool:
+    def _confirm_state(self, properties: dict) -> bool:
         model = properties.get("appliance_model")
         if not isinstance(model, str) or not model:
             return False
@@ -284,8 +284,8 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         return True
 
     @property
-    def transport_healthy(self) -> bool:
-        return self._push.healthy
+    def live_updates_established(self) -> bool:
+        return self._push.established
 
     @property
     def receiving_live_updates(self) -> bool:
@@ -294,7 +294,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
 
     @property
     def waiting_for_push(self) -> bool:
-        return not self._push.healthy and not self._push.channel_refused
+        return not self._push.established and not self._push.channel_refused
 
     @property
     def can_verify_state(self) -> bool:
@@ -316,7 +316,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
     def start_recovery_if_needed(self) -> None:
         """Start recovery when a status read on the open channel could establish live updates."""
         if (
-            (not self.last_update_success or not self._push.healthy)
+            (not self.last_update_success or not self._push.established)
             and self.receiving_live_updates
             and not self._sign_in_failed
         ):
@@ -545,7 +545,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         the next command reads state before deciding what to write.
         """
         async with self._command_lock:
-            if self._unsettled or not self._push.healthy or not self.client.push_connected:
+            if self._unsettled or not self._push.established or not self.client.push_connected:
                 try:
                     await self.async_read_status()
                 except HomeAssistantError as error:
@@ -624,7 +624,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
     ) -> None:
         unit = self.device.get("temperature_unit")
         if properties and not force and all(held_for_start(self.data, key) for key in properties):
-            if not self._push.healthy or not self.client.push_connected:
+            if not self._push.established or not self.client.push_connected:
                 # Remote Ready could end and return unseen before the start.
                 raise ServiceValidationError(
                     "Home Assistant is reconnecting to the appliance; try again."
@@ -933,7 +933,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             return StateRead(request, None, epoch=pending.epoch)
         data = pending.merge(reply, self.data)
         confirmed_at = None
-        if self._certify_state(data):
+        if self._confirm_state(data):
             confirmed_at = self.confirmed_at
             self._push.confirm(push_connected=self.client.push_connected)
         self.async_set_updated_data(data)
@@ -978,7 +978,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         """Restore unavailable state while the appliance is reporting again."""
         backoff = RECONNECT_DELAY
         try:
-            while not self.last_update_success or not self._push.healthy:
+            while not self.last_update_success or not self._push.established:
                 _LOGGER.debug("Refreshing %s to recover appliance state", self.device["name"])
                 try:
                     result = await self._async_read_result(report_error=False)
@@ -987,7 +987,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                     if result.epoch != self._push.epoch:
                         # The connection changed around the read, so read again on it.
                         continue
-                    if not self._push.healthy and result.confirmed_at is None:
+                    if not self._push.established and result.confirmed_at is None:
                         raise UpdateFailed(
                             "The appliance state was not reconfirmed after reconnecting."
                         )
@@ -996,7 +996,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                     self.entry.async_start_reauth(self.hass)
                     return
                 except Exception as error:
-                    if self.last_update_success and self._push.healthy:
+                    if self.last_update_success and self._push.established:
                         return
                     if not self._push.in_grace:
                         self.async_set_update_error(error)
@@ -1046,13 +1046,13 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         if zone := clock_zone(update.properties.get("time")):
             self.clock_zone = zone
         properties = {key: value for key, value in update.properties.items() if key in STATE_KEYS}
-        confirmed_snapshot = update.full and self._certify_state(properties)
+        confirmed_snapshot = update.full and self._confirm_state(properties)
         # Like a read, a snapshot after an interruption replaces cached state, so
         # values only pushed as partial updates do not outlive it.
         replace = update.full and (
             not self.last_update_success
             or properties.get("appliance_model") != self.data.get("appliance_model")
-            or (confirmed_snapshot and not self._push.healthy)
+            or (confirmed_snapshot and not self._push.established)
         )
         if confirmed_snapshot and not self._sign_in_failed:
             # It keeps the appliance available with what it carries. A status read

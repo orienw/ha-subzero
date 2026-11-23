@@ -38,7 +38,7 @@ def make_link(
 )
 async def test_first_loss_transitions(lost_flag, can_grace, expected_in_grace, expected_expired):
     link, expired, tasks = make_link()
-    assert link.healthy
+    assert link.established
     assert not link.in_grace
     assert not link.expired
     assert link.epoch == 0
@@ -49,7 +49,7 @@ async def test_first_loss_transitions(lost_flag, can_grace, expected_in_grace, e
         assert advanced is True
         assert link.epoch == 1
         assert link.error is err
-        assert not link.healthy
+        assert not link.established
         assert link.in_grace is expected_in_grace
         assert link.expired is expected_expired
         assert len(tasks) == (1 if expected_in_grace else 0)
@@ -142,14 +142,14 @@ async def test_confirm_before_the_channel_opens_leaves_the_link_in_grace(push_co
     try:
         # A read that setup makes before the appliance's channel has opened.
         link.confirm(push_connected=push_connected)
-        assert not link.healthy
+        assert not link.established
         assert link.in_grace
         assert link.epoch == 0
         # The channel opening makes that read stale, and a later read confirms.
         assert link.channel_opened()
         assert link.epoch == 1
         link.confirm(push_connected=True)
-        assert link.healthy
+        assert link.established
         assert not link.in_grace
     finally:
         link.cancel_grace()
@@ -161,7 +161,7 @@ async def test_confirm_on_an_established_link_changes_nothing():
     link, expired, tasks = make_link()
     link.channel_opened()
     link.confirm(push_connected=True)
-    assert link.healthy
+    assert link.established
     assert not link.in_grace
     assert not link.expired
     assert link.epoch == 1
@@ -170,7 +170,7 @@ async def test_confirm_on_an_established_link_changes_nothing():
 
 
 @pytest.mark.parametrize(
-    ("initial", "push_connected", "expected_healthy", "expected_in_grace", "expected_tasks"),
+    ("initial", "push_connected", "expected_established", "expected_in_grace", "expected_tasks"),
     [
         ("in_grace", True, True, False, 1),
         ("in_grace", False, False, True, 2),
@@ -179,7 +179,7 @@ async def test_confirm_on_an_established_link_changes_nothing():
     ],
 )
 async def test_confirm_transitions(
-    initial, push_connected, expected_healthy, expected_in_grace, expected_tasks
+    initial, push_connected, expected_established, expected_in_grace, expected_tasks
 ):
     link, expired, tasks = make_link(grace_seconds=0 if initial == "expired" else 10)
     link.fail(ApiError("Disconnected"), lost=True, can_grace=True)
@@ -191,7 +191,7 @@ async def test_confirm_transitions(
             # The stream is back and the appliance's channel has opened on it.
             link.channel_opened()
         link.confirm(push_connected=push_connected)
-        assert link.healthy is expected_healthy
+        assert link.established is expected_established
         assert link.in_grace is expected_in_grace
         assert not link.expired
         assert link.epoch == (2 if push_connected else 1)
@@ -209,7 +209,7 @@ async def test_refused_channel_needs_a_read_after_it_reopens():
     link, expired, tasks = make_link(grace_seconds=10)
     error = ApiError("Channel refused")
     link.channel_failed(error)
-    assert not link.healthy
+    assert not link.established
     assert link.channel_refused
     assert not link.channel_open
     assert link.expired
@@ -217,14 +217,14 @@ async def test_refused_channel_needs_a_read_after_it_reopens():
     try:
         # A read while the channel is down keeps state for a grace window only.
         link.confirm(push_connected=True)
-        assert not link.healthy
+        assert not link.established
         assert link.in_grace
         link.channel_opened()
         # A read from before the channel opened is no longer current.
         assert link.epoch == 1
-        assert not link.healthy
+        assert not link.established
         link.confirm(push_connected=True)
-        assert link.healthy
+        assert link.established
         assert not link.in_grace
     finally:
         link.cancel_grace()
@@ -248,13 +248,13 @@ async def test_read_on_a_returned_stream_needs_the_channel_open_to_confirm():
     link.fail(ApiError("Stream disconnected"), lost=True, can_grace=True)
     try:
         link.confirm(push_connected=True)
-        assert not link.healthy
+        assert not link.established
         assert link.in_grace
         link.channel_opened()
         link.channel_opened()
         assert link.epoch == 2
         link.confirm(push_connected=True)
-        assert link.healthy
+        assert link.established
     finally:
         link.cancel_grace()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -263,7 +263,7 @@ async def test_read_on_a_returned_stream_needs_the_channel_open_to_confirm():
 async def test_first_channel_opening_outdates_a_read_from_before_it():
     link, _, tasks = make_link()
     assert link.channel_opened()
-    assert link.healthy
+    assert link.established
     assert link.epoch == 1
     assert not link.channel_opened()
     assert link.epoch == 1
@@ -284,7 +284,7 @@ async def test_unconfirm_requires_a_read_without_changing_the_connection():
         link.extend_grace()
         assert link.in_grace
         link.confirm(push_connected=True)
-        assert link.healthy
+        assert link.established
     finally:
         link.cancel_grace()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -293,5 +293,5 @@ async def test_unconfirm_requires_a_read_without_changing_the_connection():
 async def test_extend_grace_is_a_noop_while_live_updates_are_established():
     link, _, tasks = make_link()
     link.extend_grace()
-    assert link.healthy
+    assert link.established
     assert tasks == []

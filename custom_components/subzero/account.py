@@ -253,7 +253,7 @@ class SubZeroAccount:
                                 coordinator.device["name"],
                             )
                             continue
-                        if update.full and accepted and coordinator.transport_healthy:
+                        if update.full and accepted and coordinator.live_updates_established:
                             if ready := self._initial_states.get(device_id):
                                 ready.set()
                 raise ApiError("Sub-Zero's notification stream ended.")

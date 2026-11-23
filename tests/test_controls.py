@@ -821,7 +821,7 @@ async def test_control_reads_first_until_a_status_read_confirms_a_reconnect(
     await controls.updates.put(("test-fridge", StateUpdate(snapshot, full=True)))
     await asyncio.wait_for(reading.wait(), 1)
     assert coordinator.last_update_success
-    assert not coordinator.transport_healthy
+    assert not coordinator.live_updates_established
     assert "max_ice_on" not in coordinator.data
 
     command = asyncio.create_task(coordinator.async_set_properties({"frz_set_temp": 1}))
@@ -892,13 +892,13 @@ async def test_read_before_the_channel_opens_does_not_establish_live_updates(has
     assert controls.client.push_connected
     await coordinator.async_refresh()
     assert coordinator.last_update_success
-    assert not coordinator.transport_healthy
+    assert not coordinator.live_updates_established
     controls.states["test-fridge"]["max_ice_on"] = True
     reads = controls.client.state.await_count
     await controls.updates.put(("test-fridge", ChannelOpened()))
     await hass.async_block_till_done()
     assert controls.client.state.await_count == reads + 1
-    assert coordinator.transport_healthy
+    assert coordinator.live_updates_established
     assert coordinator.data["max_ice_on"] is True
 
 
@@ -908,14 +908,14 @@ async def test_reopened_channel_is_confirmed_by_a_fresh_read(hass, controls):
     # A status read restores availability while the channel is down.
     await coordinator.async_refresh()
     assert coordinator.last_update_success
-    assert not coordinator.transport_healthy
+    assert not coordinator.live_updates_established
     assert not coordinator.receiving_live_updates
     controls.states["test-fridge"]["max_ice_on"] = True
     reads = controls.client.state.await_count
     await controls.updates.put(("test-fridge", ChannelOpened()))
     await hass.async_block_till_done()
     assert controls.client.state.await_count == reads + 1
-    assert coordinator.transport_healthy
+    assert coordinator.live_updates_established
     assert coordinator.receiving_live_updates
     assert coordinator.data["max_ice_on"] is True
 

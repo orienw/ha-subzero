@@ -193,7 +193,7 @@ async def test_old_full_push_still_shows_the_channel_is_open(dated):
     assert coordinator.apply_update(snapshot(older), recover=True) is False
     await asyncio.sleep(0)
     assert client.state.await_count == reads + 1
-    assert coordinator.transport_healthy
+    assert coordinator.live_updates_established
     assert coordinator.data["ref_door_ajar"] is True
 
 
@@ -397,7 +397,7 @@ async def test_recovery_read_does_not_bring_back_what_a_replacing_snapshot_dropp
     # the rest, and a reply that also lacks the door leaves it unknown.
     read_during(coordinator, client, partial(ref_door_ajar=True), snapshot(INCOMPLETE), reply=reply)
     await coordinator.async_read_status()
-    assert coordinator.transport_healthy
+    assert coordinator.live_updates_established
     assert "ref_door_ajar" not in coordinator.data
 
 
@@ -415,7 +415,7 @@ async def test_recovery_reads_again_when_the_channel_opens_around_its_read(fridg
         coordinator._read_task.add_done_callback(lambda _: coordinator.on_channel_opened())
     release.set()
     await asyncio.wait_for(recovery, 1)
-    assert coordinator.transport_healthy
+    assert coordinator.live_updates_established
     assert client.state.await_count == 2
 
 
@@ -439,13 +439,13 @@ async def test_recovery_runs_after_a_sign_in_failure_that_has_cleared(fridge):
     assert not coordinator.last_update_success
     client.state.side_effect = None
     await coordinator.async_read_status()
-    assert coordinator.transport_healthy
+    assert coordinator.live_updates_established
     reads = client.state.await_count
     coordinator.async_transport_error(ApiError("Stream disconnected"))
     coordinator.on_channel_opened()
     await coordinator._recovery_task
     assert client.state.await_count == reads + 1
-    assert coordinator.transport_healthy
+    assert coordinator.live_updates_established
 
 
 async def test_read_without_a_usable_model_does_not_establish_live_updates(fridge):
@@ -455,7 +455,7 @@ async def test_read_without_a_usable_model_does_not_establish_live_updates(fridg
     read_during(coordinator, client, partial(appliance_model=""))
     with pytest.raises(HomeAssistantError, match="usable state"):
         await coordinator.async_read_status()
-    assert not coordinator.transport_healthy
+    assert not coordinator.live_updates_established
 
 
 async def test_snapshot_after_a_failed_initial_read_still_needs_a_confirming_read(hass, loaded):
@@ -467,7 +467,7 @@ async def test_snapshot_after_a_failed_initial_read_still_needs_a_confirming_rea
     assert not coordinator.last_update_success
     coordinator.apply_update(snapshot(INCOMPLETE))
     assert coordinator.last_update_success
-    assert not coordinator.transport_healthy
+    assert not coordinator.live_updates_established
 
 
 async def test_replacing_snapshot_keeps_the_type_pushed_before_it_over_the_reply(fridge):
@@ -501,11 +501,11 @@ async def test_read_that_started_before_the_channel_opened_does_not_end_the_reco
     with pytest.raises(HomeAssistantError, match="push connection changed"):
         await coordinator.async_read_status()
     assert coordinator.data["ref_door_ajar"] is True
-    assert not coordinator.transport_healthy
+    assert not coordinator.live_updates_established
     client.state.side_effect = None
     client.state.return_value["ref_door_ajar"] = True
     await coordinator.async_read_status()
-    assert coordinator.transport_healthy
+    assert coordinator.live_updates_established
 
 
 @pytest.mark.parametrize(
@@ -690,7 +690,7 @@ async def test_reply_spanning_a_connection_change_is_not_published(hass, freezer
     assert coordinator.data["ref_set_temp"] == 38
     assert ("ref_door_ajar" in coordinator.data) is (after == "nothing")
     assert coordinator.last_update_success is (after != "channel-error")
-    assert not coordinator.transport_healthy
+    assert not coordinator.live_updates_established
 
 
 async def test_reply_straddling_a_reconnect_still_delivers_the_events_in_its_history(fridge):
@@ -761,7 +761,7 @@ async def test_incomplete_observations_revive_expired_transport_state(
     coordinator.apply_update(snapshot(appliance_model=complete["appliance_model"], ref_set_temp=39))
     await hass.async_block_till_done()
     assert coordinator.last_update_success
-    assert not coordinator.transport_healthy
+    assert not coordinator.live_updates_established
     assert hass.states.get(DOOR).state == "unavailable"
     assert hass.states.get(SETPOINT).state == "39"
     freezer.tick(1)
@@ -1100,7 +1100,7 @@ async def test_auth_failure_is_recovered_by_the_read_a_snapshot_prompts(
     await updates.put(snapshot(client.state.return_value))
     await hass.async_block_till_done()
     assert coordinator.last_update_success
-    assert coordinator.transport_healthy
+    assert coordinator.live_updates_established
     assert client.state.await_count == 3
     freezer.tick(301)
     async_fire_time_changed(hass, dt_util.utcnow())

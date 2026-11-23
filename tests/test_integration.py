@@ -582,7 +582,7 @@ async def test_setup_read_before_the_channel_opens_does_not_establish_live_updat
     # Setup read the appliance, but its channel has not opened.
     client.state.assert_awaited_once()
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
-    assert not coordinator.transport_healthy
+    assert not coordinator.live_updates_established
     assert not coordinator.receiving_live_updates
     if opens:
         # The read that follows the channel opening confirms state.
@@ -590,7 +590,7 @@ async def test_setup_read_before_the_channel_opens_does_not_establish_live_updat
         await updates.put(ChannelOpened())
         await hass.async_block_till_done()
         assert client.state.await_count == 2
-        assert coordinator.transport_healthy
+        assert coordinator.live_updates_established
         assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
     else:
         # Like any interruption, the reading ages out when nothing confirms it.
@@ -634,7 +634,7 @@ async def test_setup_read_spanning_the_channel_opening_reads_again(hass, loaded,
     assert entry.state is ConfigEntryState.LOADED
     assert client.state.await_count == 2
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
-    assert entry.runtime_data.coordinators["test-fridge"].transport_healthy
+    assert entry.runtime_data.coordinators["test-fridge"].live_updates_established
 
 
 async def test_setup_read_survives_the_first_stream_attempt_failing(hass, loaded):
@@ -663,7 +663,7 @@ async def test_setup_read_survives_the_first_stream_attempt_failing(hass, loaded
     assert entry.state is ConfigEntryState.LOADED
     assert client.state.await_count == 2
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
-    assert not entry.runtime_data.coordinators["test-fridge"].transport_healthy
+    assert not entry.runtime_data.coordinators["test-fridge"].live_updates_established
 
 
 async def test_setup_reads_status_after_only_a_partial_update(hass, loaded, monkeypatch):
@@ -730,7 +730,7 @@ async def test_full_service_at_startup_is_not_logged_as_an_error(hass, loaded, c
     assert entry.state is ConfigEntryState.LOADED
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
     # Status checks still run until push connects.
-    assert not entry.runtime_data.coordinators["test-fridge"].transport_healthy
+    assert not entry.runtime_data.coordinators["test-fridge"].live_updates_established
 
 
 async def test_an_appliance_left_unread_by_setup_is_reported(hass, loaded, caplog):
@@ -1374,7 +1374,7 @@ async def test_incomplete_snapshot_keeps_a_reconnected_appliance_available_until
     # The snapshot keeps the appliance available with what it carries, but a status
     # read still has to confirm state.
     assert coordinator.confirmed_at > confirmed
-    assert not coordinator.transport_healthy
+    assert not coordinator.live_updates_established
     assert coordinator.last_update_success
     assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "40"
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "unavailable"
@@ -1383,7 +1383,7 @@ async def test_incomplete_snapshot_keeps_a_reconnected_appliance_available_until
     release.set()
     await coordinator._read_task
     await hass.async_block_till_done()
-    assert coordinator.transport_healthy
+    assert coordinator.live_updates_established
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
     assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "38"
 
@@ -1458,7 +1458,7 @@ async def test_status_checks_keep_state_available_until_push_returns(
         async_fire_time_changed(hass, dt_util.utcnow())
         await hass.async_block_till_done()
     assert client.state.await_count == 4
-    assert not coordinator.transport_healthy
+    assert not coordinator.live_updates_established
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
 
     # Push returns and its snapshot reconfirms state, so the checks stop.
@@ -1468,7 +1468,7 @@ async def test_status_checks_keep_state_available_until_push_returns(
     assert len(client.watched) == 2
     await updates.put(StateUpdate(dict(client.state.return_value), full=True))
     await hass.async_block_till_done()
-    assert coordinator.transport_healthy
+    assert coordinator.live_updates_established
     reads_after_recovery = client.state.await_count
     for _ in range(3):
         freezer.tick(60)
