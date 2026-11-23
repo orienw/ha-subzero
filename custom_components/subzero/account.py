@@ -154,8 +154,7 @@ class SubZeroAccount:
         finally:
             self._initial_states.clear()
         for coordinator in self.coordinators.values():
-            if coordinator.needs_recovery and coordinator.receiving_live_updates:
-                coordinator.start_recovery()
+            coordinator.start_recovery_if_needed()
         if metadata_error is not None:
             _LOGGER.warning(
                 "Could not refresh appliance units; using cached units where available: %s",

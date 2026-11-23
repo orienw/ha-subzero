@@ -248,7 +248,6 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self._command_lock = asyncio.Lock()
         self._command_generation = 0
         self._unsettled = False
-        self._state_lock = asyncio.Lock()
         self._read_requests = 0
         self._pending_read_error_requests: set[int] = set()
         self._read_task: asyncio.Task[StateRead] | None = None
@@ -298,12 +297,6 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         return not self._push.healthy and not self._push.channel_refused
 
     @property
-    def needs_recovery(self) -> bool:
-        return (
-            not self.last_update_success or not self._push.healthy
-        ) and not self._push.channel_refused
-
-    @property
     def can_verify_state(self) -> bool:
         if self._sign_in_failed:
             return False
@@ -320,10 +313,13 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             )
 
     @callback
-    def _maybe_start_recovery(self) -> None:
+    def start_recovery_if_needed(self) -> None:
+        """Start recovery when a status read on the open channel could establish live updates."""
         if (
-            not self.last_update_success or not self.transport_healthy
-        ) and not self._sign_in_failed:
+            (not self.last_update_success or not self._push.healthy)
+            and self.receiving_live_updates
+            and not self._sign_in_failed
+        ):
             self.start_recovery()
 
     @callback
@@ -347,7 +343,7 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         if self._push.channel_opened():
             self.async_update_listeners()
         if recover:
-            self._maybe_start_recovery()
+            self.start_recovery_if_needed()
 
     @callback
     def on_channel_error(self, error: ApiError) -> None:
@@ -424,6 +420,8 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             if self.last_update_success and held_for_start(data, key)
         }
         if self._push.expired:
+            # A status read or a full update extends the grace window before it
+            # publishes. Nothing has here, so the appliance stays unavailable.
             self.data = data
             self.async_update_listeners()
         else:
@@ -540,8 +538,8 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         return info
 
     @asynccontextmanager
-    async def _command(self) -> AsyncIterator[None]:
-        """Serialize commands.
+    async def _command(self, action: str = "change settings") -> AsyncIterator[None]:
+        """Serialize commands and report a request that fails as an error.
 
         A cancelled command can still change the appliance after the last read, so
         the next command reads state before deciding what to write.
@@ -553,12 +551,19 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 except HomeAssistantError as error:
                     raise ServiceValidationError(str(error)) from error
                 self._unsettled = False
+            if not self.last_update_success:
+                raise ServiceValidationError("The appliance is unavailable.")
             self._command_generation = self._push.epoch
             try:
                 yield
             except asyncio.CancelledError:
                 self._unsettled = True
                 raise
+            except InvalidAuth as error:
+                self.entry.async_start_reauth(self.hass)
+                raise HomeAssistantError(f"Sign in to Sub-Zero again to {action}.") from error
+            except ApiError as error:
+                raise HomeAssistantError(str(error)) from error
 
     async def _async_confirm_command_generation(self) -> None:
         if self._command_generation != self._push.epoch:
@@ -569,8 +574,8 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         """Serialize writes and confirm their result from appliance state.
 
         Forced writes go out even when the appliance already reports the value,
-        which is how the app starts ovens and cancels wash cycles. A value the appliance already reports
-        is re-sent as is, without the checks a change needs.
+        which is how the app starts ovens and cancels wash cycles. A value the
+        appliance already reports is re-sent as is, without the checks a change needs.
         """
         async with self._command():
             await self._async_write(dict(properties), force=force)
@@ -589,8 +594,6 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
 
     async def async_cancel_wash(self) -> None:
         async with self._command():
-            if not self.last_update_success:
-                raise ServiceValidationError("The appliance is unavailable.")
             if not wash_cancel_enabled(self.data):
                 raise ServiceValidationError("There is no wash cycle to cancel.")
             # Like the app, cancel even when the cycle already reports off, as it
@@ -603,8 +606,6 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         A timer that was finished when asked is not stopped if it restarts first.
         """
         async with self._command():
-            if not self.last_update_success:
-                raise ServiceValidationError("The appliance is unavailable.")
             prefix = KITCHEN_TIMERS[key]
             if self.data.get(f"{prefix}_complete") is not True and not (
                 running and self.data.get(f"{prefix}_active") is True
@@ -621,8 +622,6 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
     async def _async_write(
         self, properties: dict, *, force: bool = False, start: bool = False
     ) -> None:
-        if not self.last_update_success:
-            raise ServiceValidationError("The appliance is unavailable.")
         unit = self.device.get("temperature_unit")
         if properties and not force and all(held_for_start(self.data, key) for key in properties):
             if not self._push.healthy or not self.client.push_connected:
@@ -658,52 +657,34 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         if changes or not force:
             validate_control_properties(self.data, unit, changes, pending)
         requested_at = {}
-        try:
-            for key, value in properties.items():
-                pending.pop(key, None)
-                if not self.last_update_success:
-                    raise ServiceValidationError("The appliance is unavailable.")
-                requested_at[key] = dt_util.utcnow()
-                if (
-                    force
-                    or (
-                        key in KITCHEN_TIMERS
-                        # Setting a finished timer to 0 clears it, as the app does.
-                        and (value > 0 or self.data.get(f"{KITCHEN_TIMERS[key]}_complete") is True)
-                    )
-                    or not control_matches(
-                        self.data, key, value, requested_at[key], self.clock_zone
-                    )
-                ):
-                    requested_at[key] = await self._async_set_property(
-                        key, value, resend=key not in changes, pending=pending
-                    )
-            if not self.last_update_success or any(
-                not control_matches(self.data, key, value, requested_at[key], self.clock_zone)
-                for key, value in properties.items()
-            ):
-                raise HomeAssistantError("The appliance did not confirm the requested setting.")
-        except InvalidAuth as error:
-            self.entry.async_start_reauth(self.hass)
-            raise HomeAssistantError("Sign in to Sub-Zero again to change settings.") from error
-        except ApiError as error:
-            raise HomeAssistantError(str(error)) from error
-
-    async def async_reset_air_filter(self) -> None:
-        async with self._command():
+        for key, value in properties.items():
+            pending.pop(key, None)
             if not self.last_update_success:
                 raise ServiceValidationError("The appliance is unavailable.")
+            requested_at[key] = dt_util.utcnow()
+            if (
+                force
+                or (
+                    key in KITCHEN_TIMERS
+                    # Setting a finished timer to 0 clears it, as the app does.
+                    and (value > 0 or self.data.get(f"{KITCHEN_TIMERS[key]}_complete") is True)
+                )
+                or not control_matches(self.data, key, value, requested_at[key], self.clock_zone)
+            ):
+                requested_at[key] = await self._async_set_property(
+                    key, value, resend=key not in changes, pending=pending
+                )
+        if not self.last_update_success or any(
+            not control_matches(self.data, key, value, requested_at[key], self.clock_zone)
+            for key, value in properties.items()
+        ):
+            raise HomeAssistantError("The appliance did not confirm the requested setting.")
+
+    async def async_reset_air_filter(self) -> None:
+        async with self._command("reset the air filter"):
             if not supports_air_filter_reset(self.data):
                 raise ServiceValidationError("The appliance does not report an air filter.")
-            try:
-                await self.client.reset_air_filter(self.device_id)
-            except InvalidAuth as error:
-                self.entry.async_start_reauth(self.hass)
-                raise HomeAssistantError(
-                    "Sign in to Sub-Zero again to reset the air filter."
-                ) from error
-            except ApiError as error:
-                raise HomeAssistantError(str(error)) from error
+            await self.client.reset_air_filter(self.device_id)
             await self.async_refresh()
 
     async def async_set_operating_mode(self, selected: str | None) -> None:
@@ -722,17 +703,8 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
 
     async def async_set_ice_mode(self, mode: str) -> None:
         async with self._command():
-            if not self.last_update_success:
-                raise ServiceValidationError("The appliance is unavailable.")
-            properties = ice_mode_properties(self.data, mode)
-            try:
-                for key, value in properties.items():
-                    await self._async_set_property(key, value)
-            except InvalidAuth as error:
-                self.entry.async_start_reauth(self.hass)
-                raise HomeAssistantError("Sign in to Sub-Zero again to change settings.") from error
-            except ApiError as error:
-                raise HomeAssistantError(str(error)) from error
+            for key, value in ice_mode_properties(self.data, mode).items():
+                await self._async_set_property(key, value)
             if ice_mode(self.data) != mode:
                 raise HomeAssistantError("The appliance did not confirm the requested ice mode.")
 
@@ -820,8 +792,6 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         end_current: bool = False,
     ) -> None:
         async with self._command():
-            if not self.last_update_success:
-                raise ServiceValidationError("The appliance is unavailable.")
             if not is_ice_maker(self.data) or not ICE_DELAY_KEYS.issubset(self.data):
                 raise ServiceValidationError("The appliance does not report ice delay settings.")
             try:
@@ -837,14 +807,11 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                     await self.client.set_ice_delay(
                         self.device_id, duration, start_offset, recurring
                     )
-            except InvalidAuth as error:
-                self.entry.async_start_reauth(self.hass)
-                raise HomeAssistantError("Sign in to Sub-Zero again to change settings.") from error
-            except RateLimited as error:
-                raise HomeAssistantError(str(error)) from error
-            except ApiError as error:
+            except RateLimited:
+                raise
+            except ApiError:
                 await self.async_refresh()
-                raise HomeAssistantError(str(error)) from error
+                raise
             await self.async_refresh()
 
     @callback
@@ -853,13 +820,8 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
             return
         if isinstance(error, ConfigEntryAuthFailed):
             self.entry.async_start_reauth(self.hass)
-        elif (
-            self.entry.state is ConfigEntryState.LOADED
-            and self.needs_recovery
-            and self.receiving_live_updates
-            and not self._sign_in_failed
-        ):
-            self.start_recovery()
+        elif self.entry.state is ConfigEntryState.LOADED:
+            self.start_recovery_if_needed()
 
     @callback
     def _async_read_finished(self, task: asyncio.Task[StateRead]) -> None:
@@ -979,39 +941,38 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         return StateRead(request, confirmed_at, epoch=pending.epoch)
 
     async def _async_fetch_state(self) -> tuple[dict, PendingRead]:
-        async with self._state_lock:
-            pending = PendingRead(self._push.epoch)
-            self._active_read = pending
+        pending = PendingRead(self._push.epoch)
+        self._active_read = pending
+        try:
+            started = time.monotonic()
+            _LOGGER.debug("Reading status for %s", self.device["name"])
             try:
-                started = time.monotonic()
-                _LOGGER.debug("Reading status for %s", self.device["name"])
-                try:
-                    reply = await self.client.state(self.device_id)
-                except ApiError as error:
-                    _LOGGER.debug(
-                        "%s status request failed after %.3fs: %s",
-                        self.device["name"],
-                        time.monotonic() - started,
-                        type(error).__name__,
-                    )
-                    raise
+                reply = await self.client.state(self.device_id)
+            except ApiError as error:
                 _LOGGER.debug(
-                    "%s status response after %.3fs: %s",
+                    "%s status request failed after %.3fs: %s",
                     self.device["name"],
                     time.monotonic() - started,
-                    _state_for_log(reply),
+                    type(error).__name__,
                 )
-                if pending.error is not None:
-                    raise pending.error
-                return reply, pending
-            except InvalidAuth as error:
-                raise ConfigEntryAuthFailed(str(error)) from error
-            except RateLimited as error:
-                raise UpdateFailed(str(error), retry_after=error.retry_after) from error
-            except ApiError as error:
-                raise UpdateFailed(str(error)) from error
-            finally:
-                self._active_read = None
+                raise
+            _LOGGER.debug(
+                "%s status response after %.3fs: %s",
+                self.device["name"],
+                time.monotonic() - started,
+                _state_for_log(reply),
+            )
+            if pending.error is not None:
+                raise pending.error
+            return reply, pending
+        except InvalidAuth as error:
+            raise ConfigEntryAuthFailed(str(error)) from error
+        except RateLimited as error:
+            raise UpdateFailed(str(error), retry_after=error.retry_after) from error
+        except ApiError as error:
+            raise UpdateFailed(str(error)) from error
+        finally:
+            self._active_read = None
 
     async def async_recover(self) -> None:
         """Restore unavailable state while the appliance is reporting again."""
@@ -1141,5 +1102,5 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 # Sign-in may work again, and only a status read can show that.
                 self.start_recovery()
             else:
-                self._maybe_start_recovery()
+                self.start_recovery_if_needed()
         return True
