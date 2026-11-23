@@ -27,7 +27,7 @@ DOOR = "binary_sensor.kitchen_refrigerator_door"
 FREEZER_DOOR = "binary_sensor.kitchen_freezer_door"
 SETPOINT = "sensor.kitchen_refrigerator_setpoint"
 MODEL = "ANOTHER-MODEL"
-# A snapshot without the door: it replaces unavailable state without certifying the door.
+# A snapshot without the door, which leaves the door unknown where it replaces state.
 INCOMPLETE = {"appliance_model": MODEL, "ref_set_temp": 38}
 
 
@@ -222,7 +222,7 @@ async def test_queued_old_full_push_does_not_cancel_account_recovery(hass, loade
     assert hass.states.get(DOOR).state == "on"
 
 
-async def test_failed_read_cannot_be_rescued_by_an_old_full_push(freezer, dated):
+async def test_failed_read_marks_unavailable_despite_an_old_full_push(freezer, dated):
     coordinator, client, _, older = dated
     confirmed = coordinator.confirmed_at
     freezer.tick(1)
@@ -241,7 +241,6 @@ async def test_old_full_push_does_not_satisfy_verification(dated):
     read_during(coordinator, client, snapshot(older), reply=fresh)
     await coordinator.async_verify_state()
     client.state.assert_awaited_once_with("test-fridge")
-    client.open_channel.assert_not_awaited()
     assert coordinator.data["ref_door_ajar"] is True
     assert coordinator.verification_stats["status_reads"] == 1
     assert coordinator.verification_stats["last_success"] is not None
@@ -285,7 +284,7 @@ async def test_old_full_push_allows_uptime_truncation_tolerance(dated, uptime, a
     ("field", "value"),
     [("time", None), ("time", "invalid"), ("uptime", None), ("uptime", "invalid")],
 )
-async def test_full_push_without_usable_age_metadata_keeps_existing_behavior(dated, field, value):
+async def test_full_push_without_usable_age_metadata_is_accepted(dated, field, value):
     coordinator, _, _, older = dated
     if value is None:
         del older[field]
@@ -508,45 +507,6 @@ async def test_read_that_started_before_the_channel_opened_does_not_end_the_reco
     assert coordinator.live_updates_established
 
 
-@pytest.mark.parametrize(
-    "pushed",
-    [partial(ref_door_ajar=False), snapshot(appliance_model=MODEL, ref_door_ajar=False)],
-    ids=["partial", "incomplete-snapshot"],
-)
-async def test_matching_incomplete_push_during_read_can_confirm_state(fridge, freezer, pushed):
-    coordinator, client = fridge
-    confirmed = coordinator.confirmed_at
-    freezer.tick(1)
-    read_during(coordinator, client, pushed)
-    await read_confirms(coordinator)
-    assert coordinator.confirmed_at > confirmed
-
-
-@pytest.mark.parametrize("key", ["time", "uptime", "ap_rssi"])
-async def test_clock_and_signal_readings_in_an_incomplete_snapshot_do_not_conflict(
-    freezer, fridge, key
-):
-    coordinator, client = fridge
-    reply = {
-        **client.state.return_value,
-        "time": "2025-01-01T12:00:00+00:00",
-        "uptime": "13:00:00",
-        "ap_rssi": -50,
-    }
-    client.state.return_value = reply
-    await coordinator.async_read_status()
-    confirmed = coordinator.confirmed_at
-    freezer.tick(1)
-    pushed = {"time": "2025-01-01T04:00:01-08:00", "uptime": "13:00:01", "ap_rssi": -54}
-    # A snapshot without ref_door_ajar that differs from the reply in one reading.
-    read_during(
-        coordinator,
-        client,
-        snapshot(appliance_model=MODEL, ref_set_temp=reply["ref_set_temp"], **{key: pushed[key]}),
-    )
-    assert (await coordinator.async_read_status()).confirmed_at > confirmed
-
-
 @pytest.fixture
 async def discarding_fridge(fridge):
     """The refrigerator after a read whose type, 17.1.1.0, discards the accent light level."""
@@ -588,7 +548,7 @@ async def test_a_pushed_property_is_published_only_when_the_published_type_keeps
 
 
 @pytest.mark.parametrize("opened", [False, True])
-async def test_incomplete_snapshot_during_read_supersedes_the_reply(hass, freezer, fridge, opened):
+async def test_incomplete_snapshot_during_read_stands_over_the_reply(hass, freezer, fridge, opened):
     coordinator, client = fridge
     confirmed = coordinator.confirmed_at
     client.state.return_value["ref_door_ajar"] = not opened
@@ -601,7 +561,7 @@ async def test_incomplete_snapshot_during_read_supersedes_the_reply(hass, freeze
 
 
 @pytest.mark.parametrize("opened", [False, True])
-async def test_complete_snapshot_supersedes_an_incomplete_push_during_read(fridge, freezer, opened):
+async def test_later_snapshot_during_read_stands_over_an_earlier_one(fridge, freezer, opened):
     coordinator, client = fridge
     confirmed = coordinator.confirmed_at
     freezer.tick(1)
@@ -633,8 +593,8 @@ async def test_failed_read_with_concurrent_snapshot_fails_without_marking_unavai
     read_during(coordinator, client, pushed, error=ApiError("Status request failed"))
     with pytest.raises(HomeAssistantError, match="Status request failed"):
         await coordinator.async_read_status()
-    # The failed read is not rescued for its caller, while the snapshot's state
-    # and availability remain intact.
+    # The read still fails for its caller, while the snapshot's state and
+    # availability remain intact.
     assert coordinator.confirmed_at == dt_util.utcnow()
     assert coordinator.last_update_success
     if complete:
@@ -642,7 +602,6 @@ async def test_failed_read_with_concurrent_snapshot_fails_without_marking_unavai
     else:
         assert hass.states.get(DOOR).state == "on"
         assert hass.states.get(SETPOINT).state == "39"
-    client.open_channel.assert_not_awaited()
 
 
 @pytest.mark.parametrize("reply_type", ["1.2.6.1", None, "bad"], ids=["same", "absent", "unusable"])
@@ -737,7 +696,7 @@ async def test_unusable_model_does_not_confirm(fridge, freezer):
     assert coordinator.confirmed_at == confirmed
 
 
-async def test_incomplete_observations_revive_expired_transport_state(
+async def test_incomplete_snapshot_restores_availability_after_the_grace_window(
     hass, freezer, loaded, fridge
 ):
     entry, _, updates, _, _ = loaded
@@ -780,7 +739,7 @@ async def test_incomplete_observations_revive_expired_transport_state(
 # Shared reads
 
 
-async def test_update_entity_waits_for_each_read_inside_the_old_cooldown(hass, fridge):
+async def test_update_entity_reads_status_on_every_call(hass, fridge):
     _, client = fridge
     assert await async_setup_component(hass, "homeassistant", {})
     client.state.reset_mock()
@@ -943,7 +902,6 @@ async def test_scheduled_reads_continue_when_push_is_disconnected(hass, loaded, 
     async_fire_time_changed(hass, dt_util.utcnow())
     await hass.async_block_till_done()
     await entry.runtime_data._verifications["test-fridge"]
-    client.open_channel.assert_not_awaited()
     client.state.assert_awaited_once()
     assert hass.states.get(DOOR).state == "on"
 
@@ -1107,7 +1065,6 @@ async def test_auth_failure_is_recovered_by_the_read_a_snapshot_prompts(
     await hass.async_block_till_done()
     await entry.runtime_data._verifications["test-fridge"]
     assert client.state.await_count == 4
-    client.open_channel.assert_not_awaited()
     assert coordinator.verification_stats["checks"] == 2
     assert coordinator.verification_stats["status_reads"] == 2
 

@@ -104,7 +104,6 @@ async def controls(hass, tokens, request):
         )
         client.state = AsyncMock(side_effect=lambda device_id: dict(states[device_id]))
         client.set_property = AsyncMock(side_effect=write)
-        client.open_channel = AsyncMock()
         client.appliance_faults = AsyncMock(return_value=[])
         client.fault_metadata = AsyncMock(return_value=None)
         client.watch = watch

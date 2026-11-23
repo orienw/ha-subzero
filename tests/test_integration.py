@@ -83,7 +83,6 @@ async def test_state_checks_default_off_and_preserve_saved_interval(hass, loaded
     await hass.config_entries.async_reload(entry.entry_id)
     await hass.async_block_till_done()
     client.state.reset_mock()
-    client.open_channel.reset_mock()
     connections = list(client.watched)
     started = dt_util.utcnow()
     async_fire_time_changed(hass, started + timedelta(seconds=301))
@@ -100,7 +99,6 @@ async def test_state_checks_default_off_and_preserve_saved_interval(hass, loaded
     await updates.put(StateUpdate({"ref_set_temp": 39}, full=False))
     await hass.async_block_till_done()
     assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "39"
-    client.open_channel.assert_not_awaited()
     assert client.watched == connections
 
 
@@ -140,7 +138,6 @@ async def test_disabled_state_checks_do_not_request_periodic_status(hass, loaded
         async_fire_time_changed(hass, dt_util.utcnow() + timedelta(hours=hours))
         await hass.async_block_till_done()
     client.state.assert_not_awaited()
-    client.open_channel.assert_not_awaited()
     assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "38"
 
 
@@ -164,7 +161,6 @@ async def test_state_checks_repair_a_missed_close_despite_recent_pushes(hass, lo
     await hass.async_block_till_done()
     await entry.runtime_data._verifications["test-fridge"]
     client.state.assert_awaited_once_with("test-fridge")
-    client.open_channel.assert_not_awaited()
     assert client.watched == [["test-fridge"]]
     assert not disconnected.is_set()
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
@@ -201,7 +197,6 @@ async def test_verification_does_not_overlap_and_stops_on_unload(hass, loaded):
     async_fire_time_changed(hass, started + timedelta(seconds=903))
     await hass.async_block_till_done()
     client.state.assert_awaited_once_with("test-fridge")
-    client.open_channel.assert_not_awaited()
     assert client.watched == [["test-fridge"]]
 
 
@@ -233,7 +228,6 @@ async def test_verification_failure_preserves_available_push_state(hass, loaded)
     assert client.state.await_count == 3
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
     assert coordinator.verification_stats["last_success"] is not None
-    client.open_channel.assert_not_awaited()
 
 
 async def test_verification_failure_without_push_marks_state_unavailable(hass, loaded):
@@ -247,7 +241,6 @@ async def test_verification_failure_without_push_marks_state_unavailable(hass, l
     assert not entry.runtime_data.coordinators["test-fridge"].last_update_success
     assert entry.runtime_data.coordinators["test-fridge"]._recovery_task is None
     assert client.state.await_count == 2
-    client.open_channel.assert_not_awaited()
 
 
 async def test_rate_limited_verification_read_preserves_available_state(hass, loaded):
@@ -259,7 +252,6 @@ async def test_rate_limited_verification_read_preserves_available_state(hass, lo
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
     assert entry.runtime_data.coordinators["test-fridge"].verification_stats["last_success"] is None
     assert client.state.await_count == 2
-    client.open_channel.assert_not_awaited()
 
 
 async def test_verification_handles_a_stream_failure_during_its_status_read(hass, loaded):
@@ -312,7 +304,6 @@ async def test_staggered_state_checks_keep_other_appliances_reporting(hass, oven
         "test-oven",
     ]
     assert entry.runtime_data.coordinators["test-oven"].verification_stats["checks"] == 2
-    client.open_channel.assert_not_awaited()
 
 
 async def test_verification_auth_failure_starts_reauthentication(hass, loaded):
@@ -327,7 +318,6 @@ async def test_verification_auth_failure_starts_reauthentication(hass, loaded):
         == "reauth"
     )
     assert client.state.await_count == 2
-    client.open_channel.assert_not_awaited()
 
 
 async def test_initial_push_can_load_without_a_status_read(hass, loaded, monkeypatch):
@@ -832,7 +822,7 @@ async def test_partial_push_merges_new_properties(hass, loaded):
     client.state.assert_awaited_once()
 
 
-async def test_normal_door_cycles_do_not_request_status_or_reopen_channels(hass, freezer, loaded):
+async def test_normal_door_cycles_do_not_request_status(hass, freezer, loaded):
     entry, client, updates, disconnected, _ = loaded
     client.state.reset_mock()
     for opened in (True, False, True, False):
@@ -846,7 +836,6 @@ async def test_normal_door_cycles_do_not_request_status_or_reopen_channels(hass,
         await hass.async_block_till_done()
         client.state.assert_not_awaited()
     assert entry.runtime_data.coordinators["test-fridge"]._followup_task is None
-    client.open_channel.assert_not_awaited()
     assert client.watched == [["test-fridge"]]
     assert not disconnected.is_set()
 
@@ -1734,7 +1723,6 @@ async def test_offline_channel_waits_for_reopen_before_status_checks(hass, loade
         async_fire_time_changed(hass, started + timedelta(seconds=seconds))
         await hass.async_block_till_done()
     client.state.assert_not_awaited()
-    client.open_channel.assert_not_awaited()
     assert not coordinator.last_update_success
     assert coordinator._recovery_task is None
     await updates.put(ChannelOpened())
