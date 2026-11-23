@@ -175,8 +175,10 @@ async def test_unknown_codes_remain_numeric_and_metadata_is_filtered(hass, cloud
     ],
 )
 async def test_malformed_event_history_is_ignored(hass, cloud_appliance, payload):
-    await cloud_appliance.update({"notifs": payload})
+    await cloud_appliance.update({"notifs": payload, "cav_light_on": True})
     assert hass.states.get("event.kitchen_appliance_event").state == "unknown"
+    # The rest of the update still applies.
+    assert cloud_appliance.coordinator.data["cav_light_on"] is True
 
 
 async def test_bounded_history_does_not_replay_evicted_events(hass, cloud_appliance):

@@ -257,6 +257,7 @@ async def test_schedule_service_reaches_a_shared_appliance_through_a_loaded_acco
     cloud_appliance.client.set_ice_delay.assert_awaited_once_with("appliance", 7200, 0, False)
 
 
+@pytest.mark.logs_errors
 @pytest.mark.parametrize(
     ("target", "broken", "tried", "error"),
     [
@@ -328,6 +329,7 @@ async def test_schedule_service_tries_the_devices_own_account_then_the_others(
     await hass.config_entries.async_unload(other.entry_id)
 
 
+@pytest.mark.logs_errors
 @pytest.mark.parametrize("failure", ["failed_read", "incomplete_read", "after_write"])
 async def test_schedule_service_uses_another_account_only_before_sending(
     hass, cloud_appliance, tokens, failure

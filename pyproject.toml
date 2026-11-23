@@ -8,6 +8,7 @@ timeout = 60
 # The signal method's failure can be swallowed inside the event loop, which left CI
 # stalled for six hours; the thread method prints every thread's stack and exits.
 timeout_method = "thread"
+markers = ["logs_errors: the test makes the integration log an exception on purpose"]
 
 [tool.ruff]
 target-version = "py314"

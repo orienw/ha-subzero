@@ -943,12 +943,16 @@ async def test_options_save_state_check_interval(hass, tokens, saved_interval, i
         options={"status_poll_interval": saved_interval},
     )
     entry.add_to_hass(hass)
-    with patch("custom_components.subzero.api.SubZeroClient.appliances", return_value=APPLIANCES):
+    with (
+        patch("custom_components.subzero.api.SubZeroClient.appliances", return_value=APPLIANCES),
+        patch("custom_components.subzero.async_setup_entry", return_value=True),
+    ):
         result = await hass.config_entries.options.async_init(entry.entry_id)
         assert result["data_schema"]({})["status_poll_interval"] == str(saved_interval)
         result = await hass.config_entries.options.async_configure(
             result["flow_id"], {"device_ids": list(DEVICES), "status_poll_interval": str(interval)}
         )
+        await hass.async_block_till_done()
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert entry.options == {"devices": DEVICES, "status_poll_interval": interval}
 
@@ -962,13 +966,17 @@ async def test_options_toggle_firebase_alerts(hass, tokens, enabled):
         options={"firebase_alerts": not enabled},
     )
     entry.add_to_hass(hass)
-    with patch("custom_components.subzero.api.SubZeroClient.appliances", return_value=APPLIANCES):
+    with (
+        patch("custom_components.subzero.api.SubZeroClient.appliances", return_value=APPLIANCES),
+        patch("custom_components.subzero.async_setup_entry", return_value=True),
+    ):
         result = await hass.config_entries.options.async_init(entry.entry_id)
         assert result["data_schema"]({})["firebase_alerts"] is not enabled
         assert result["data_schema"]({})["status_poll_interval"] == "0"
         result = await hass.config_entries.options.async_configure(
             result["flow_id"], {"device_ids": list(DEVICES), "firebase_alerts": enabled}
         )
+        await hass.async_block_till_done()
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert entry.options.get("firebase_alerts", False) is enabled
     assert entry.options["status_poll_interval"] == 0

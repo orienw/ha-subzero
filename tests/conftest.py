@@ -1,6 +1,7 @@
 """Synthetic fixtures; tests never use the owner's saved account data."""
 
 import asyncio
+import logging
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -33,6 +34,28 @@ def make_tokens(user_id="test-owner", *, expires_in=3600, refresh_token="test-re
 @pytest.fixture
 def tokens():
     return make_tokens()
+
+
+@pytest.fixture(autouse=True)
+def no_swallowed_errors(request, caplog):
+    """Fail a test in which the integration logged an exception or added an entity twice.
+
+    Both are logged and survived, so a test's own assertions can pass over them. A
+    test that causes one on purpose is marked `logs_errors`.
+    """
+    yield
+    if request.node.get_closest_marker("logs_errors"):
+        return
+    swallowed = [
+        record
+        for record in caplog.get_records("call")
+        if record.levelno >= logging.ERROR
+        and (
+            (record.name.startswith("custom_components.subzero") and record.exc_info)
+            or "does not generate unique IDs" in record.getMessage()
+        )
+    ]
+    assert not swallowed, swallowed[0].getMessage()
 
 
 @pytest.fixture(autouse=True)

@@ -100,6 +100,7 @@ async def test_state_checks_default_off_and_preserve_saved_interval(hass, loaded
     assert client.watched == connections
 
 
+@pytest.mark.logs_errors
 async def test_an_update_that_cannot_be_applied_is_skipped_without_dropping_the_stream(
     hass, loaded, monkeypatch, caplog
 ):
@@ -252,6 +253,7 @@ async def test_rate_limited_verification_read_preserves_available_state(hass, lo
     assert client.state.await_count == 2
 
 
+@pytest.mark.logs_errors
 async def test_verification_handles_a_stream_failure_during_its_status_read(hass, loaded):
     entry, client, updates, disconnected, _ = loaded
     client.push_connected = True
@@ -326,6 +328,8 @@ async def test_initial_push_can_load_without_a_status_read(hass, loaded, monkeyp
     async def watch(device_ids):
         client.push_connected = True
         try:
+            # Arrive once setup is waiting, as a real connection does.
+            await asyncio.sleep(0)
             yield (
                 "test-fridge",
                 StateUpdate({"appliance_model": "ANOTHER-MODEL", "ref_door_ajar": True}, full=True),
@@ -337,7 +341,9 @@ async def test_initial_push_can_load_without_a_status_read(hass, loaded, monkeyp
     client.watch = watch
     client.state.reset_mock()
     client.state.side_effect = ApiError("Status reads unavailable")
-    await hass.config_entries.async_reload(entry.entry_id)
+    # Well under the 16 seconds setup would wait if the snapshot did not end its wait.
+    async with asyncio.timeout(5):
+        await hass.config_entries.async_reload(entry.entry_id)
     await hass.async_block_till_done()
     assert entry.state is ConfigEntryState.LOADED
     assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
@@ -1137,7 +1143,7 @@ async def test_stream_failure_preserves_state_until_the_grace_expires(hass, free
         (ApiError("Disconnected"), 30),
         (RateLimited(300), 300),
         (ConnectionLimitReached(90), 90),
-        (RecursionError("nested"), 30),
+        pytest.param(RecursionError("nested"), 30, marks=pytest.mark.logs_errors),
     ],
 )
 async def test_reconnect_waits_then_recovers_from_push_without_polling(
@@ -1632,7 +1638,11 @@ async def test_stream_errors_do_not_cancel_shared_reads_or_block_other_appliance
 
 @pytest.mark.parametrize(
     ("error", "delay"),
-    [(ApiError("Offline"), 30), (RateLimited(300), 300), (ValueError("Unexpected"), 30)],
+    [
+        (ApiError("Offline"), 30),
+        (RateLimited(300), 300),
+        pytest.param(ValueError("Unexpected"), 30, marks=pytest.mark.logs_errors),
+    ],
 )
 async def test_failed_recovery_retries_with_backoff(hass, loaded, monkeypatch, error, delay):
     _, client, updates, _, _ = loaded
