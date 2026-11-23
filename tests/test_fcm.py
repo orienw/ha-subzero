@@ -290,6 +290,7 @@ async def test_alerts_preserve_occurrence_and_receipt_time_without_changing_stat
     confirmed = coordinator.confirmed_at
     timestamp = dt_util.utcnow() + timedelta(seconds=2)
     alerts._on_alert(message(timestamp=timestamp), "persistent-id", None)
+    assert alerts.last_received is not None
     event = hass.states.get("event.kitchen_appliance_event")
     assert event.attributes["event_type"] == "kitchen_timer_under_one_minute"
     assert event.attributes["source"] == "firebase"

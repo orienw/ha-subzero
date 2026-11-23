@@ -963,6 +963,16 @@ def test_refrigerator_type_overrides_model_prefix(type_id, maximum):
     assert temperature_range("crisp_set_temp", data) == (maximum - 2, maximum)
 
 
+def test_crisper_range_stops_at_the_lowest_refrigerator_setpoint():
+    data = {"appliance_model": "BI-36U", "ref_set_temp": 35}
+    assert temperature_range("crisp_set_temp", data) == (34, 37)
+
+
+@pytest.mark.parametrize("mode", [0, 3, 99, True, None], ids=str)
+def test_oven_modes_without_a_setpoint_have_no_temperature_range(mode):
+    assert temperature_range("cav_set_temp", {"cav_cook_mode": mode}) is None
+
+
 @pytest.mark.parametrize("type_id", [None, 13, "", "1.2", "1.x.2.3", "1.2.3.4.5", "1.-2.3.4"])
 def test_unusable_appliance_type_keeps_model_fallback(type_id):
     assert temperature_range(

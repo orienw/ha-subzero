@@ -4,7 +4,7 @@ import asyncio
 import json
 from datetime import UTC, datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, call, patch
+from unittest.mock import AsyncMock, Mock, call, patch
 
 import pytest
 from homeassistant.components.climate import ClimateEntityFeature
@@ -36,8 +36,12 @@ from tests.common import (
     MockConfigEntry,
     async_capture_events,
     async_fire_time_changed,
+    offline_entities_still_available,
     setup_channel_events,
 )
+from tests.test_app_rules import DUAL_ZONE_WINE
+from tests.test_hood import HOOD_STATE
+from tests.test_ice_maker import ICE_STATE
 
 pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
 
@@ -887,6 +891,7 @@ async def test_unsupported_cooking_mode_still_allows_turning_off(hass, appliance
         ),
         ("1.3.2.1", "select.oven_lower_oven_cooking_mode", ["Bake stone"]),
         ("1.15.2.4", "select.oven_lower_oven_cooking_mode", ["Warm"]),
+        ("1.15.2.5", "select.oven_lower_oven_cooking_mode", ["Warm"]),
         (
             "1.8.2.0",
             "select.oven_lower_oven_cooking_mode",
@@ -1063,6 +1068,11 @@ async def test_command_after_a_cancelled_one_reads_state_first(
         call("oven", key, value) for _, _, value in requests
     ]
     assert appliances.states["oven"][key] == requests[1][2]
+    # Settled again: the next command reads only to confirm its own write.
+    reads = appliances.client.state.await_count
+    service, data, _ = requests[0]
+    await hass.services.async_call(domain, service, {"entity_id": entity_id, **data}, blocking=True)
+    assert appliances.client.state.await_count == reads + 1
 
 
 @pytest.mark.parametrize(
@@ -2270,6 +2280,7 @@ async def test_uptime_sensor_reports_seconds(appliances):
         ("1000:00:", 1000 * 3600),
         ("10000:05", 10000 * 3600 + 5 * 60),
         ("1:2:3", 3723),
+        ("0:15:30", 930),
         ("12:60:00", None),
         ("12:00:60", None),
         ("-1:00:00", None),
@@ -2530,3 +2541,82 @@ async def test_start_rechecks_a_setting_changed_by_an_intervening_push(
         "cav_cook_mode",
         "cav_unit_on",
     ]
+
+
+async def test_climate_steps_by_one_degree_for_refrigeration_and_five_for_ovens(hass, appliances):
+    assert hass.states.get("climate.fridge_refrigerator").attributes["target_temp_step"] == 1
+    assert hass.states.get("climate.oven_upper_oven").attributes["target_temp_step"] == 5
+
+
+async def test_running_kitchen_timer_without_an_end_time_shows_its_duration(hass, appliances):
+    await appliances.update(
+        "oven",
+        {
+            "kitchen_timer_active": True,
+            "kitchen_timer_end_time": None,
+            "kitchen_timer_duration": 10,
+        },
+    )
+    assert hass.states.get("number.oven_kitchen_timer_1_duration").state == "10"
+
+
+async def test_kitchen_timer_past_its_end_time_schedules_no_countdown(
+    hass, appliances, monkeypatch
+):
+    track = Mock()
+    monkeypatch.setattr("custom_components.subzero.number.async_track_point_in_utc_time", track)
+    ended = (dt_util.utcnow() - timedelta(minutes=2)).isoformat()
+    await appliances.update("oven", {"kitchen_timer_active": True, "kitchen_timer_end_time": ended})
+    assert hass.states.get("number.oven_kitchen_timer_1_duration").state == "0"
+    track.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "cloud_appliance",
+    [
+        {
+            "appliance_model": "DW2450WS",
+            "appliance_type": "17.6.1.1",
+            "wash_cycle": 2,
+            "wash_status": 0,
+            "wash_cycle_on": False,
+            "door_ajar": False,
+        }
+    ],
+    indirect=True,
+)
+async def test_dishwasher_that_reports_no_remote_ready_has_no_start_button(hass, cloud_appliance):
+    assert hass.states.get("button.kitchen_cancel_wash_cycle") is not None
+    assert hass.states.get("button.kitchen_start_wash_cycle") is None
+
+
+@pytest.mark.parametrize(
+    "cloud_appliance",
+    [{key: value for key, value in ICE_STATE.items() if not key.startswith("delay_")}],
+    indirect=True,
+)
+async def test_ice_maker_that_reports_no_delay_settings_has_no_delay_buttons(hass, cloud_appliance):
+    assert hass.states.get("select.kitchen_ice_maker") is not None
+    assert hass.states.get("button.kitchen_end_current_ice_delay") is None
+    assert hass.states.get("button.kitchen_cancel_ice_delay_schedule") is None
+
+
+async def test_offline_appliances_make_their_entities_unavailable(hass, appliances):
+    # Ready to start, so the start buttons are available until the appliance is offline.
+    await appliances.update("oven", {"cav_remote_ready": True, "cav2_remote_ready": True})
+    await appliances.update("dishwasher", {"remote_ready": True})
+    registry = er.async_get(hass)
+    for unique_id in ("oven_remote_start_cav_unit_on", "dishwasher_remote_start_wash_cycle_on"):
+        start = registry.async_get_entity_id("button", DOMAIN, unique_id)
+        assert hass.states.get(start).state != "unavailable"
+    assert await offline_entities_still_available(hass, appliances.entry) == []
+
+
+@pytest.mark.parametrize(
+    "cloud_appliance",
+    [HOOD_STATE, ICE_STATE, DUAL_ZONE_WINE],
+    ids=["hood", "ice-maker", "wine"],
+    indirect=True,
+)
+async def test_other_offline_appliances_make_their_entities_unavailable(hass, cloud_appliance):
+    assert await offline_entities_still_available(hass, cloud_appliance.entry) == []

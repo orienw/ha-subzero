@@ -42,6 +42,7 @@ async def test_first_loss_transitions(lost_flag, can_grace, expected_in_grace, e
     assert not link.in_grace
     assert not link.expired
     assert link.epoch == 0
+    assert not link.channel_refused
 
     err = ApiError("Stream disconnected")
     advanced = link.fail(err, lost=lost_flag, can_grace=can_grace)
@@ -220,6 +221,7 @@ async def test_refused_channel_needs_a_read_after_it_reopens():
         assert not link.established
         assert link.in_grace
         link.channel_opened()
+        assert not link.channel_refused
         # A read from before the channel opened is no longer current.
         assert link.epoch == 1
         assert not link.established

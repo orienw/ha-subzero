@@ -1,9 +1,11 @@
 """Readings and names that follow the Sub-Zero app's own rules."""
 
 import pytest
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.util.unit_system import US_CUSTOMARY_SYSTEM
 
+from custom_components.subzero.controls import ice_mode, ice_mode_properties
 from custom_components.subzero.entity import zone_name
 
 CAVITY = {
@@ -225,3 +227,12 @@ def test_first_kitchen_timer_is_numbered_only_beside_a_second():
     # The app discards the second timer on some series 3 ovens.
     for one in ({"appliance_type": "17.15.1.3"}, {**two, "appliance_type": "17.3.1.1"}):
         assert zone_name(one, "kitchen_timer_duration", names) is None
+
+
+def test_ice_mode_is_unknown_when_a_flag_is_not_on_or_off():
+    assert ice_mode({"ref_set_temp": 38, "ice_maker_on": True, "max_ice_on": "yes"}) is None
+
+
+def test_an_ice_mode_the_appliance_does_not_report_is_refused():
+    with pytest.raises(ServiceValidationError, match="does not support that ice mode"):
+        ice_mode_properties({"ref_set_temp": 38, "ice_maker_on": True}, "Night ice")
