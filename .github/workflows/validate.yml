@@ -33,7 +33,7 @@ jobs:
       - run: pip install -r requirements-test.txt "homeassistant==${{ matrix.homeassistant }}" "${{ matrix.test-package }}"
       - run: ruff check .
       - run: ruff format --check .
-      - run: pytest -q
+      - run: pytest -q -n auto
 
   hassfest:
     runs-on: ubuntu-latest
