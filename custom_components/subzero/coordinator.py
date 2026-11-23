@@ -466,7 +466,6 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                         isinstance(result.error, UpdateFailed)
                         and result.error.retry_after is not None
                     ):
-                        self._followup_alert = False
                         return
                     self._followup_alert = self._followup_alert and delay == FOLLOWUP_DELAYS[-1]
                     continue
@@ -502,15 +501,14 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         *,
         deliver: bool = True,
         source: str = "channel",
-    ) -> bool:
+    ) -> None:
         """Deliver an event once across state history, stream and Firebase copies."""
         event = self._events.record(timestamp, sequence, code, deliver=deliver, source=source)
         if event is None:
-            return False
+            return
         for listener in self._event_listeners:
             listener(event)
         self.async_schedule_followup(alert=True)
-        return True
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -1091,7 +1089,6 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 or any(
                     type(value) is not type(self.data.get(key)) for key, value in updated.items()
                 )
-                or not self.last_update_success
                 or opened
             ):
                 self.async_set_updated_data(updated)
