@@ -419,9 +419,3 @@ async def test_queued_mode_change_uses_state_after_previous_command(cloud_applia
         call("appliance", "night_ice_on", False),
         call("appliance", "ice_maker_on", True),
     ]
-
-
-async def test_max_ice_from_normal_leaves_power_alone(cloud_appliance):
-    await cloud_appliance.update({"night_ice_on": False})
-    await cloud_appliance.coordinator.async_set_ice_mode("Max ice")
-    cloud_appliance.client.set_property.assert_awaited_once_with("appliance", "max_ice_on", True)

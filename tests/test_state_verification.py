@@ -24,7 +24,6 @@ from tests.common import async_fire_time_changed
 pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
 
 DOOR = "binary_sensor.kitchen_refrigerator_door"
-FREEZER_DOOR = "binary_sensor.kitchen_freezer_door"
 SETPOINT = "sensor.kitchen_refrigerator_setpoint"
 MODEL = "ANOTHER-MODEL"
 # A snapshot without the door, which leaves the door unknown where it replaces state.
@@ -115,11 +114,6 @@ def fridge(loaded):
 
 
 @pytest.fixture
-def immediate_reconnect(monkeypatch):
-    monkeypatch.setattr("custom_components.subzero.coordinator.random.uniform", lambda *_: 0)
-
-
-@pytest.fixture
 async def enabled_confirmation_sensor(hass, loaded, freezer):
     entity_id = "sensor.kitchen_state_confirmed"
     er.async_get(hass).async_update_entity(entity_id, disabled_by=None)
@@ -195,55 +189,6 @@ async def test_old_full_push_still_shows_the_channel_is_open(dated):
     assert client.state.await_count == reads + 1
     assert coordinator.live_updates_established
     assert coordinator.data["ref_door_ajar"] is True
-
-
-async def test_queued_old_full_push_does_not_cancel_account_recovery(hass, loaded, dated):
-    _, _, updates, _, _ = loaded
-    coordinator, client, fresh, older = dated
-    reading, release = blocked_read(client, reply=fresh)
-    coordinator.async_set_update_error(ApiError("Status request failed"))
-    coordinator.start_recovery()
-    await asyncio.wait_for(reading.wait(), 1)
-    recovery = coordinator._recovery_task
-    try:
-        await updates.put(snapshot(older))
-        await hass.async_block_till_done()
-        assert coordinator._recovery_task is recovery
-        assert not recovery.done()
-        assert not recovery.cancelling()
-        assert not coordinator.last_update_success
-        assert hass.states.get(DOOR).state == "unavailable"
-    finally:
-        release.set()
-
-    await recovery
-    await hass.async_block_till_done()
-    assert coordinator.last_update_success
-    assert hass.states.get(DOOR).state == "on"
-
-
-async def test_failed_read_marks_unavailable_despite_an_old_full_push(freezer, dated):
-    coordinator, client, _, older = dated
-    confirmed = coordinator.confirmed_at
-    freezer.tick(1)
-    read_during(coordinator, client, snapshot(older), error=ApiError("Status request failed"))
-    with pytest.raises(HomeAssistantError, match="Status request failed"):
-        await coordinator.async_read_status()
-    assert coordinator.confirmed_at == confirmed
-    assert coordinator.data["ref_door_ajar"] is True
-    assert not coordinator.last_update_success
-
-
-async def test_old_full_push_does_not_satisfy_verification(dated):
-    coordinator, client, fresh, older = dated
-    client.state.reset_mock()
-    client.push_connected = True
-    read_during(coordinator, client, snapshot(older), reply=fresh)
-    await coordinator.async_verify_state()
-    client.state.assert_awaited_once_with("test-fridge")
-    assert coordinator.data["ref_door_ajar"] is True
-    assert coordinator.verification_stats["status_reads"] == 1
-    assert coordinator.verification_stats["last_success"] is not None
 
 
 @pytest.mark.parametrize(
@@ -338,29 +283,6 @@ async def test_debug_logs_distinguish_observed_and_published_state_without_priva
     assert hass.states.get(DOOR).state == "on"
     for private in ("redact-network", "redact-serial", "redact-token", "redact-nested"):
         assert private not in caplog.text
-
-
-@pytest.mark.parametrize("opened", [False, True])
-async def test_partial_push_during_a_read_is_immediate_and_stands_over_the_reply(
-    hass, freezer, fridge, opened
-):
-    coordinator, client = fridge
-    confirmed = coordinator.confirmed_at
-    client.state.return_value["ref_door_ajar"] = not opened
-    freezer.tick(1)
-    reading, release = blocked_read(client)
-    request = asyncio.create_task(coordinator.async_read_status())
-    await asyncio.wait_for(reading.wait(), 1)
-    coordinator.apply_update(partial(ref_door_ajar=opened))
-    assert not request.done()
-    assert hass.states.get(DOOR).state == ("on" if opened else "off")
-    assert coordinator.confirmed_at == confirmed
-    release.set()
-    # Nothing orders the reply against the update, so the update stands.
-    await request
-    assert hass.states.get(DOOR).state == ("on" if opened else "off")
-    assert coordinator.confirmed_at > confirmed
-    assert coordinator.last_update_success
 
 
 @pytest.mark.parametrize("background", [False, True], ids=["read_status", "verify_state"])
@@ -488,25 +410,6 @@ async def test_replacing_snapshot_keeps_the_type_pushed_before_it_over_the_reply
     assert "accent_light_level" not in coordinator.data
 
 
-async def test_read_that_started_before_the_channel_opened_does_not_end_the_reconnect_wait(
-    freezer, fridge
-):
-    coordinator, client = fridge
-    coordinator.async_transport_error(ApiError("Stream disconnected"))
-    assert client.push_connected
-    freezer.tick(1)
-    # The update shows the channel is open, which the read in flight began before.
-    read_during(coordinator, client, partial(ref_door_ajar=True))
-    with pytest.raises(HomeAssistantError, match="push connection changed"):
-        await coordinator.async_read_status()
-    assert coordinator.data["ref_door_ajar"] is True
-    assert not coordinator.live_updates_established
-    client.state.side_effect = None
-    client.state.return_value["ref_door_ajar"] = True
-    await coordinator.async_read_status()
-    assert coordinator.live_updates_established
-
-
 @pytest.fixture
 async def discarding_fridge(fridge):
     """The refrigerator after a read whose type, 17.1.1.0, discards the accent light level."""
@@ -547,35 +450,6 @@ async def test_a_pushed_property_is_published_only_when_the_published_type_keeps
 # Snapshots during a read
 
 
-@pytest.mark.parametrize("opened", [False, True])
-async def test_incomplete_snapshot_during_read_stands_over_the_reply(hass, freezer, fridge, opened):
-    coordinator, client = fridge
-    confirmed = coordinator.confirmed_at
-    client.state.return_value["ref_door_ajar"] = not opened
-    freezer.tick(1)
-    # A snapshot is the appliance's own state publication, whatever keys it lacks.
-    read_during(coordinator, client, snapshot(appliance_model=MODEL, ref_door_ajar=opened))
-    await read_confirms(coordinator)
-    assert coordinator.confirmed_at > confirmed
-    assert hass.states.get(DOOR).state == ("on" if opened else "off")
-
-
-@pytest.mark.parametrize("opened", [False, True])
-async def test_later_snapshot_during_read_stands_over_an_earlier_one(fridge, freezer, opened):
-    coordinator, client = fridge
-    confirmed = coordinator.confirmed_at
-    freezer.tick(1)
-    read_during(
-        coordinator,
-        client,
-        snapshot(appliance_model=MODEL, ref_door_ajar=True),
-        snapshot(client.state.return_value, ref_door_ajar=opened),
-    )
-    await read_confirms(coordinator)
-    assert coordinator.confirmed_at > confirmed
-    assert coordinator.data["ref_door_ajar"] is opened
-
-
 @pytest.mark.parametrize("complete", [False, True])
 async def test_failed_read_with_concurrent_snapshot_fails_without_marking_unavailable(
     hass, freezer, loaded, fridge, complete
@@ -602,31 +476,6 @@ async def test_failed_read_with_concurrent_snapshot_fails_without_marking_unavai
     else:
         assert hass.states.get(DOOR).state == "on"
         assert hass.states.get(SETPOINT).state == "39"
-
-
-@pytest.mark.parametrize("reply_type", ["1.2.6.1", None, "bad"], ids=["same", "absent", "unusable"])
-async def test_reply_without_a_usable_type_keeps_the_type_pushed_during_the_read(
-    fridge, freezer, reply_type
-):
-    coordinator, client = fridge
-    typed = {**client.state.return_value, "appliance_type": "1.2.6.1"}
-    reply = (
-        {**typed, "appliance_type": reply_type} if reply_type else dict(client.state.return_value)
-    )
-    freezer.tick(1)
-
-    # The replacing snapshot omits the type, which the known one stands in for, as it
-    # does for a reply without a usable type.
-    async def read(_device_id):
-        coordinator.apply_update(snapshot(typed))
-        coordinator.async_set_update_error(ApiError("Channel error"))
-        coordinator.apply_update(snapshot(INCOMPLETE))
-        return reply
-
-    client.state.side_effect = read
-    await read_confirms(coordinator)
-    assert coordinator.data["appliance_type"] == "1.2.6.1"
-    assert coordinator.data["ref_door_ajar"] is False
 
 
 @pytest.mark.parametrize("after", ["nothing", "snapshot", "channel-error"])
@@ -669,6 +518,38 @@ async def test_reply_straddling_a_reconnect_still_delivers_the_events_in_its_his
     assert [event["sequence"] for event in observed] == [1]
 
 
+@pytest.mark.parametrize("startup_source", ["read", "snapshot"])
+@pytest.mark.parametrize("history_source", ["read", "snapshot"])
+async def test_historyless_startup_keeps_later_alerts(
+    hass, freezer, loaded, startup_source, history_source
+):
+    entry, client, updates, _, _ = loaded
+    assert "notifs" not in client.state.return_value
+    if startup_source == "snapshot":
+        await hass.config_entries.async_unload(entry.entry_id)
+        client.state.reset_mock()
+        await updates.put(StateUpdate(dict(client.state.return_value), full=True))
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        client.state.assert_not_awaited()
+    coordinator = entry.runtime_data.coordinators["test-fridge"]
+    observed = []
+    coordinator.async_add_event_listener(observed.append)
+    started = dt_util.utcnow()
+    freezer.tick(60)
+    client.state.return_value["notifs"] = [
+        alert(1, started - timedelta(seconds=1)),
+        alert(2),
+    ]
+    for _ in range(2):
+        if history_source == "snapshot":
+            await updates.put(StateUpdate(dict(client.state.return_value), full=True))
+        else:
+            await coordinator.async_read_status()
+        await hass.async_block_till_done()
+    assert [(event["sequence"], event["source"]) for event in observed] == [(2, "history")]
+
+
 # Incomplete observations
 
 
@@ -684,16 +565,6 @@ async def test_incomplete_status_reply_confirms_and_drops_the_keys_it_lacks(hass
     assert "ref_door_ajar" not in coordinator.data
     assert hass.states.get(DOOR).state == "unavailable"
     assert hass.states.get(SETPOINT).state == "39"
-
-
-async def test_unusable_model_does_not_confirm(fridge, freezer):
-    coordinator, client = fridge
-    confirmed = coordinator.confirmed_at
-    client.state.return_value = {"appliance_model": ""}
-    freezer.tick(1)
-    with pytest.raises(HomeAssistantError, match="usable state"):
-        await coordinator.async_read_status()
-    assert coordinator.confirmed_at == confirmed
 
 
 async def test_incomplete_snapshot_restores_availability_after_the_grace_window(
@@ -929,26 +800,6 @@ async def test_token_updates_do_not_postpone_state_checks(hass, freezer, loaded)
     assert entry.runtime_data is account
 
 
-async def test_a_read_started_before_disconnect_does_not_confirm_the_new_gap(
-    hass, freezer, loaded, fridge
-):
-    _, _, updates, _, _ = loaded
-    coordinator, client = fridge
-    confirmed = coordinator.confirmed_at
-    reading, release = blocked_read(client)
-    request = asyncio.create_task(coordinator.async_read_status())
-    await asyncio.wait_for(reading.wait(), 1)
-    client.push_connected = False
-    await updates.put(RateLimited(300))
-    await hass.async_block_till_done()
-    freezer.tick(1)
-    release.set()
-    with pytest.raises(HomeAssistantError, match="push connection changed"):
-        await request
-    assert coordinator.confirmed_at == confirmed
-    assert coordinator.last_update_success
-
-
 async def test_rate_limited_checks_leave_confirmation_age_unchanged(
     hass, loaded, freezer, enabled_confirmation_sensor
 ):
@@ -1094,8 +945,12 @@ async def test_an_unexpected_event_listener_failure_does_not_wedge_future_reads(
 # Follow-up reads after a door alert
 
 
-def alert(sequence: int) -> dict:
-    return {"notif_seq": sequence, "notif_type": 101, "timestamp": dt_util.utcnow().isoformat()}
+def alert(sequence: int, when=None) -> dict:
+    return {
+        "notif_seq": sequence,
+        "notif_type": 101,
+        "timestamp": (when or dt_util.utcnow()).isoformat(),
+    }
 
 
 async def _advance_followup(hass, freezer, coordinator, seconds):

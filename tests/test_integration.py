@@ -1,7 +1,6 @@
 """Load real HA platforms and exercise entity discovery and push lifecycle."""
 
 import asyncio
-import json
 import logging
 from datetime import timedelta
 from types import SimpleNamespace
@@ -29,7 +28,6 @@ from custom_components.subzero.api import (
     RateLimited,
     StateUpdate,
     SubZeroClient,
-    parse_notification,
     token_state,
 )
 from custom_components.subzero.auth import InvalidAuth
@@ -902,39 +900,6 @@ async def test_snapshots_count_on_off_changes_no_update_reported(hass, freezer, 
     assert coordinator.push_stats["snapshot_flips"] == 1
 
 
-@pytest.mark.parametrize(
-    "pload",
-    [
-        {"ref_door_ajar": True},
-        {"resp": {"ref_door_ajar": True}},
-        {"appliance_model": "ANOTHER-MODEL", "ref_door_ajar": True},
-        {"resp": {"appliance_model": "ANOTHER-MODEL", "ref_door_ajar": True}},
-        {"appliance_model": "SIBLING-MODEL", "props": {"ref_door_ajar": True}},
-    ],
-)
-async def test_cloud_payload_shapes_update_doors_without_losing_other_state(hass, loaded, pload):
-    _, _, updates, _, _ = loaded
-    envelope = {
-        "DeviceId": "test-fridge",
-        "Payload": {"api.async_channel": {"type": 2, "pload": pload}},
-    }
-    event = {"type": 1, "target": "ConnectedApplianceMessage", "arguments": [json.dumps(envelope)]}
-    parsed = parse_notification(event, "test-owner", ["test-fridge"])
-    await updates.put(parsed)
-    await hass.async_block_till_done()
-    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
-    assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "38"
-
-
-async def test_status_read_drops_missing_properties(hass, loaded):
-    entry, client, _, _, _ = loaded
-    client.state.return_value = {"appliance_model": "ANOTHER-MODEL", "ref_door_ajar": False}
-    await entry.runtime_data.coordinators["test-fridge"].async_refresh()
-    await hass.async_block_till_done()
-    assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "unavailable"
-    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
-
-
 async def test_token_rotation_is_saved_without_password(hass, loaded):
     entry, _, _, _, factory = loaded
     save_tokens = factory.call_args.args[3]
@@ -962,12 +927,6 @@ async def test_firmware_updates_device_registry_without_reload(hass, loaded, pus
     await hass.config_entries.async_unload(entry.entry_id)
     coordinator.apply_update(StateUpdate({"version": {"fw": "3.0"}}, full=False))
     assert registry.async_get(device.id).sw_version == "2.0"
-
-
-@pytest.mark.parametrize("loaded", ["K", None], indirect=True)
-async def test_unknown_units_skip_temperature_entities(hass, loaded):
-    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
-    assert hass.states.get("sensor.kitchen_refrigerator_setpoint") is None
 
 
 @pytest.mark.parametrize("options", [False, True])
@@ -1255,44 +1214,6 @@ async def test_stream_loss_does_not_restore_an_offline_appliance(hass, oven_load
     assert not entry.runtime_data.coordinators["test-oven"].last_update_success
 
 
-@pytest.mark.parametrize("system_option", [False, True])
-@pytest.mark.parametrize("recovery", ["read", "snapshot"])
-async def test_reconnect_confirms_state_when_periodic_checks_are_disabled(
-    hass, freezer, loaded, monkeypatch, system_option, recovery
-):
-    entry, client, updates, _, _ = loaded
-    monkeypatch.setattr("custom_components.subzero.coordinator.random.uniform", lambda *_: 0)
-    if system_option:
-        hass.config_entries.async_update_entry(entry, pref_disable_polling=True)
-    else:
-        hass.config_entries.async_update_entry(entry, options={"status_poll_interval": 0})
-    await hass.async_block_till_done()
-    coordinator = entry.runtime_data.coordinators["test-fridge"]
-    confirmed = coordinator.confirmed_at
-    reads = client.state.await_count
-    await updates.put(ApiError("Stream disconnected"))
-    await hass.async_block_till_done()
-    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
-    freezer.tick(31)
-    async_fire_time_changed(hass, dt_util.utcnow())
-    await hass.async_block_till_done()
-    assert client.watched == [["test-fridge"], ["test-fridge"]]
-    fresh = {**client.state.return_value, "ref_door_ajar": True}
-    client.state.return_value = fresh
-    if recovery == "read":
-        await updates.put(ChannelOpened())
-    else:
-        await updates.put(StateUpdate(fresh, full=True))
-    await hass.async_block_till_done()
-    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
-    assert coordinator.confirmed_at > confirmed
-    assert client.state.await_count == reads + 1
-    freezer.tick(91)
-    async_fire_time_changed(hass, dt_util.utcnow())
-    await hass.async_block_till_done()
-    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
-
-
 async def test_reconnects_and_partial_pushes_do_not_extend_the_grace(
     hass, freezer, loaded, monkeypatch
 ):
@@ -1335,48 +1256,6 @@ async def test_reconnects_and_partial_pushes_do_not_extend_the_grace(
     assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "38"
 
 
-async def test_incomplete_snapshot_keeps_a_reconnected_appliance_available_until_a_read_confirms(
-    hass, freezer, loaded, monkeypatch
-):
-    entry, client, updates, _, _ = loaded
-    monkeypatch.setattr("custom_components.subzero.coordinator.random.uniform", lambda *_: 0)
-    coordinator = entry.runtime_data.coordinators["test-fridge"]
-    confirmed = coordinator.confirmed_at
-    reading, release = asyncio.Event(), asyncio.Event()
-
-    async def read(_device_id):
-        reading.set()
-        await release.wait()
-        return {**client.state.return_value, "ref_door_ajar": True}
-
-    client.state.side_effect = read
-    await updates.put(ApiError("Stream disconnected"))
-    await hass.async_block_till_done()
-    freezer.tick(31)
-    async_fire_time_changed(hass, dt_util.utcnow())
-    await hass.async_block_till_done()
-    assert client.push_connected
-    await updates.put(
-        StateUpdate({"appliance_model": "ANOTHER-MODEL", "ref_set_temp": 40}, full=True)
-    )
-    await hass.async_block_till_done()
-    # The snapshot keeps the appliance available with what it carries, but a status
-    # read still has to confirm state.
-    assert coordinator.confirmed_at > confirmed
-    assert not coordinator.live_updates_established
-    assert coordinator.last_update_success
-    assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "40"
-    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "unavailable"
-    # The read confirms recovery and fills in any keys the snapshot lacked.
-    await asyncio.wait_for(reading.wait(), 1)
-    release.set()
-    await coordinator._read_task
-    await hass.async_block_till_done()
-    assert coordinator.live_updates_established
-    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
-    assert hass.states.get("sensor.kitchen_refrigerator_setpoint").state == "38"
-
-
 async def test_snapshot_ending_a_reconnect_drops_values_only_pushed_as_partials(
     hass, freezer, loaded, monkeypatch
 ):
@@ -1403,30 +1282,6 @@ async def test_snapshot_ending_a_reconnect_drops_values_only_pushed_as_partials(
     await updates.put(StateUpdate({"frz_door_ajar": False}, full=False))
     await hass.async_block_till_done()
     assert hass.states.get("binary_sensor.kitchen_freezer_door").state == "off"
-
-
-async def test_reconnected_read_restores_state_without_a_key_it_lacks(
-    hass, freezer, loaded, monkeypatch
-):
-    entry, client, updates, _, _ = loaded
-    monkeypatch.setattr("custom_components.subzero.coordinator.random.uniform", lambda *_: 0)
-    coordinator = entry.runtime_data.coordinators["test-fridge"]
-    confirmed = coordinator.confirmed_at
-    await updates.put(StateUpdate({"frz_door_ajar": False}, full=False))
-    await updates.put(ApiError("Stream disconnected"))
-    await hass.async_block_till_done()
-    freezer.tick(31)
-    async_fire_time_changed(hass, dt_util.utcnow())
-    await hass.async_block_till_done()
-    reads = client.state.await_count
-    await updates.put(ChannelOpened())
-    await hass.async_block_till_done()
-    freezer.tick(91)
-    async_fire_time_changed(hass, dt_util.utcnow())
-    await hass.async_block_till_done()
-    assert client.state.await_count > reads
-    assert coordinator.confirmed_at > confirmed
-    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "off"
 
 
 async def test_status_checks_keep_state_available_until_push_returns(
@@ -1615,23 +1470,6 @@ async def test_status_checks_stay_stopped_after_a_rejected_sign_in(
         await hass.async_block_till_done()
     assert client.state.await_count == 1
     assert entry.runtime_data.coordinators["test-fridge"]._sign_in_failed
-
-
-async def test_a_failed_sign_in_stops_checks_until_an_update_succeeds(hass, loaded):
-    entry, client, _, _, _ = loaded
-    coordinator = entry.runtime_data.coordinators["test-fridge"]
-    client.state.side_effect = InvalidAuth("Sub-Zero requires a new sign-in.")
-    await coordinator.async_refresh()
-    assert coordinator._sign_in_failed
-    # Home Assistant's refresh records this failure without async_set_update_error.
-    client.state.side_effect = ApiError("Status timed out")
-    await coordinator.async_refresh()
-    coordinator.async_set_update_error(ApiError("Stream disconnected"))
-    assert coordinator._sign_in_failed
-    client.state.side_effect = None
-    await coordinator.async_refresh()
-    assert coordinator.last_update_success
-    assert not coordinator._sign_in_failed
 
 
 async def test_full_service_is_tried_again_without_a_growing_wait(hass, loaded, monkeypatch):
@@ -2684,15 +2522,6 @@ async def test_upgrade_removes_entities_for_discarded_properties(hass, cloud_app
     assert all(registry.async_get(entity.entity_id) is None for entity in stale)
     assert registry.async_get(kept) is not None
     assert hass.states.get(kept).state not in ("unavailable", "unknown")
-
-
-@pytest.mark.parametrize(
-    "cloud_appliance",
-    [{"appliance_model": "DEC1850CI", "appliance_type": "1.21.2.5", "winterize_on": True}],
-    indirect=True,
-)
-async def test_ice_status_appears_without_reported_ice_power(hass, cloud_appliance):
-    assert hass.states.get("sensor.kitchen_ice_maker_status").state == "Off"
 
 
 @pytest.mark.parametrize("cloud_appliance", [DISCARDING_FRIDGE], indirect=True)

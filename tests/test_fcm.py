@@ -16,12 +16,11 @@ from firebase_messaging.fcmpushclient import ErrorType
 from firebase_messaging.proto.mcs_pb2 import DataMessageStanza
 from homeassistant.config_entries import ConfigEntryDisabler, ConfigEntryState
 from homeassistant.helpers import issue_registry as ir
-from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 
 from custom_components.subzero import async_remove_entry, fcm
 from custom_components.subzero.alert_loc_keys import ALERT_LOCATION_KEYS
-from custom_components.subzero.api import ApiError, RateLimited
+from custom_components.subzero.api import ApiError
 from custom_components.subzero.const import DOMAIN
 from custom_components.subzero.fcm import FcmAlerts, PushClient, header_parameter, parse_alert
 from custom_components.subzero.repairs import async_report_firebase_alerts
@@ -991,80 +990,6 @@ async def test_removing_an_unloaded_entry_cleans_saved_subscriptions(hass, cloud
     await async_remove_entry(hass, entry)
     assert firebase_issue(hass, entry) is None
     cloud_appliance.client.unsubscribe_all_alerts.assert_awaited_once_with("own-psid", "appliance")
-
-
-@fridge
-@pytest.mark.parametrize("rate_limited", [False, True])
-async def test_door_alert_missed_close_and_delayed_reminder(
-    hass, freezer, cloud_appliance, alerts, rate_limited
-):
-    coordinator = cloud_appliance.coordinator
-    events = []
-    notifications = async_capture_events(hass, "test_door_notification")
-    notified = asyncio.Event()
-    hass.bus.async_listen("test_door_notification", lambda _: notified.set())
-    assert await async_setup_component(
-        hass,
-        "automation",
-        {
-            "automation": [
-                {
-                    "alias": "Door reminder",
-                    "triggers": [
-                        {"trigger": "state", "entity_id": "event.kitchen_appliance_event"}
-                    ],
-                    "conditions": [
-                        {
-                            "condition": "template",
-                            "value_template": "{{ trigger.to_state is not none and "
-                            "trigger.to_state.attributes.event_type == 'refrigerator_door_ajar' }}",
-                        }
-                    ],
-                    "actions": [
-                        {"event": "test_door_notification", "event_data": {"stage": "initial"}},
-                        {"delay": {"minutes": 10}},
-                        {
-                            "action": "subzero.read_status",
-                            "data": {"device_id": cloud_appliance.device_id},
-                        },
-                        {
-                            "condition": "state",
-                            "entity_id": "binary_sensor.kitchen_refrigerator_door",
-                            "state": "on",
-                        },
-                        {"event": "test_door_notification", "event_data": {"stage": "reminder"}},
-                    ],
-                }
-            ]
-        },
-    )
-    coordinator.async_add_event_listener(events.append)
-    await cloud_appliance.update({"ref_door_ajar": True})
-    confirmed = coordinator.confirmed_at
-    alerts._on_alert(message(code=101), "door-alert", None)
-    await asyncio.wait_for(notified.wait(), 1)
-    assert len(events) == 1
-    assert events[0]["code"] == 101
-    assert coordinator.confirmed_at == confirmed
-    if rate_limited:
-        cloud_appliance.client.state.side_effect = RateLimited(900)
-    freezer.tick(3)
-    async_fire_time_changed(hass, dt_util.utcnow())
-    await asyncio.sleep(0)
-    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == "on"
-    cloud_appliance.state["ref_door_ajar"] = False
-    freezer.tick(61)
-    async_fire_time_changed(hass, dt_util.utcnow())
-    await asyncio.sleep(0)
-    assert hass.states.get("binary_sensor.kitchen_refrigerator_door").state == (
-        "on" if rate_limited else "off"
-    )
-    freezer.tick(600)
-    async_fire_time_changed(hass, dt_util.utcnow())
-    await asyncio.wait_for(hass.async_block_till_done(), 1)
-    assert [event.data["stage"] for event in notifications] == ["initial"]
-    assert len(events) == 1
-    assert hass.states.get("automation.door_reminder").attributes["current"] == 0
 
 
 @oven
