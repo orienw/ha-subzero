@@ -511,15 +511,15 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
         self.async_schedule_followup(alert=True)
 
     @property
-    def device_info(self) -> DeviceInfo:
-        info = DeviceInfo(identifiers={(DOMAIN, self.device_id)}, name=self.device["name"])
+    def device_fields(self) -> dict:
+        fields = {"identifiers": {(DOMAIN, self.device_id)}, "name": self.device["name"]}
         if not self.data.get("appliance_model"):
             # Until the appliance reports, keep the details the registry saved from
             # its last status rather than clearing them.
-            return info
+            return fields
         version = self.data.get("version")
         serial = self.data.get("appliance_serial")
-        info.update(
+        fields.update(
             {
                 "manufacturer": (
                     "Cove"
@@ -533,7 +533,11 @@ class SubZeroCoordinator(DataUpdateCoordinator[dict]):
                 "sw_version": version.get("fw") if isinstance(version, dict) else None,
             }
         )
-        return info
+        return fields
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return DeviceInfo(**self.device_fields)
 
     @asynccontextmanager
     async def _command(self, action: str = "change settings") -> AsyncIterator[None]:

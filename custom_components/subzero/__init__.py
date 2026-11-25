@@ -65,7 +65,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: SubZeroConfigEntry) -> b
     def update_device(coordinator: SubZeroCoordinator) -> None:
         registry.async_get_or_create(
             config_entry_id=entry.entry_id,
-            **coordinator.device_info,
+            **coordinator.device_fields,
         )
 
     for coordinator in account.coordinators.values():

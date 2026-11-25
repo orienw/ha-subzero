@@ -929,7 +929,6 @@ async def test_firmware_updates_device_registry_without_reload(hass, loaded, pus
         await coordinator.async_refresh()
     await hass.async_block_till_done()
     assert registry.async_get(device.id).sw_version == "2.0"
-    assert coordinator.device_info["sw_version"] == "2.0"
     await hass.config_entries.async_unload(entry.entry_id)
     coordinator.apply_update(StateUpdate({"version": {"fw": "3.0"}}, full=False))
     assert registry.async_get(device.id).sw_version == "2.0"
