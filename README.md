@@ -1,8 +1,10 @@
+<!-- ha-marketplace:exclude-start -->
 # Sub-Zero for Home Assistant
 
 <img src="custom_components/subzero/brand/icon.png" alt="Sub-Zero integration icon" width="72">
 
 [![Latest stable release](https://img.shields.io/github/v/release/orienw/ha-subzero?sort=date&style=for-the-badge&label=stable&color=blue)](https://github.com/orienw/ha-subzero/releases/latest)
+<!-- ha-marketplace:exclude-end -->
 
 Monitor and control Wi-Fi-connected **Sub-Zero**, **Wolf**, and **Cove** appliances in Home Assistant.
 
@@ -12,7 +14,7 @@ This is an unofficial cloud integration and is not affiliated with Sub-Zero Grou
 
 Entities are created automatically from what each appliance reports, and new entities appear if additional properties are reported later. Installing, restarting, or reconnecting the integration never changes appliance settings on its own.
 
-<table>
+<table role="presentation">
   <tr>
     <td valign="top"><img src="docs/images/refrigerator-controls.png" alt="Sub-Zero refrigerator controls in Home Assistant" width="370"></td>
     <td valign="top"><img src="docs/images/refrigerator-sensors.png" alt="Sub-Zero refrigerator sensors, doors, and filters in Home Assistant" width="370"></td>
@@ -34,24 +36,29 @@ Temperatures are shown and controlled in your preferred Home Assistant unit. Bec
 
 **Appliances that will not appear:** Models that [cannot connect to Sub-Zero's cloud](https://www.subzero-wolf.com/assistance/answers/multi-brand/sub-zero-group-owners-app-cannot-find-appliance) (including Wolf convection steam ovens, speed ovens, microwaves, and cooktops) cannot be added to Home Assistant.
 
-## Installation
+## Setup
 
 ### Requirements
 
 - Home Assistant **2026.8.0 or newer**
 - A **Sub-Zero Group Owner account** (available in [Canada, Mexico, and the United States](https://www.subzero-wolf.com/assistance/answers/multi-brand/sub-zero-group-owner-s-app-location-availability)) with your appliances already connected to Wi-Fi
 
-### Setup steps
+<!-- ha-marketplace:exclude-start -->
+### Install
 
 [![Open this repository in the Marketplace or HACS](https://my.home-assistant.io/badges/marketplace_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=orienw&repository=ha-subzero&category=integration)
 
-1. On Home Assistant 2026.11 or newer, open **Settings → Marketplace**. On earlier versions, open **HACS**. Search for **Sub-Zero** and download it.
-2. Go to **Settings → Devices & services → Add integration → Sub-Zero**.
-3. Sign in with your Sub-Zero account email and password, then select the appliances you want to add.
+On Home Assistant 2026.11 or newer, open **Settings → Marketplace**, search for **Sub-Zero**, and install it. On earlier versions, open **HACS**, search for **Sub-Zero**, and download it.
+
+**Manual installation:** Copy `custom_components/subzero` into your Home Assistant `custom_components` folder and restart Home Assistant.
+<!-- ha-marketplace:exclude-end -->
+
+### Add the integration
+
+1. Once installed (and after restarting Home Assistant if prompted), go to **Settings → Devices & services → Add integration → Sub-Zero**.
+2. Sign in with your Sub-Zero account email and password, then select the appliances you want to add.
 
 **Sign-in and security:** Your password is used only to sign in and is never saved. Home Assistant stores renewable account tokens, so protect any backups that contain them. If multi-factor authentication is enabled on your account, setup supports text-message codes, phone calls, and image character prompts; external sign-in providers and other verification methods are not supported.
-
-**Manual installation:** Copy `custom_components/subzero` into your Home Assistant `custom_components` folder, restart Home Assistant, and continue from step 2.
 
 ## Configuration
 
@@ -106,8 +113,8 @@ The action waits for a fresh status read and for the updated state to reach Home
 ### Common issues
 
 - **An appliance is unavailable or its state looks stale:** While live updates are not established, readings stay available for up to two minutes and turn unavailable if neither a status read nor a full live update refreshes state in time. While Home Assistant polling is enabled, automatic one-minute checks keep reachable appliances available as long as status reads succeed, though values can be up to a minute old and brief changes between checks will not be seen. Run **Sub-Zero: Read appliance status** to request fresh state, verify the appliance is online in the Sub-Zero Group Owner's App, and consider enabling a **State check interval** in **Configure** if updates are frequently missed. You can also enable the disabled **State confirmed** diagnostic sensor to see when state was last confirmed.
-- **A control is unavailable or refuses changes:** Check the appliance interlocks in [Using the controls](#using-the-controls), such as **Remote Ready** on ovens and dishwashers, **Max ice** on freezers, and **Manual** crisper temperature mode. While live updates are not established for an appliance, controls also read status first and refuse changes if that read fails.
-- **An appliance is missing:** Confirm the model is cloud-connected (see [What it supports](#what-it-supports)), and open **Configure** to make sure it is checked.
+- **A control is unavailable or refuses changes:** Check the appliance interlocks under "Using the controls" above, such as **Remote Ready** on ovens and dishwashers, **Max ice** on freezers, and **Manual** crisper temperature mode. While live updates are not established for an appliance, controls also read status first and refuse changes if that read fails.
+- **An appliance is missing:** Confirm the model is cloud-connected (see "What it supports" above), and open **Configure** to make sure it is checked.
 - **Repair says "Firebase appliance alerts aren't working":** This appears after three consecutive failures. Firebase alerts use a separate channel from regular appliance updates, and the repair clears automatically once alerts succeed again. To stop trying, turn off **Firebase appliance alerts** in **Configure**.
 - **Home Assistant asks you to sign in again:** Your renewable account tokens expired or were rejected. Follow Home Assistant's re-authentication prompt to sign in again.
 
@@ -123,9 +130,12 @@ Diagnostics omit account credentials, appliance names, serial numbers, and netwo
 
 [Open an issue](https://github.com/orienw/ha-subzero/issues) with your Home Assistant version, integration version, appliance model, steps to reproduce, diagnostics, and relevant logs. Mention whether **Read appliance status** corrected the state and whether the same action works in the Sub-Zero app.
 
-## Further reading and development
+## Further reading
 
 The [technical reference](docs/reference.md) documents detailed appliance behavior, all event types, diagnostics, state recovery, and command confirmation. Because this integration relies on Sub-Zero's cloud service, cloud changes can affect functionality.
+<!-- ha-marketplace:exclude-start -->
+
+### Development
 
 To run the test suite and linter locally (Python 3.14):
 
@@ -136,3 +146,4 @@ python -m venv .venv
 .venv/bin/ruff check .
 .venv/bin/ruff format --check .
 ```
+<!-- ha-marketplace:exclude-end -->
