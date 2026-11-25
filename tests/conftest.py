@@ -38,12 +38,20 @@ def tokens():
 
 @pytest.fixture(autouse=True)
 def no_swallowed_errors(request, caplog):
-    """Fail a test in which the integration logged an exception or added an entity twice.
+    """Fail a test in which the integration logged an exception, added an entity twice,
+    or used Home Assistant in a way that it reports as deprecated.
 
-    Both are logged and survived, so a test's own assertions can pass over them. A
-    test that causes one on purpose is marked `logs_errors`.
+    All are logged and survived, so a test's own assertions can pass over them. A
+    test that logs an exception on purpose is marked `logs_errors`.
     """
     yield
+    reported = [
+        record
+        for when in ("setup", "call", "teardown")
+        for record in caplog.get_records(when)
+        if record.name == "homeassistant.helpers.frame" and "'subzero'" in record.getMessage()
+    ]
+    assert not reported, reported[0].getMessage()
     if request.node.get_closest_marker("logs_errors"):
         return
     swallowed = [
