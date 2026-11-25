@@ -129,13 +129,17 @@ class SubZeroConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 original_id = original.data["tokens"].get("user_id") or original.unique_id
                 if original_id is None or user_id != original_id.lower():
                     return self.async_abort(reason="wrong_account")
-                return self.async_update_reload_and_abort(
+                result = self.async_update_and_abort(
                     original,
                     data_updates={
                         "tokens": client.tokens,
                         "username": self._title,
                     },
                 )
+                # async_update_reload_and_abort warns when an entry has an update listener,
+                # and the listener here does not reload when tokens are saved.
+                self.hass.config_entries.async_schedule_reload(original.entry_id)
+                return result
             await self.async_set_unique_id(user_id)
             if any(
                 (entry.data["tokens"].get("user_id") or entry.unique_id or "").lower() == user_id

@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import aiohttp
 import pytest
+from homeassistant.config_entries import ConfigEntryState
 from homeassistant.data_entry_flow import FlowResultType, InvalidData, UnknownFlow
 
 from custom_components.subzero.api import ApiError, Appliance, RateLimited, token_state
@@ -735,6 +736,21 @@ async def test_reauth_keeps_the_appliance_selection(hass, tokens, wrong_account,
     assert entry.options["devices"] == {"test-oven": DEVICES["test-oven"]}
     if not wrong_account:
         assert entry.data["username"] == CREDENTIALS["username"]
+
+
+async def test_reauth_reloads_a_loaded_entry_once(hass, loaded):
+    entry, _, _, _, factory = loaded
+    renewed = make_tokens(refresh_token="renewed")
+    with patch("custom_components.subzero.config_flow.SubZeroLogin.login", return_value=renewed):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": "reauth", "entry_id": entry.entry_id}, data=entry.data
+        )
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], CREDENTIALS)
+        await hass.async_block_till_done()
+    assert result["reason"] == "reauth_successful"
+    assert entry.state is ConfigEntryState.LOADED
+    assert factory.call_count == 2
+    assert factory.call_args.args[2] == token_state(renewed)
 
 
 async def test_reauth_without_saved_account_identity_is_rejected(hass, tokens):
